@@ -1,3 +1,4 @@
+import { SyncState } from "./sync-status.js";
 import { useEffect, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { useRpc, type PluginTimelineItemProps } from "@getpaseo/plugin/client";
@@ -17,6 +18,7 @@ export function ThreadSummary({ item, theme }: PluginTimelineItemProps<z.infer<t
     return () => { active = false; };
   }, [open, connectionKey, issueId, rootId, attempt]);
   return <View style={{ gap: 6 }}>
+    <SyncState theme={theme} />
     <Text style={{ color: theme.colors.foregroundMuted }}>{message}</Text>
     <Pressable accessibilityRole="button" onPress={() => setAttempt(value => value + 1)}><Text style={{ color: theme.colors.foreground }}>重新读取历史</Text></Pressable>
   </View>;

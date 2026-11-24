@@ -1,3 +1,4 @@
+import { nativeOriginals, hasNativeOriginal } from "./projection-recovery.js";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { ProviderTimelineItem } from "@getpaseo/plugin/server/provider";
@@ -68,14 +69,34 @@ export function projectRow(address: Address, row: StoredRow): ProviderTimelineIt
 }
 
 export class ThreadSynchronizer {
-  private readonly listeners = new Map<string, Set<(row: StoredRow) => void>>();
+  private readonly listeners = new Map<string, Set<{ deliver(row: StoredRow, includeOriginal?: boolean): void; recovery: boolean }>>();
+  private readonly opened = new Set<string>();
   private readonly pending = new Map<string, Promise<void>>();
   constructor(private readonly store: StateStore, private readonly connection: () => Promise<AuthenticatedConnection>) {}
-  subscribe(address: Address, listener: (row: StoredRow) => void) {
+  subscribe(address: Address, deliver: (row: StoredRow, includeOriginal?: boolean) => void, recovery = false) {
+    const listener = { deliver, recovery };
     const id = key(address);
     const listeners = this.listeners.get(id) ?? new Set();
     listeners.add(listener); this.listeners.set(id, listeners);
     return () => { listeners.delete(listener); if (!listeners.size) this.listeners.delete(id); };
+  }
+  async reconcile(host: NativeHost) {
+    for (const [id, listeners] of this.listeners) {
+      const recovering = [...listeners].filter(listener => listener.recovery);
+      if (!recovering.length) continue;
+      const [connectionKey, issueId, rootId] = JSON.parse(id) as string[];
+      const issue = (await this.store.read()).connections[connectionKey]?.issues[issueId];
+      const history = issue && projectionHistory(issue, rootId);
+      const agentId = rootId === "main" ? issue?.mainAgentId : history?.agentId;
+      if (!history || !agentId) continue;
+      const entries = history.rows.some(row => row.role !== "event") ? await nativeOriginals(host, agentId) : [];
+      // Validate every original before publishing any missing row.
+      const rows = history.rows.map(row => ({ row, includeOriginal: row.role === "event" || !hasNativeOriginal(entries, row) }));
+      for (const listener of recovering) {
+        for (const { row, includeOriginal } of rows) listener.deliver(row, includeOriginal);
+        listener.recovery = false;
+      }
+    }
   }
   private async pages(connection: AuthenticatedConnection, workspace: RemoteWorkspace, issueId: string, mode: Record<string, string>) {
     const comments = new Map<string, Comment>();
@@ -133,7 +154,7 @@ export class ThreadSynchronizer {
           }
         }
       });
-      for (const { address, row } of deletions) for (const listener of this.listeners.get(key(address)) ?? []) listener(row);
+      for (const { address, row } of deletions) for (const listener of this.listeners.get(key(address)) ?? []) listener.deliver(row);
     }
     for (const root of [...comments.values()].filter(comment => !comment.parent_id && comment.type === "comment" && comment.author_type !== "system")) {
       await this.store.update(state => {
@@ -159,9 +180,10 @@ export class ThreadSynchronizer {
         await this.store.update(state => { state.connections[connection.connectionKey].issues[issueId].threads[root.id].agentId = agentId; });
       }
       await host.updateAgent(agentId, { name: mapping.title });
-      if (mapping.historyLoaded) await this.refresh(connection, workspace, { connectionKey: connection.connectionKey, issueId, rootId: root.id });
+      const address = { connectionKey: connection.connectionKey, issueId, rootId: root.id };
+      if (mapping.historyLoaded && this.opened.has(key(address))) await this.refresh(connection, workspace, address);
     }
-    if ((await this.store.read()).connections[connection.connectionKey].issues[issueId].mainHistory.historyLoaded) {
+    if (this.opened.has(key({ connectionKey: connection.connectionKey, issueId, rootId: "main" })) && (await this.store.read()).connections[connection.connectionKey].issues[issueId].mainHistory.historyLoaded) {
       await this.refresh(connection, workspace, { connectionKey: connection.connectionKey, issueId, rootId: "main" });
     }
   }
@@ -169,6 +191,7 @@ export class ThreadSynchronizer {
     const issue = (await this.store.read()).connections[address.connectionKey]?.issues[address.issueId];
     const thread = issue ? projectionHistory(issue, address.rootId) : undefined;
     if (!thread) return { status: "unavailable", message: "此 Thread 尚未映射。" };
+    this.opened.add(key(address));
     try {
       const connection = await this.connection();
       if (connection.connectionKey !== address.connectionKey) throw new Error("Connection identity changed");
@@ -239,10 +262,10 @@ export class ThreadSynchronizer {
         }
         thread.historyLoaded = true;
       });
-      for (const row of newRows) for (const listener of this.listeners.get(id) ?? []) listener(row);
+      for (const row of newRows) for (const listener of this.listeners.get(id) ?? []) listener.deliver(row);
     });
     this.pending.set(id, operation);
     return operation.finally(() => { if (this.pending.get(id) === operation) this.pending.delete(id); });
   }
-  async close() { this.listeners.clear(); await Promise.allSettled(this.pending.values()); }
+  async close() { this.opened.clear(); this.listeners.clear(); await Promise.allSettled(this.pending.values()); }
 }

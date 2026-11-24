@@ -110,6 +110,8 @@ async function fixture(initialRuns: Run[] = []) {
   const native = { agents: [] as Array<{ id: string; workspaceId: string; cwd: string; labels: Record<string, string>; handle: string; name?: string; archivedAt?: string }> };
   const timelines = new Map<string, ProviderTimelineItem[]>();
   const providerEvents: ProviderEvent[] = [];
+  const droppedOriginals = new Set<string>();
+  const nativeHistory = { failOlder: false };
   let server: FakeServer;
   let provider: ProviderConnection | undefined;
   async function connect() {
@@ -118,10 +120,11 @@ async function fixture(initialRuns: Run[] = []) {
     provider.onEvent(event => {
       providerEvents.push(event);
       if (event.type !== "timeline.item") return;
+      if ((event.item.type === "user_message" || event.item.type === "assistant_message") && droppedOriginals.has(event.item.messageId ?? "")) return;
       const rows = timelines.get(event.sessionId) ?? [];
       const existing = rows.findIndex(row => row.id === event.item.id);
       if (existing >= 0) {
-        if (event.item.type !== "plugin" || event.item.kind !== "run-summary") throw new Error(`Duplicate native row ${event.item.id}`);
+        if (event.item.type !== "plugin") throw new Error(`Duplicate native row ${event.item.id}`);
         rows[existing] = event.item;
       } else rows.push(event.item); timelines.set(event.sessionId, rows);
     });
@@ -142,8 +145,21 @@ async function fixture(initialRuns: Run[] = []) {
       return agent;
     },
     updateAgent: async (id: string, updates: { name: string }) => { native.agents.find(agent => agent.id === id)!.name = updates.name; },
+    fetchAgentTimeline: async (agentId: string, options?: { cursor?: { seq: number }; direction?: string }) => {
+      const all = (timelines.get(agentId) ?? []).map((item, index) => ({ seqStart: index + 1, seqEnd: index + 1, item, timestamp: stamp }));
+      const available = options?.direction === "before" ? all.filter(entry => entry.seqStart < options.cursor!.seq) : all;
+      const entries = available.slice(-2);
+      return { agentId, projection: "projected", epoch: "fixture-epoch", error: nativeHistory.failOlder && options?.direction === "before" ? "disconnected older page" : null, reset: false, staleCursor: false, gap: false,
+        entries, hasOlder: available.length > entries.length, hasNewer: false,
+        startCursor: entries[0] ? { epoch: "fixture-epoch", seq: entries[0].seqStart } : null };
+    },
     close: async () => {},
   } as unknown as DaemonClient;
+  const reconnect = async () => {
+    await provider?.close(); provider = undefined;
+    const connection = await connect();
+    for (const agent of native.agents) await connection.send({ type: "session.open", requestId: `restart-${agent.id}`, sessionId: agent.id, history: "skip", persistence: JSON.parse(agent.handle.slice(7)), config: { cwd: agent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
+  };
   const start = () => {
     server = new FakeServer();
     const dispose = createServerContribution({ homeDirectory: home, workingDirectory: home, environment: { PASEO_HOME: home }, connectHost: async () => host })(server.context);
@@ -154,7 +170,7 @@ async function fixture(initialRuns: Run[] = []) {
   cleanup.push(async () => { await provider?.close(); });
   const paseo = { hosts: { list: async () => ({ self: { serverId: "owning-daemon" } }) } } as unknown as PaseoApi;
   await server!.rpc(workspaceEnable, { workspaceId: "remote-workspace", enabled: true }, paseo);
-  return { ...started, native, timelines, comments, requests, paseo, home, start, connect, eventsReady, signal, runs, messages, providerEvents, failMessages: (value: boolean) => { failMessages = value; }, identity: (value: string) => { identity = value; }, failRuns: (value: boolean) => { failRuns = value; }, failDiscovery: (value: boolean) => { failDiscovery = value; }, discoveryPages: (pages: Comment[][]) => { discoveryPages = pages; }, truncated: (value: boolean) => { truncated = value; }, paginate: () => { paginate = true; }, failHistory: (value: boolean) => { failHistory = value; } };
+  return { ...started, native, timelines, droppedOriginals, nativeHistory, reconnect, comments, requests, paseo, home, start, connect, eventsReady, signal, runs, messages, providerEvents, failMessages: (value: boolean) => { failMessages = value; }, identity: (value: string) => { identity = value; }, failRuns: (value: boolean) => { failRuns = value; }, failDiscovery: (value: boolean) => { failDiscovery = value; }, discoveryPages: (pages: Comment[][]) => { discoveryPages = pages; }, truncated: (value: boolean) => { truncated = value; }, paginate: () => { paginate = true; }, failHistory: (value: boolean) => { failHistory = value; } };
 }
 
 it("discovers one stable native tab for a root and recursive replies without loading full background history", async () => {
@@ -643,4 +659,66 @@ it("catches real task-message invalidations through incremental reads without du
   expect(f.timelines.get(f.native.agents[1].id)?.filter(row => row.type === "assistant_message").map(row => row.text)).toEqual(["River: \n\nChild", "Lin Agent: \n\nGrandchild", "Lin Agent: \n\nFinal comment"]);
   expect(f.timelines.get(f.native.agents[0].id)?.some(row => row.id === "multica:run:stream")).toBe(false);
   expect(f.requests.some(request => request.url.includes("/tasks/other/messages"))).toBe(false);
+});
+
+
+it("reconciles a cached original missing after process loss against complete native source IDs without trusting its surviving source marker", async () => {
+  const f = await fixture();
+  const thread = f.native.agents[1];
+  const address = JSON.parse(thread.handle.slice(7)).data;
+  f.droppedOriginals.add("root");
+  await f.server.rpc(threadOpen, address, f.paseo);
+  expect(f.timelines.get(thread.id)?.some(row => row.type === "user_message" && row.messageId === "root")).toBe(false);
+  expect(f.timelines.get(thread.id)?.some(row => row.type === "plugin" && row.id === "multica:comment-source:root")).toBe(true);
+  await f.dispose();
+  const restarted = f.start();
+  f.droppedOriginals.clear();
+  await f.reconnect();
+  // Recover cached originals even while remote reads fail. No history replay.
+  f.failDiscovery(true);
+  await restarted.server.rpc(syncBootstrap, {}, f.paseo);
+  expect(f.timelines.get(thread.id)?.filter(row => row.type === "user_message" && row.messageId === "root")).toHaveLength(1);
+  await Promise.all([restarted.server.rpc(syncBootstrap, {}, f.paseo), restarted.server.rpc(syncBootstrap, {}, f.paseo)]);
+  expect(f.timelines.get(thread.id)?.filter(row => row.type === "assistant_message")).toHaveLength(2);
+  expect(f.native.agents).toHaveLength(2);
+});
+
+it("restores cached discussions and out-of-order run gaps without fetching every previously read body after restart", async () => {
+  const f = await fixture([{ id: "recovery-run", issue_id: "issue", agent_id: "owned-agent", status: "running", trigger_comment_id: "root" }]);
+  const thread = f.native.agents[1];
+  const address = JSON.parse(thread.handle.slice(7)).data;
+  const runAddress = { ...address, runId: "recovery-run" };
+  await f.server.rpc(threadOpen, address, f.paseo);
+  const identity = { task_id: "recovery-run", issue_id: "issue" };
+  f.messages.push({ ...identity, seq: 3, type: "text", content: "Third arrived first" }, { ...identity, seq: 1, type: "text", content: "First" });
+  await f.server.rpc(runOpen, runAddress, f.paseo);
+  await f.dispose();
+  const bodies = f.requests.filter(request => request.url.includes("thread=") || request.url.includes("/messages")).length;
+  const restarted = f.start();
+  await f.reconnect();
+  await restarted.server.rpc(syncBootstrap, {}, f.paseo);
+  expect(f.requests.filter(request => request.url.includes("thread=") || request.url.includes("/messages"))).toHaveLength(bodies);
+  f.messages.push({ ...identity, seq: 2, type: "thinking", content: "Delayed across restart" });
+  const opened = await restarted.server.rpc(runOpen, runAddress, f.paseo);
+  expect(f.requests.filter(request => request.url.includes("/messages")).at(-1)?.url).toBe("/api/tasks/recovery-run/messages?since=1");
+  expect(JSON.parse((await restarted.server.rpc(runRead, { ...runAddress, revision: opened.revision!, offset: 0 }, f.paseo)).text).map((message: RunMessage) => message.seq)).toEqual([1, 2, 3]);
+  expect(f.native.agents).toHaveLength(2);
+});
+
+
+it("never treats a failed older native page as proof that cached originals are missing", async () => {
+  const f = await fixture();
+  const thread = f.native.agents[1];
+  const address = JSON.parse(thread.handle.slice(7)).data;
+  await f.server.rpc(threadOpen, address, f.paseo);
+  await f.dispose();
+  const restarted = f.start();
+  await f.reconnect();
+  f.nativeHistory.failOlder = true;
+  const before = f.timelines.get(thread.id)?.filter(row => row.type !== "plugin");
+  expect(await restarted.server.rpc(syncBootstrap, {}, f.paseo)).toMatchObject({ status: "unavailable" });
+  expect(f.timelines.get(thread.id)?.filter(row => row.type !== "plugin")).toEqual(before);
+  f.nativeHistory.failOlder = false;
+  expect(await restarted.server.rpc(syncBootstrap, {}, f.paseo)).toMatchObject({ status: "ready" });
+  expect(f.timelines.get(thread.id)?.filter(row => row.type !== "plugin")).toEqual(before);
 });
