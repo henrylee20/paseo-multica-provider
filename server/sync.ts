@@ -3,6 +3,9 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { PaseoApi } from "@getpaseo/client";
 import { z } from "zod";
+import { taskRuleSchema, type TaskRule } from "../shared/contracts.js";
+import { issueQuery } from "./filters.js";
+import { WorkspaceEvents, type WorkspaceEvent } from "./workspace-events.js";
 import type { AuthenticatedConnection } from "./connection.js";
 import type { NativeHost } from "./native-host.js";
 import { StateStore, connectionState } from "./state.js";
@@ -37,9 +40,30 @@ export class SidebarSynchronizer {
   private expectedServerId?: string;
   private timer?: ReturnType<typeof setInterval>;
   private closed = false;
+  private eventTimer?: ReturnType<typeof setTimeout>;
+  private eventSyncPending = false;
+  private eventDirty = false;
+  private readonly events = new WorkspaceEvents(event => {
+    this.options.onRemoteEvent?.(event);
+    this.eventDirty = true;
+    this.scheduleInvalidation();
+  });
+  private scheduleInvalidation() {
+    if (this.closed || this.eventTimer || this.eventSyncPending) return;
+    this.eventTimer = setTimeout(() => {
+      this.eventTimer = undefined;
+      this.eventDirty = false;
+      this.eventSyncPending = true;
+      void this.serialize(() => this.sync()).catch(() => {}).finally(() => {
+        this.eventSyncPending = false;
+        if (this.eventDirty) this.scheduleInvalidation();
+      });
+    }, 20);
+    this.eventTimer.unref?.();
+  }
   constructor(private readonly options: {
     store: StateStore; connection: () => Promise<AuthenticatedConnection>;
-    connectHost: () => Promise<NativeHost>; intervalMs: number;
+    connectHost: () => Promise<NativeHost>; intervalMs: number; onRemoteEvent?: (event: WorkspaceEvent) => void;
     onIssue?: (connection: AuthenticatedConnection, workspace: RemoteWorkspace, issueId: string, host: NativeHost) => Promise<void>;
   }) {}
 
@@ -65,10 +89,46 @@ export class SidebarSynchronizer {
       if (!workspace) throw new Error("Multica workspace unavailable");
       await this.options.store.update(state => {
         const rules = connectionState(state, connection.connectionKey).rules;
-        rules[workspaceId] = { enabled, statusCategories: [...defaultStatusCategories] };
+        rules[workspaceId] = { ...taskRuleSchema.parse(rules[workspaceId] ?? {}), enabled };
       });
     }).then(() => this.bootstrap(paseo));
   }
+  rule(paseo: PaseoApi, workspaceId: string, rule: TaskRule): Promise<void> {
+    return this.serialize(async () => {
+      const connection = await this.options.connection();
+      if (!(await this.workspaces(connection)).some(item => item.id === workspaceId)) throw new Error("Multica workspace unavailable");
+      await this.options.store.update(state => {
+        const rules = connectionState(state, connection.connectionKey).rules;
+        rules[workspaceId] = { ...rule, enabled: rules[workspaceId]?.enabled ?? false };
+      });
+    }).then(() => this.bootstrap(paseo));
+  }
+  private async archive(connectionKey: string, issueId: string, reason: "rule_disabled" | "filter_exit") {
+    const issue = (await this.options.store.read()).connections[connectionKey].issues[issueId];
+    if (!issue.workspaceCreated || (issue.archiveReason && !issue.archivePending)) return;
+    if (!issue.archiveReason) {
+      const restoreAgents: string[] = [];
+      let cursor: string | undefined;
+      do {
+        const page = await this.host!.fetchAgents({ filter: { labels: { "multica.connection": connectionKey, "multica.issue": issueId }, includeArchived: true }, page: { limit: 100, cursor } });
+        restoreAgents.push(...page.entries.filter(item => item.agent.workspaceId === issue.workspaceId && !item.agent.archivedAt).map(item => item.agent.id));
+        if (!page.pageInfo.hasMore) break;
+        if (!page.pageInfo.nextCursor || page.pageInfo.nextCursor === cursor) throw new Error("Incomplete native agent pagination");
+        cursor = page.pageInfo.nextCursor;
+      } while (true);
+      // Keep the pre-archive active set across response loss and restart.
+      await this.options.store.update(state => {
+        const mapping = state.connections[connectionKey].issues[issueId];
+        mapping.archiveReason = reason;
+        mapping.archivePending = true;
+        mapping.ruleArchivedAgentIds = restoreAgents;
+      });
+    }
+    const result = await this.host!.archiveWorkspace(issue.workspaceId);
+    if (result.error) throw new Error("Native workspace archive failed");
+    await this.options.store.update(state => { state.connections[connectionKey].issues[issueId].archivePending = false; });
+  }
+
   private serialize(operation: () => Promise<void>) {
     const result = this.pending.then(async () => { if (this.closed) return; await operation(); });
     this.pending = result.catch(() => {});
@@ -80,41 +140,31 @@ export class SidebarSynchronizer {
     const local = state.connections[connection.connectionKey];
     const enabled = Object.entries(local?.rules ?? {}).filter(([, rule]) => rule.enabled);
     const disabledIssues = Object.entries(local?.issues ?? {}).filter(([, issue]) =>
-      local?.rules[issue.remoteWorkspaceId]?.enabled === false && !issue.archiveReason);
-    if (!enabled.length && !disabledIssues.length) return;
+      local?.rules[issue.remoteWorkspaceId]?.enabled === false && (!issue.archiveReason || issue.archivePending));
+    if (!enabled.length && !disabledIssues.length) { this.events.reconcile(connection, []); return; }
     const workspaces = enabled.length ? await this.workspaces(connection) : [];
+    this.events.reconcile(connection, workspaces.filter(workspace => local?.rules[workspace.id]?.enabled));
     if (!this.host) this.host = await this.options.connectHost();
     if ((await this.host.listHosts()).self.serverId !== this.expectedServerId) throw new Error("Native host is not the owning daemon");
-    for (const [issueId, issue] of disabledIssues) {
-      const main = issue.mainAgentId ? await this.host.fetchAgent(issue.mainAgentId) : null;
-      const restoreAgents = main?.agent && !main.agent.archivedAt ? [main.agent.id] : [];
-      // Record automatic lifecycle intent before the host emits archive/close events.
-      await this.options.store.update(state => {
-        const mapping = state.connections[connection.connectionKey].issues[issueId];
-        mapping.archiveReason = "rule_disabled";
-        mapping.ruleArchivedAgentIds = restoreAgents;
-      });
-      try {
-        const result = await this.host.archiveWorkspace(issue.workspaceId);
-        if (result.error) throw new Error("Native workspace archive failed");
-      } catch (error) {
-        await this.options.store.update(state => { delete state.connections[connection.connectionKey].issues[issueId].archiveReason; });
-        throw error;
-      }
-    }
+    for (const [issueId] of disabledIssues) await this.archive(connection.connectionKey, issueId, "rule_disabled");
     for (const [workspaceId, rule] of enabled) {
       const workspace = workspaces.find(item => item.id === workspaceId);
       if (!workspace) continue;
       const issues: z.infer<typeof issueSchema>[] = [];
       let offset = 0;
       for (;;) {
-        const query = new URLSearchParams({ limit: "100", offset: String(offset), status_categories: rule.statusCategories.join(",") });
+        const query = issueQuery(rule, offset);
         const page = await remoteJson(connection, `/api/issues?${query}`, pageSchema, workspace) as z.infer<typeof pageSchema>;
         if (page.issues.some(issue => issue.workspace_id !== workspaceId)) throw new Error("Issue belongs to a different workspace");
         issues.push(...page.issues);
         offset += page.issues.length;
         if (offset >= page.total) break;
         if (!page.issues.length) throw new Error("Incomplete issue pagination");
+      }
+      // Only the complete successful snapshot is authoritative for rule exits.
+      const matchingIds = new Set(issues.map(issue => issue.id));
+      for (const [issueId, mapping] of Object.entries(local?.issues ?? {})) {
+        if (mapping.remoteWorkspaceId === workspaceId && !matchingIds.has(issueId)) await this.archive(connection.connectionKey, issueId, "filter_exit");
       }
       // AgentStorage flattens the entire cwd into one filename component.
       // Keep existing mappings bound to their original directories and history.
@@ -138,11 +188,10 @@ export class SidebarSynchronizer {
             workspaceCreated: local.issues[issue.id]?.workspaceCreated ?? false,
             threads: local.issues[issue.id]?.threads ?? {}, commentRoots: local.issues[issue.id]?.commentRoots ?? {}, unresolvedCommentIds: local.issues[issue.id]?.unresolvedCommentIds ?? [],
             systemRootIds: local.issues[issue.id]?.systemRootIds ?? [], mainHistory: local.issues[issue.id]?.mainHistory ?? { title: "主讨论", historyLoaded: false, rows: [], observed: {} },
-            ruleArchivedAgentIds: local.issues[issue.id]?.ruleArchivedAgentIds ?? [], cwd, title, description: issue.description ?? "", updatedAt: issue.updated_at };
-          local.issues[issue.id].threads ??= {};
+            ruleArchivedAgentIds: local.issues[issue.id]?.ruleArchivedAgentIds ?? [], archivePending: local.issues[issue.id]?.archivePending ?? false, cwd, title, description: issue.description ?? "", updatedAt: issue.updated_at };
         });
         const mapping = (await this.options.store.read()).connections[connection.connectionKey].issues[issue.id];
-        if (mapping.archiveReason === "rule_disabled") {
+        if (mapping.archiveReason) {
           await this.host.restoreWorkspace(mapping.workspaceId);
           for (const agentId of mapping.ruleArchivedAgentIds) {
             const existing = await this.host.fetchAgent(agentId);
@@ -152,6 +201,7 @@ export class SidebarSynchronizer {
           await this.options.store.update(state => {
             const saved = state.connections[connection.connectionKey].issues[issue.id];
             delete saved.archiveReason;
+            saved.archivePending = false;
             saved.ruleArchivedAgentIds = [];
           });
         }
@@ -190,6 +240,8 @@ export class SidebarSynchronizer {
   close() {
     this.closed = true;
     if (this.timer) clearInterval(this.timer);
+    if (this.eventTimer) clearTimeout(this.eventTimer);
+    this.events.close();
     return this.pending.then(async () => { await this.host?.close(); });
   }
 }
