@@ -128,7 +128,10 @@ export class CommentDelivery {
       if (comment.issue_id !== record.issueId || (comment.parent_id ?? null) !== (record.rootId === "main" ? null : record.rootId) || comment.content !== record.body || comment.author_id !== connection.userId) throw new Error("评论回执与原输入不匹配。");
       await this.finish(record, "saved", "评论已保存；是否开始执行以独立 Run 状态为准。", comment);
     } catch (error) {
-      await this.finish(record, sent ? "pending_verification" : "failed", sent ? "响应丢失或回执无法核实；原输入已保留，不会自动重发。" : error instanceof Error ? error.message : "投递失败；原输入已保留。");
+      const status = sent ? "pending_verification" : "failed";
+      const message = sent ? "响应丢失或回执无法核实；原输入已保留，不会自动重发。" : error instanceof Error ? error.message : "投递失败；原输入已保留。";
+      try { await this.finish(record, status, message); }
+      catch { this.publish({ ...record, status, message: "无法持久保存投递结果；请保留原生输入并核实。不会自动重发。" }); }
     }
   }
   private async finish(record: DeliveryRecord, status: DeliveryRecord["status"], message: string, comment?: z.infer<typeof receiptSchema>) {

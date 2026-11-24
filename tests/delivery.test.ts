@@ -269,3 +269,17 @@ it("a running input storage failure reports non-receipt without triggering the n
     expect(f.posts).toEqual([]);
   } finally { await rm(join(f.home, "multica-provider/state.json.next"), { recursive: true }); }
 });
+
+it("a receipt storage failure keeps the remote result visibly unknown and never reposts", async () => {
+  const f = await fixture();
+  f.post(async body => {
+    await mkdir(join(f.home, "multica-provider/state.json.next"));
+    return { body: comment("saved-but-not-recorded", "root", body.content) };
+  });
+  try {
+    await f.send("root", "Unknown receipt persistence", "receipt-write-failed");
+    await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[0]?.status).toBe("pending_verification");
+    expect(f.events).toContainEqual(expect.objectContaining({ type: "timeline.item", item: expect.objectContaining({ type: "plugin", kind: "comment-delivery", data: expect.objectContaining({ status: "pending_verification" }) }) }));
+    expect(f.posts).toHaveLength(1);
+  } finally { await rm(join(f.home, "multica-provider/state.json.next"), { recursive: true, force: true }); }
+});

@@ -16,3 +16,5 @@ Paseo 0.15.3 实际导入时，notification 映射未保留 provider 稳定 ID�
 #14 的恢复不能把本地 rows/observed 或相邻来源插件行当成原生参与者消息的提交回执。新 provider 会话的 `history:skip` 订阅先通过公开 `fetchAgentTimeline` 完整分页读回所属 native agent，按保留的来源 `messageId`、角色与首次原文核对；实际 0.15.3 即使请求 canonical 也返回 projected，仍保留所需来源 ID，因此兼容此响应。只有全部旧页成功、epoch 稳定且无 gap/stale/reset 后，才发布缺失的缓存原文。重复核对用本次会话的投影去重集合，更正／删除／来源插件行继续按稳定 ID 更新；不持久保存“已提交”捷径，后续进程重启仍重新读回。来源记录不一致或分页失败时保留缓存并报告核对未完成，不用无差别 replay 重复原生消息。
 
 任务描述另外通过只读 `description.observe` 观测缓存并刷新同一插件行；renderer 挂载后立即及定期观察，不依赖历史 replay。已读全文依然按版本分片，过期版本不会混接新正文。恢复不会自动下载所有曾读过的 Thread／Run 正文；原文缓存与原生缺失核对独立于本次展开的远端增量读取。
+
+#10 的自身评论还保存原输入 clientMessageId。宿主会把提供此 ID 的 user_message 对应到同一原生乐观输入，公开 canonical 记录可能以 clientMessageId 作为 item.messageId，来源 commentId 则在宿主内部单独关联。因此缓存原文核对还接受相同 clientMessageId 的同角色／全文精确匹配，不能只依赖来源 ID。主讨论的新输入与其新建 Thread 根分属不同 native agent；新 Thread 导入不复用主讨论的 clientMessageId。插件接收但尚未取得回执的输入从独立 deliveries 恢复，不能伪装成远端已保存评论。

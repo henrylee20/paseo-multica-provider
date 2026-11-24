@@ -307,6 +307,7 @@ it("expands run messages in source order with honest tool correlation and keeps 
 });
 
 it("management lists shared hidden objects and offers separate workspace and selected-tab restoration", async () => {
+  const navigation: unknown[] = [];
   const effects: Array<() => unknown> = [];
   const cleanups: Array<() => void> = [];
   const actions: Array<{ actionLabel: string; onPress(): unknown }> = [];
@@ -334,8 +335,9 @@ it("management lists shared hidden objects and offers separate workspace and sel
           if (contract.name === "stop.list") return { records: [{ connectionKey: "old-connection", issueId: "issue", rootId: "root", runId: "failed-run", title: "Closed Task", status: "running", cleanup: "unknown", retryable: true, message: "cancel failed" },
             { connectionKey: "old-connection", issueId: "issue", rootId: "root", runId: "cancelled-run", title: "Stopped Task", status: "cancelled", cleanup: "pending", retryable: false }] };
           if (contract.name === "stop.retry") return { status: "ready" };
-          if (contract.name === "delivery.list") return { records: [] };
-          if (contract.name === "delivery.targets") return { issues: [] };
+          if (contract.name === "delivery.list") return { records: [{ connectionKey: "old-connection", issueId: "issue", rootId: "main", clientMessageId: "native-input", idempotencyKey: "key", body: "Saved input", createdAt: "2026-11-24T10:00:00Z", status: "saved", threadRootId: "new-root", threadAgentId: "new-thread-agent" }] };
+          if (contract.name === "delivery.targets") return { issues: [{ connectionKey: "old-connection", issueId: "issue", title: "Task" }] };
+          if (contract.name === "delivery.mentions") return { agents: [{ id: "agent-id", name: "Agent A", reference: "[@Agent A](mention://agent/agent-id)" }] };
           if (contract.name === "hidden.list") return { objects };
           if (contract.name === "hidden.restore") return { status: "ready" };
           if (contract.name === "workspace.list") return { workspaces: [] };
@@ -350,7 +352,7 @@ it("management lists shared hidden objects and offers separate workspace and sel
   });
   const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: (entry: { Component: typeof Component }) => { Component = entry.Component; return () => {}; },
     addSidebarHeaderItem: () => () => {}, addTimelineRenderer: () => () => {} });
-  const render = () => { cursor = 0; actions.length = 0; return renderedText(Component({ host: { id: "host", label: "Host" }, theme: { colors: {} } })); };
+  const render = () => { cursor = 0; actions.length = 0; return renderedText(Component({ host: { id: "host", label: "Host" }, theme: { colors: {} }, navigation: { openAgent: (input: unknown) => navigation.push(input) } })); };
   try {
     render();
     for (const effect of effects.splice(0)) { const cleanup = effect(); if (typeof cleanup === "function") cleanups.push(cleanup as () => void); }
@@ -358,6 +360,12 @@ it("management lists shared hidden objects and offers separate workspace and sel
     expect(render()).toContain("原生停止结果");
     expect(render()).toContain("cancel failed");
     expect(render()).toContain("进程清理尚待确认");
+    expect(render()).toContain("评论已保存");
+    expect(navigation).toEqual([]);
+    actions.find(action => action.actionLabel === "继续此 Thread")!.onPress();
+    expect(navigation).toEqual([{ agentId: "new-thread-agent", serverId: "host" }]);
+    actions.find(action => action.actionLabel === "读取可提及身份")!.onPress();
+    await vi.waitFor(() => expect(render()).toContain("[@Agent A](mention://agent/agent-id)"));
     actions.find(action => action.actionLabel === "重试此 Run")!.onPress();
     await vi.waitFor(() => expect(calls).toContainEqual({ name: "stop.retry", input: { connectionKey: "old-connection", issueId: "issue", rootId: "root", runId: "failed-run" } }));
     expect(actions.map(action => action.actionLabel)).toContain("仅恢复工作区");
