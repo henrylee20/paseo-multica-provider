@@ -115,7 +115,10 @@ export class SidebarSynchronizer {
         if (offset >= page.total) break;
         if (!page.issues.length) throw new Error("Incomplete issue pagination");
       }
-      const projectDirectory = join(this.options.store.directory, "placeholders", connection.connectionKey, stableId(workspaceId));
+      // AgentStorage flattens the entire cwd into one filename component.
+      // Keep existing mappings bound to their original directories and history.
+      const projectDirectory = local?.projects[workspaceId]?.cwd
+        ?? join(this.options.store.directory, "placeholders", connection.connectionKey.slice(0, 20), stableId(workspaceId).slice(0, 20));
       await mkdir(projectDirectory, { recursive: true });
       const added = await this.host.addProject(projectDirectory);
       if (added.error || !added.project || added.project.projectKind === "git") throw new Error("Could not register non-Git native project");
@@ -124,7 +127,7 @@ export class SidebarSynchronizer {
       await this.options.store.update(state => { connectionState(state, connection.connectionKey).projects[workspaceId] = { cwd: projectDirectory, projectId, name: workspace.name }; });
       for (const issue of issues) {
         const title = [issue.identifier, issue.title].filter(Boolean).join(" ");
-        const cwd = join(projectDirectory, stableId(issue.id));
+        const cwd = local?.issues[issue.id]?.cwd ?? join(projectDirectory, stableId(issue.id).slice(0, 20));
         await mkdir(cwd, { recursive: true });
         // Persist intent before native creation. A retry uses the same valid native ID.
         await this.options.store.update(state => {
