@@ -3,7 +3,7 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { PaseoApi } from "@getpaseo/client";
 import { z } from "zod";
-import { taskRuleSchema, type TaskRule } from "../shared/contracts.js";
+import { taskRuleSchema, type TaskRule, type SyncStatus } from "../shared/contracts.js";
 import { issueQuery } from "./filters.js";
 import { WorkspaceEvents, type WorkspaceEvent } from "./workspace-events.js";
 import type { AuthenticatedConnection } from "./connection.js";
@@ -38,6 +38,9 @@ export async function remoteJson(connection: AuthenticatedConnection, path: stri
 export class SidebarSynchronizer {
   private pending: Promise<unknown> = Promise.resolve();
   private host?: NativeHost;
+  private syncPending?: Promise<void>;
+  private syncState: SyncStatus = { status: "idle", stage: "idle", completedWorkspaces: 0, enabledWorkspaces: 0 };
+  status(): SyncStatus { return { ...this.syncState }; }
   private expectedServerId?: string;
   private timer?: ReturnType<typeof setInterval>;
   private closed = false;
@@ -55,7 +58,7 @@ export class SidebarSynchronizer {
       this.eventTimer = undefined;
       this.eventDirty = false;
       this.eventSyncPending = true;
-      void this.serialize(() => this.sync()).catch(() => {}).finally(() => {
+      void this.requestSync().catch(() => {}).finally(() => {
         this.eventSyncPending = false;
         if (this.eventDirty) this.scheduleInvalidation();
       });
@@ -65,23 +68,40 @@ export class SidebarSynchronizer {
   constructor(private readonly options: {
     store: StateStore; connection: () => Promise<AuthenticatedConnection>;
     connectHost: () => Promise<NativeHost>; intervalMs: number; onRemoteEvent?: (event: WorkspaceEvent) => void;
+    onCached?: (host: NativeHost) => Promise<void>;
     onIssue?: (connection: AuthenticatedConnection, workspace: RemoteWorkspace, issueId: string, host: NativeHost) => Promise<void>;
   }) {}
 
   async workspaces(connection: AuthenticatedConnection): Promise<RemoteWorkspace[]> {
     return await remoteJson(connection, "/api/workspaces", z.array(workspaceSchema)) as RemoteWorkspace[];
   }
-  bootstrap(paseo: PaseoApi): Promise<void> {
-    return this.serialize(async () => {
-      const serverId = (await paseo.hosts.list()).self.serverId;
-      if (this.expectedServerId && this.expectedServerId !== serverId) throw new Error("Bootstrap daemon identity changed");
-      this.expectedServerId = serverId;
-      await this.sync();
-      if (!this.closed && !this.timer) {
-        this.timer = setInterval(() => { void this.serialize(() => this.sync()).catch(() => {}); }, this.options.intervalMs);
-        this.timer.unref?.();
-      }
-    });
+  async bootstrap(paseo: PaseoApi): Promise<void> {
+    const serverId = (await paseo.hosts.list()).self.serverId;
+    if (this.expectedServerId && this.expectedServerId !== serverId) throw new Error("Bootstrap daemon identity changed");
+    this.expectedServerId = serverId;
+    // A client connection starts daemon recovery even if the first remote read fails.
+    if (!this.closed && !this.timer) {
+      this.timer = setInterval(() => { void this.requestSync().catch(() => {}); }, this.options.intervalMs);
+      this.timer.unref?.();
+    }
+    return this.requestSync();
+  }
+  private requestSync(): Promise<void> {
+    if (!this.syncPending) {
+      const operation = this.serialize(async () => {
+        this.syncState = { ...this.syncState, status: "syncing", stage: "connection", completedWorkspaces: 0, message: undefined };
+        try {
+          await this.sync();
+          this.syncState = { ...this.syncState, status: "ready", stage: "idle", lastSuccessAt: new Date().toISOString() };
+        } catch (error) {
+          this.syncState = { ...this.syncState, status: "unavailable", message: "同步未完成；保留已读缓存，daemon 将继续重试。" };
+          throw error;
+        }
+      });
+      this.syncPending = operation;
+      void operation.finally(() => { if (this.syncPending === operation) this.syncPending = undefined; }).catch(() => {});
+    }
+    return this.syncPending;
   }
   withNativeHost(paseo: PaseoApi, operation: (host: NativeHost) => Promise<void>): Promise<void> {
     return this.serialize(async () => {
@@ -148,10 +168,16 @@ export class SidebarSynchronizer {
     return result;
   }
   private async sync() {
+    if (!this.host) this.host = await this.options.connectHost();
+    if ((await this.host.listHosts()).self.serverId !== this.expectedServerId) throw new Error("Native host is not the owning daemon");
+    await this.options.onCached?.(this.host);
     const connection = await this.options.connection();
+    this.syncState.connectionKey = connection.connectionKey;
     const state = await this.options.store.read();
     const local = state.connections[connection.connectionKey];
     const enabled = Object.entries(local?.rules ?? {}).filter(([, rule]) => rule.enabled);
+    this.syncState.enabledWorkspaces = enabled.length;
+    this.syncState.stage = "workspaces";
     const disabledIssues = Object.entries(local?.issues ?? {}).filter(([, issue]) =>
       local?.rules[issue.remoteWorkspaceId]?.enabled === false && (!issue.archiveReason || issue.archivePending));
     if (!enabled.length && !disabledIssues.length) { this.events.reconcile(connection, []); return; }
@@ -163,6 +189,7 @@ export class SidebarSynchronizer {
     for (const [workspaceId, rule] of enabled) {
       const workspace = workspaces.find(item => item.id === workspaceId);
       if (!workspace) continue;
+      this.syncState.stage = "issues";
       const issues: z.infer<typeof issueSchema>[] = [];
       let offset = 0;
       for (;;) {
@@ -252,8 +279,10 @@ export class SidebarSynchronizer {
           await this.options.store.update(state => { state.connections[connection.connectionKey].issues[issue.id].mainAgentId = mainAgentId; });
         }
         if (mainAgentId && !mapping.manualHidden.discussions.includes("main")) await this.host.updateAgent(mainAgentId, { name: "主讨论" });
+        this.syncState.stage = "history";
         await this.options.onIssue?.(connection, workspace, issue.id, this.host);
       }
+      this.syncState.completedWorkspaces++;
     }
   }
   close() {

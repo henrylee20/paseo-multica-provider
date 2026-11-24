@@ -7,6 +7,9 @@ import type { RunAddress } from "./runs.js";
 import { StateStore } from "./state.js";
 import type { StopCoordinator } from "./stops.js";
 import { remoteJson, workspaceSchema } from "./sync.js";
+import { nativeOriginals, hasNativeOriginal } from "./projection-recovery.js";
+import type { NativeHost } from "./native-host.js";
+import type { StoredRow } from "./thread-state.js";
 
 export const deliveryKey = (rootId: string, clientMessageId: string) => createHash("sha256").update(JSON.stringify([rootId, clientMessageId])).digest("hex");
 const addressKey = (address: RunAddress) => JSON.stringify([address.connectionKey, address.issueId, address.rootId]);
@@ -21,20 +24,46 @@ export function deliveryRow(record: DeliveryRecord): ProviderTimelineItem {
     ...(record.commentId ? { commentId: record.commentId } : {}), ...(record.threadRootId ? { threadRootId: record.threadRootId } : {}), ...(record.message ? { message: record.message } : {}),
   } };
 }
+export function deliveryInput(record: DeliveryRecord): StoredRow {
+  return { id: `multica:input:${record.idempotencyKey}`, role: "user", commentId: record.commentId ?? `multica:input:${record.idempotencyKey}`,
+    clientMessageId: record.clientMessageId, text: record.body, sourceCreatedAt: record.receipt?.createdAt ?? record.createdAt, sourceUpdatedAt: record.receipt?.updatedAt };
+}
 
 /** Durable input admission and truthful remote receipts; no automatic resend. */
 export class CommentDelivery {
-  private readonly listeners = new Map<string, Set<(record: DeliveryRecord) => void>>();
+  private readonly listeners = new Map<string, Set<{ deliver(record: DeliveryRecord, includeOriginal?: boolean): void; recovery: boolean }>>();
   private readonly posts = new Map<string, Promise<void>>();
   private readonly operations = new Set<Promise<void>>();
   constructor(private readonly store: StateStore, private readonly connection: () => Promise<AuthenticatedConnection>, private readonly stops: StopCoordinator,
     private readonly onSaved: () => Promise<void>) {}
-  subscribe(address: RunAddress, listener: (record: DeliveryRecord) => void) {
+  subscribe(address: RunAddress, deliver: (record: DeliveryRecord, includeOriginal?: boolean) => void, recovery = false) {
+    const listener = { deliver, recovery };
     const id = addressKey(address), listeners = this.listeners.get(id) ?? new Set();
     listeners.add(listener); this.listeners.set(id, listeners);
     return () => { listeners.delete(listener); if (!listeners.size) this.listeners.delete(id); };
   }
-  private publish(record: DeliveryRecord) { for (const listener of this.listeners.get(addressKey(record)) ?? []) listener(record); }
+  private publish(record: DeliveryRecord) { for (const listener of this.listeners.get(addressKey(record)) ?? []) listener.deliver(record); }
+  presentation(record: DeliveryRecord): DeliveryRecord {
+    return record.status === "received" && record.claimedAt && !this.posts.has(record.idempotencyKey)
+      ? { ...record, status: "pending_verification", message: "上次投递中断，保存结果待核实；不会自动重发。" } : record;
+  }
+  async recover(host: NativeHost) {
+    for (const [id, listeners] of this.listeners) {
+      const recovering = [...listeners].filter(listener => listener.recovery);
+      if (!recovering.length) continue;
+      const [connectionKey, issueId, rootId] = JSON.parse(id) as string[];
+      const issue = (await this.store.read()).connections[connectionKey]?.issues[issueId];
+      const agentId = rootId === "main" ? issue?.mainAgentId : issue?.threads[rootId]?.agentId;
+      if (!issue || !agentId) continue;
+      const records = Object.values(issue.deliveries).filter(record => record.rootId === rootId);
+      const entries = records.length ? await nativeOriginals(host, agentId) : [];
+      const originals = records.map(record => ({ record: this.presentation(record), includeOriginal: !hasNativeOriginal(entries, deliveryInput(record)) }));
+      for (const listener of recovering) {
+        for (const { record, includeOriginal } of originals) listener.deliver(record, includeOriginal);
+        listener.recovery = false;
+      }
+    }
+  }
   async admit(address: RunAddress, prompt: ProviderPrompt): Promise<DeliveryRecord> {
     const body = prompt.input.type === "message" && prompt.input.content.every(part => part.type === "text" && !("mimeType" in part))
       ? prompt.input.content.map(part => part.type === "text" ? part.text : "").join("") : undefined;
@@ -117,7 +146,7 @@ export class CommentDelivery {
       ...record, body: [...record.body].slice(0, 4000).join(""), truncated: [...record.body].length > 4000,
       ...(record.threadRootId && issue.threads[record.threadRootId]?.agentId ? { threadAgentId: issue.threads[record.threadRootId].agentId } : {}),
       // A claimed request left across a crash has no authoritative save receipt.
-      ...(record.status === "received" && record.claimedAt && !this.posts.has(record.idempotencyKey) ? { status: "pending_verification" as const, message: "上次投递中断，保存结果待核实；不会自动重发。" } : {}),
+      status: this.presentation(record).status, message: this.presentation(record).message,
     })))) };
   }
   async read(address: RunAddress & { clientMessageId: string; offset: number }) {

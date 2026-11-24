@@ -6,7 +6,7 @@ import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 /** These are the real low-level SDK methods, including explicit project placement. */
 export type NativeHost = Pick<DaemonClient, "listHosts" | "addProject" | "renameProject" | "fetchWorkspaces" |
   "createWorkspace" | "setWorkspaceTitle" | "fetchAgents" | "importAgent" | "updateAgent" | "close" |
-  "archiveWorkspace" | "restoreWorkspace" | "fetchAgent" | "refreshAgent">;
+  "archiveWorkspace" | "restoreWorkspace" | "fetchAgent" | "refreshAgent" | "fetchAgentTimeline">;
 
 /** The native directory contains active workspaces, without an archivedAt field.
  * idPrefix is accepted but ignored by the host, so check exact IDs across pages. */

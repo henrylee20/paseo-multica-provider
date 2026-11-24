@@ -4,15 +4,15 @@ import { RunDetails } from "./run-details.js";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { PluginServerContribution } from "@getpaseo/plugin/server";
-import { multicaSettings, connectionStatus, syncBootstrap, workspaceList, workspaceEnable, workspaceRule, workspaceCatalog, taskRuleSchema, type ConnectionStatus } from "../shared/contracts.js";
+import { multicaSettings, connectionStatus, syncBootstrap, syncStatus, workspaceList, workspaceEnable, workspaceRule, workspaceCatalog, taskRuleSchema, type ConnectionStatus } from "../shared/contracts.js";
 import { createConnectionResolver, type AuthenticatedConnection, type ConnectionDependencies } from "./connection.js";
 import { StateStore } from "./state.js";
 import { SidebarSynchronizer } from "./sync.js";
 import { connectNativeHost, type NativeHost } from "./native-host.js";
 import { workspaceCatalogs } from "./catalogs.js";
 import { createMulticaProvider } from "./provider.js";
-import { readTaskDescription } from "../shared/description.js";
-import { descriptionRevision, descriptionSlice } from "./task-description.js";
+import { readTaskDescription, observeTaskDescription } from "../shared/description.js";
+import { descriptionRevision, descriptionSlice, TaskDescriptions } from "./task-description.js";
 import { projectionHistory, ThreadSynchronizer } from "./threads.js";
 import { threadOpen, commentEventDetail, threadResolve } from "../shared/threads.js";
 import { ManualHiding } from "./hiding.js";
@@ -69,7 +69,9 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       try { await stops.retry(input); return { status: "ready" as const }; }
       catch (error) { return { status: "unavailable" as const, message: error instanceof Error ? error.message : "停止重试失败。" }; }
     });
-    server.registerProvider(createMulticaProvider(store, threads, runs, stops, deliveries));
+    const descriptions = new TaskDescriptions(store);
+    server.registerProvider(createMulticaProvider(store, threads, runs, stops, deliveries, descriptions));
+    server.handle(observeTaskDescription, input => descriptions.observe(input));
     server.handle(readTaskDescription, async input => {
       // The host authenticates this RPC. Cached history belongs to its persisted
       // connection, even while the CLI is offline, logged out, or using another account.
@@ -99,7 +101,9 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       return { text: row.text };
     });
     const synchronizer = new SidebarSynchronizer({ store, connection,
+      onCached: async host => { await threads.reconcile(host); await deliveries.recover(host); },
       onIssue: async (connection, workspace, issueId, host) => {
+        await descriptions.observe({ connectionKey: connection.connectionKey, issueId });
         await threads.discover(connection, workspace, issueId, host);
         await runs.discover(connection, workspace, issueId);
       },
@@ -108,6 +112,7 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       try { await synchronizer.withNativeHost(context.paseo, host => hiding.restore(input, host)); return { status: "ready" as const }; }
       catch (error) { return { status: "unavailable" as const, message: error instanceof Error ? error.message : "隐藏对象恢复失败，请重试。" }; }
     });
+    server.handle(syncStatus, async () => synchronizer.status());
     server.handle(syncBootstrap, async (_, context) => {
       try { await synchronizer.bootstrap(context.paseo); return { status: "ready" as const }; }
       catch { return { status: "unavailable" as const, message: "Multica 同步暂不可用，请检查 CLI 连接和 daemon。" }; }
@@ -132,6 +137,6 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       try { await synchronizer.rule(context.paseo, input.workspaceId, input.rule); return { status: "ready" as const }; }
       catch { return { status: "unavailable" as const, message: "筛选规则保存或同步失败，请检查连接后重试。" }; }
     });
-    return async () => { await deliveries.close(); await synchronizer.close(); await stops.close(); await threads.close(); await runDetails.close(); runs.close(); };
+    return async () => { await deliveries.close(); await synchronizer.close(); await stops.close(); await threads.close(); await runDetails.close(); runs.close(); descriptions.close(); };
   };
 }

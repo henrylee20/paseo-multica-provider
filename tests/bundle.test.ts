@@ -74,7 +74,7 @@ function renderedText(node: unknown): string {
 it("the client renders the task description as visible Markdown and removes its renderer on disposal", async () => {
   const renderers: PluginTimelineRendererContribution[] = [];
   const setup = await bundledContribution("../index.client.tsx", {
-    "react": { useState: (value: unknown) => [value, () => {}] },
+    "react": { useEffect: () => {}, useState: (value: unknown) => [value, () => {}] },
     "@getpaseo/plugin/client": { useRpc: () => async () => ({}) },
     "@getpaseo/plugin/client/ui": { Markdown: ({ children }: { children: string }) => children },
     "react-native": { View: "View", Text: "Text" },
@@ -101,7 +101,7 @@ it("a reader can explicitly load every page of a long description from its visib
   const state: unknown[] = [];
   let cursor = 0;
   const setup = await bundledContribution("../index.client.tsx", {
-    react: { useState: (initial: unknown) => {
+    react: { useEffect: () => {}, useState: (initial: unknown) => {
       const index = cursor++;
       if (!(index in state)) state[index] = initial;
       return [state[index], (value: unknown) => { state[index] = value; }];
@@ -365,4 +365,70 @@ it("management lists shared hidden objects and offers separate workspace and sel
     action.onPress();
     await vi.waitFor(() => expect(calls).toContainEqual({ name: "hidden.restore", input: { connectionKey: "old-connection", issueId: "issue", rootId: "root" } }));
   } finally { for (const cleanup of cleanups) cleanup(); dispose(); }
+});
+
+
+it("an opened description observes current cached content and stops observing when unmounted", async () => {
+  const effects: Array<() => unknown> = [];
+  const renderers: Array<{ kind: string; Component: (props: any) => any }> = [];
+  const calls: string[] = [];
+  const state: unknown[] = [];
+  let cursor = 0;
+  const setup = await bundledContribution("../index.client.tsx", {
+    react: { useEffect: (effect: () => unknown) => effects.push(effect), useState: (initial: unknown) => {
+      const index = cursor++;
+      if (!(index in state)) state[index] = initial;
+      return [state[index], (value: unknown) => { state[index] = value; }];
+    } },
+    "@getpaseo/plugin/client": { useRpc: (contract: { name: string }) => async () => {
+      calls.push(contract.name);
+      return { connectionKey: "connection", issueId: "issue", revision: "current", preview: "Current cached goal", truncated: false };
+    } },
+    "@getpaseo/plugin/client/ui": { Markdown: ({ children }: { children: string }) => children },
+    "react-native": { Text: "Text", View: "View" },
+  });
+  vi.useFakeTimers();
+  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: any) => { renderers.push(renderer); return () => {}; } });
+  try {
+    const renderer = renderers.find(renderer => renderer.kind === "task-description")!;
+    const render = () => { cursor = 0; return renderedText(renderer.Component({ item: { data: { connectionKey: "connection", issueId: "issue", revision: "old", preview: "Old goal", truncated: false } }, theme: { colors: { foregroundMuted: "gray" } } })); };
+    expect(render()).toContain("Old goal");
+    const unmount = effects.splice(0).map(effect => effect()).filter((value): value is () => void => typeof value === "function");
+    await Promise.resolve();
+    expect(render()).toContain("Current cached goal");
+    expect(calls).toEqual(["description.observe"]);
+    for (const cleanup of unmount) cleanup();
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(calls).toHaveLength(1);
+  } finally { dispose(); vi.useRealTimers(); }
+});
+
+it("the native discussion shows the same daemon sync failure and cached-history status as management", async () => {
+  const effects: Array<() => unknown> = [];
+  const renderers: Array<{ kind: string; Component: (props: any) => any }> = [];
+  const state: unknown[] = [];
+  let cursor = 0;
+  const setup = await bundledContribution("../index.client.tsx", {
+    react: { useEffect: (effect: () => unknown) => effects.push(effect), useState: (initial: unknown) => {
+      const index = cursor++; if (!(index in state)) state[index] = initial;
+      return [state[index], (value: unknown) => { state[index] = value; }];
+    } },
+    "@getpaseo/plugin/client": { useRpc: (contract: { name: string }) => async () => contract.name === "sync.status"
+      ? { status: "unavailable", stage: "issues", completedWorkspaces: 0, enabledWorkspaces: 1, lastSuccessAt: "2026-11-24T10:00:00Z", message: "保留已读缓存" }
+      : { status: "cached", message: "可阅读已读历史" } },
+    "react-native": { Text: "Text", View: "View", Pressable: "Pressable" },
+    "@getpaseo/plugin/client/ui": {},
+  });
+  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: any) => { renderers.push(renderer); return () => {}; } });
+  try {
+    const renderer = renderers.find(renderer => renderer.kind === "thread")!;
+    const render = () => { cursor = 0; return renderedText(renderer.Component({ item: { data: { connectionKey: "connection", issueId: "issue", rootId: "root" } }, theme: { colors: { foreground: "black", foregroundMuted: "gray" } } })); };
+    render();
+    const unmount = effects.splice(0).map(effect => effect()).filter((value): value is () => void => typeof value === "function");
+    await Promise.resolve();
+    expect(render()).toContain("同步未完成");
+    expect(render()).toContain("保留已读缓存");
+    expect(render()).toContain("2026-11-24T10:00:00Z");
+    for (const cleanup of unmount) cleanup();
+  } finally { dispose(); }
 });

@@ -57,13 +57,22 @@ async function fixture(active = false) {
   await mkdir(join(home, ".multica"));
   await writeFile(join(home, ".multica/config.json"), JSON.stringify({ server_url: `http://127.0.0.1:${(http.address() as { port: number }).port}`, token: "synthetic" }));
   const events: ProviderEvent[] = [];
+  const canonical = new Map<string, Array<{ seqStart: number; seqEnd: number; item: Record<string, unknown> }>>();
   const agents: Array<{ id: string; workspaceId: string; cwd: string; labels: Record<string, string>; handle: string }> = [];
   let server: FakeServer;
   let provider: ProviderConnection | undefined;
   async function connect() {
     if (provider) return provider;
     provider = await server.providers.get("multica")!.connect({ versions: [1], capabilities: ["session.persistence", "prompt.message", "prompt.steer", "timeline.plugin"] });
-    provider.onEvent(event => events.push(event)); return provider;
+    provider.onEvent(event => {
+      events.push(event);
+      if (event.type !== "timeline.item") return;
+      const entries = canonical.get(event.sessionId) ?? [];
+      const item = event.item;
+      const existing = entries.find(entry => item.type === "user_message" && item.clientMessageId ? entry.item.clientMessageId === item.clientMessageId : entry.item.id === item.id);
+      if (existing) existing.item = { ...item }; else entries.push({ seqStart: entries.length, seqEnd: entries.length, item: { ...item } });
+      canonical.set(event.sessionId, entries);
+    }); return provider;
   }
   const host = {
     listHosts: async () => ({ self: { serverId: "daemon" } }),
@@ -71,6 +80,7 @@ async function fixture(active = false) {
     fetchWorkspaces: async () => ({ entries: [], pageInfo: { hasMore: false } }),
     createWorkspace: async (input: { workspaceId: string }) => ({ workspace: { id: input.workspaceId } }), setWorkspaceTitle: async () => {},
     fetchAgents: async () => ({ entries: agents.map(agent => ({ agent })), pageInfo: { hasMore: false } }),
+    fetchAgentTimeline: async (agentId: string) => ({ agentId, epoch: "epoch", entries: canonical.get(agentId) ?? [], hasOlder: false, hasNewer: false }),
     importAgent: async (input: { workspaceId: string; cwd: string; labels: Record<string, string>; providerHandleId: string }) => {
       const agent = { id: `native-${agents.length}`, workspaceId: input.workspaceId, cwd: input.cwd, labels: input.labels, handle: input.providerHandleId }; agents.push(agent);
       await (await connect()).send({ type: "session.open", requestId: agent.id, sessionId: agent.id, history: "replay", persistence: JSON.parse(agent.handle.slice(7)), config: { cwd: agent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } }); return agent;
@@ -84,7 +94,7 @@ async function fixture(active = false) {
     const agent = agents.find(agent => agent.labels["multica.discussion"] === rootId)!;
     await (await connect()).send({ type: "session.prompt", sessionId: agent.id, prompt: { clientMessageId, delivery, input: { type: "message", content: [{ type: "text", text }] } } });
   };
-  return { ...started, home, paseo, agents, events, comments, runs, posts, connect, send, start, identity: (id: string) => { identity = id; }, beforeMe: (handler?: () => Promise<void>) => { beforeMe = handler; }, post: (handler: typeof post) => { post = handler; } };
+  return { ...started, home, paseo, agents, events, canonical, comments, runs, posts, connect, send, start, identity: (id: string) => { identity = id; }, beforeMe: (handler?: () => Promise<void>) => { beforeMe = handler; }, post: (handler: typeof post) => { post = handler; } };
 }
 
 it("main discussion saves an ordinary text comment, preserves its identity and offers the new Thread", async () => {
@@ -226,4 +236,36 @@ it("a snapshot that beats the HTTP receipt cannot publish an uncorrelated duplic
   // Both boundary events address the same canonical host input via clientMessageId.
   expect(echoes).toHaveLength(2);
   expect(echoes.every(event => event.type === "timeline.item" && event.item.type === "user_message" && event.item.clientMessageId === "echo-input")).toBe(true);
+});
+
+it("recovers a durable main input missing from canonical history without duplicating a surviving input", async () => {
+  const f = await fixture();
+  f.post(async () => ({ status: 403 }));
+  await f.send("main", "Survived input", "survived");
+  await f.send("main", "Lost projection", "lost-projection");
+  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records.every(record => record.status === "failed")).toBe(true);
+  const main = f.agents.find(agent => agent.labels["multica.discussion"] === "main")!;
+  f.canonical.set(main.id, f.canonical.get(main.id)!.filter(entry => entry.item.clientMessageId !== "lost-projection"));
+  await f.dispose(); const restarted = f.start();
+  const boundary = f.events.length;
+  await (await f.connect()).send({ type: "session.open", requestId: "restored", sessionId: main.id, history: "skip", persistence: JSON.parse(main.handle.slice(7)), config: { cwd: main.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
+  await restarted.server.rpc(syncBootstrap, {}, f.paseo);
+  const originals = f.events.slice(boundary).filter(event => event.type === "timeline.item" && event.item.type === "user_message");
+  expect(originals.map(event => event.type === "timeline.item" && event.item.type === "user_message" ? event.item.clientMessageId : null)).toEqual(["lost-projection"]);
+  await restarted.server.rpc(syncBootstrap, {}, f.paseo);
+  expect(f.events.slice(boundary).filter(event => event.type === "timeline.item" && event.item.type === "user_message")).toHaveLength(1);
+});
+
+it("a running input storage failure reports non-receipt without triggering the native interrupt fallback", async () => {
+  const f = await fixture(true);
+  const thread = f.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
+  const active = [...f.events].reverse().find(event => event.type === "session.turn" && event.sessionId === thread.id && event.state === "started");
+  await mkdir(join(f.home, "multica-provider/state.json.next"));
+  try {
+    await f.send("root", "Keep this native input", "disk-failed", "steer");
+    expect(f.events).toContainEqual(expect.objectContaining({ type: "session.prompt_result", clientMessageId: "disk-failed", result: { type: "steer", turnId: active?.type === "session.turn" ? active.turnId : "" } }));
+    expect(f.events).toContainEqual(expect.objectContaining({ type: "timeline.item", sessionId: thread.id, item: expect.objectContaining({ type: "error", message: expect.stringContaining("未能持久接收") }) }));
+    expect((await f.server.rpc(deliveryList, {}, f.paseo)).records).toEqual([]);
+    expect(f.posts).toEqual([]);
+  } finally { await rm(join(f.home, "multica-provider/state.json.next"), { recursive: true }); }
 });
