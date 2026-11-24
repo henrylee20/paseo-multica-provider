@@ -104,6 +104,8 @@
 
 访问恢复需直接对象成功与当前筛选重新匹配，才恢复原 workspace／讨论身份；只是恢复可读但尚未匹配时仍保持归档，人工隐藏不被撤销。公开贡献／provider／RPC 与编译管理页覆盖删除、403 失权、401、断网、503、核对中登录失效、发送竞态、缓存执行正文、未知输入、停止失败及隐藏后的恢复。真实宿主与可控测试 Issue 的完整演示由母任务验收，隔离 HTTP 测试不代替真实服务证据。manifest 继续仅设 `>=0.15.3`，没有最高版本。
 
+真实 0.17.4 的只读发送拒绝发生在宿主解除 agent 归档之后，因此成功的自动归档回执不再视为永久完成。同步继续核对规则停用、筛选退出与不可访问记录的原生状态；发现已归档 workspace 内有活跃讨论时，仅恢复原 workspace 再整 workspace 归档，保留最初的讨论恢复集合，不创建新身份、不取消远端。新宿主的 workspace 恢复还可能按时间戳恢复人工隐藏记录，因此自动重返时先关闭这些讨论的 provider 资源并暂时拒绝重开，等待已接受的 Stop 结果完成、原生快照确认无活动后再归档隐藏记录，最后恢复原可见集合。完整理由见 ADR 0002；实际宿主与完整插件流程由母任务继续独立验收。
+
 2026-11-25 #16 增加 `npm run build`：输出 `dist/paseo-multica-provider-0.1.0/`、`.tar.gz` 与 SHA-256 校验文件，带 manifest、锁文件、两端源码、文档及开发检查配置，不打包依赖、Git 或运行状态。Paseo 本地目录安装不执行 manifest build，README 因此先运行 `npm ci --omit=dev --ignore-scripts` 并要求保留安装目录；托管 Git 安装才执行 build。类型检查和 Vitest 明确排除 dist，避免生成产物后重复检查／运行测试。使用独立真实 npm-ci 依赖及解压后的全新生产依赖目录验证，未改用户原 node_modules 符号链接。
 
 实际云端仅在用户授权 HENR-2 完成默认 CLI、空规则、project-only 导入、普通评论新 Thread 无 Run、typed mention 回复产生唯一 Run、权威 GET＋同 key 原样 POST 去重与原生 Stop。服务端最终 cancelled、原生 idle，进程清理证据 UNKNOWN。真实自部署、CLI Token／命名 profile 的真实轮换、原生 queue／视觉、丰富真实输出及真实权限撤销仍未验证；不能用 loopback、静态契约或 SDK 测试替代这些结果。独立 0.17.4 daemon 的响应丢失、Stop 栅栏、身份切换和重启证据保持单列。完整可复验说明与证据索引见交付验收记录。

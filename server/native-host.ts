@@ -1,12 +1,13 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { setTimeout } from "node:timers/promises";
 import { createHostClient } from "@getpaseo/client/node";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 
 /** These are the real low-level SDK methods, including explicit project placement. */
 export type NativeHost = Pick<DaemonClient, "listHosts" | "addProject" | "renameProject" | "fetchWorkspaces" |
   "createWorkspace" | "setWorkspaceTitle" | "fetchAgents" | "importAgent" | "updateAgent" | "close" |
-  "archiveWorkspace" | "restoreWorkspace" | "fetchAgent" | "refreshAgent" | "fetchAgentTimeline">;
+  "archiveWorkspace" | "restoreWorkspace" | "fetchAgent" | "archiveAgent" | "refreshAgent" | "fetchAgentTimeline">;
 
 /** The native directory contains active workspaces, without an archivedAt field.
  * idPrefix is accepted but ignored by the host, so check exact IDs across pages. */
@@ -27,6 +28,26 @@ export async function findActiveWorkspace(host: NativeHost, workspaceId: string)
 
 export async function ensureWorkspaceActive(host: NativeHost, workspaceId: string) {
   if (!await findActiveWorkspace(host, workspaceId)) await host.restoreWorkspace(workspaceId);
+}
+
+/** Caller must keep this discussion's provider resource closed and reject new
+ * opens throughout. Observe host event settlement before its archive command,
+ * which would otherwise interrupt a running native projection. */
+export async function archiveClosedDiscussion(host: NativeHost, agentId: string, expected: { workspaceId: string; cwd: string }) {
+  const deadline = Date.now() + 5000;
+  for (;;) {
+    const snapshot = (await host.fetchAgent(agentId))?.agent;
+    if (!snapshot || snapshot.workspaceId !== expected.workspaceId || snapshot.cwd !== expected.cwd) throw new Error("Mapped native discussion unavailable");
+    if (snapshot.archivedAt) return;
+    if (snapshot.provider !== "multica") throw new Error("Mapped native discussion unavailable");
+    if (["idle", "closed", "error"].includes(snapshot.status) && !snapshot.activeTurn) {
+      await host.archiveAgent(agentId);
+      if (!(await host.fetchAgent(agentId))?.agent.archivedAt) throw new Error("Native discussion archive not confirmed");
+      return;
+    }
+    if (Date.now() >= deadline) throw new Error("Native discussion close not confirmed");
+    await setTimeout(20);
+  }
 }
 
 export async function connectNativeHost(paseoHome: string): Promise<NativeHost> {
