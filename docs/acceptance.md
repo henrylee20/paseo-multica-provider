@@ -1,0 +1,60 @@
+# 交付与组合验收
+
+记录日期：2026-11-25（Asia/Shanghai）。本记录区分真实 Multica 云服务、实际 Paseo daemon 配合隔离服务、公开边界自动化、以及尚未执行的验收。通过一层不代表其他层已通过。目标用户选择的真实测试 Issue 为 [HENR-2](https://multica.ai/henrylee/issues/HENR-2)；未提供真实自部署 profile，因此不能宣称自部署端到端验收完成。
+
+## 交付版本与构建
+
+- manifest：`requirements.paseo = >=0.15.3`，没有最高版本；不修改 Paseo 核心。
+- 开发／插件依赖：`@getpaseo/plugin`、`client`、`protocol` 固定 `0.15.4`，由 `package-lock.json` 安装。
+- 实际宿主：早期原生验收为 `0.15.3`；应用在任务中更新为 `0.17.4` 后，在独立 daemon 上继续验收。早期版本证据没有改记为新版本通过。
+- 真实服务：当前 `https://api.multica.ai` 云实例，复用 daemon 用户默认 CLI 登录；CLI 为 `0.6.3`，提交 `18fa9f728`。云后端精确构建版本未获取，能力按本次实际响应记录。
+- 干净构建：在独立 worktree 中执行官方 npm registry 的 `npm ci --ignore-scripts`；`node_modules` 是独立目录，没有使用开发工作区的用户符号链接。类型检查和完整行为测试通过。
+- 可安装产物：`npm run build` 生成源码目录、`.tar.gz` 与 SHA-256 文件，包含 manifest、锁文件、两端入口及源码、文档、开发检查配置；排除 `node_modules`、Git 元数据和运行状态。
+- 从压缩包解出至另一独立目录，执行 manifest 的 `npm ci --omit=dev --ignore-scripts` 成功。用未修改的实际 `0.17.4` 宿主编译器源码编译两个入口，并用宿主共享 SDK `0.17.4` 加载贡献：provider／settings、管理页／侧栏、5 个 renderer 注册，客户端 bootstrap 发起一次。编译器的 esbuild／TypeScript 由私有 harness 提供；这项离线加载检查不称为新 daemon 安装或视觉验收。验证环境为 Node `26.13.1`、npm `12.2.3`。
+- 随后把独立解压并安装生产依赖的产物，通过实际 CLI 安装至全新 `0.17.4` daemon home，专用 loopback `17687`。插件状态 `running`，官方 `0.15.4` SDK 读取到 79,494 字节客户端 bundle；合成任务环境仅指向没有配置的私有根目录，无 Token／服务覆盖，连接状态正确为 `missing_config`、凭据来源 `none`、历史连接及原生 agent 均为 0。没有读取拥有者 CLI。证明完成后立即停止该唯一 daemon，确认端口关闭、supervisor 退出；没有触及用户主 daemon 或其他验收实例。
+
+Paseo 安装本地目录时引用该目录，**不执行 manifest build**；必须先安装生产依赖并保留目录。托管 Git 来源安装才执行 build。完整步骤见 [README](../README.md#构建与安装)。
+
+## 组合验收矩阵
+
+“实际宿主＋隔离服务”使用官方 SDK 操作真实 Paseo daemon 和原生记录，HTTP／WebSocket 数据及故障由 loopback fixture 控制；它不是一个真实自部署实例。“自动化”从公开贡献、provider、RPC 和 renderer 边界观察行为，不把内部 mock 或源代码阅读称为真实队列控件验收。
+
+| 场景 | 真实云服务 HENR-2 | 实际宿主＋隔离服务／自动化 | 结论与边界 |
+| --- | --- | --- | --- |
+| 干净默认 CLI 登录，无新 Token，空规则 | 独立 0.17.4 daemon：复用现有默认登录，空规则 0 agent | 干净插件状态、临时 CLI 与多类配置错误有自动化覆盖 | 默认云登录通过；真实自部署及命名 profile 未执行。 |
+| 独立 API／前端地址、环境覆盖、任务隔离 | 未改用户真实环境 | 临时文件／profile／任务标记／注入变量通过公开 HTTP 边界覆盖 | 不把 loopback 地址当真实部署证明。 |
+| 显式筛选、原生层级、主讨论 | project-only 规则只导入 HENR-2；project／workspace／main、描述行与独立 cwd 存在 | 0.15.3 原生分页、组合条件、退出重返、同 ID 恢复及隐藏优先通过 | 真实云限定范围通过；全组合来自隔离测试。 |
+| Thread 历史、原生角色、编辑／删除提示 | 新评论作为本人原生消息出现 | 0.15.3 原生 Thread／多作者／更正／删除／系统事件；长历史与分页完整性有自动化覆盖 | 未在云上执行编辑／删除或伪造旧版本。 |
+| 主讨论新 Thread、回复与有效 mention | 普通主讨论保存 1 评论，新增独立 Thread、无 Run；该 Thread 的 canonical agent mention 回复保存 1 评论并产生 1 Run | 稳定根 parent、同名 ID、回显与竞态测试通过 | 两类真实路由结果通过；仅触及授权 Issue。 |
+| 评论与回显去重 | 原生主讨论原输入一次，新 Thread 的根一次；精确同 key 重发远端仍一条评论 | 响应丢失、重启 replay、原 client ID／角色／全文核对测试通过 | 新 Thread 是独立会话，不当作重复回显删除。 |
+| 多 Run 唯一归属及聚合 turn | 真实单 Run 归属本 Thread，原生 running→idle | 0.15.3 多 Thread、交叉关联、无关联后补、并行／queued Run、后续周期 UUID 通过 | 云未制造多 Run；完整组合是实际宿主＋隔离服务证据。 |
+| 按需执行明细、日志／工具、缺口与截断 | 真实 run.open 成功，Stop 前消息数组为空 | 0.15.3 实际原生 RPC 分页往返 >200k 字符、序号缺口补读、工具 call ID 与完整性标记通过 | 真实丰富日志与视觉展开未验证；不从空输出推断工具支持。 |
+| 普通运行中发送与显式 interrupt | 真实普通评论和 mention 路由通过 | 实际 0.15.3 SDK 普通／interrupt、部分失败拒绝替换、Stop 集合与后续新 Run 竞态通过 | SDK 顺序证据不等于控件视觉验收。 |
+| 原生 queue、立即发送、composer 控件 | 未执行 | 已固定源码契约并测试宿主发出的公开输入序列；插件不新增队列 | **原生客户端 queue／控件／视觉仍未验证**。浏览器 host 不可用。 |
+| 原生 Stop 范围、取消／完成竞态、关闭 tab | 0.17.4 cancelAgent 约 954ms，唯一 Run 服务端 cancelled、原生 idle | 0.15.3 固定多 Run 集合、其他 tab／后来 Run 不取消、完成／失败终态、部分失败、关闭后单项重试通过 | 云 cleanup 为 UNKNOWN，不能声称进程物理退出。 |
+| workspace 归档、人工隐藏与恢复 | 未对真实目标重复归档 | 0.15.3 整 workspace 活动时归档 0 cancel；隐藏跨筛选／离线，选择性恢复原 ID 通过 | 自动归档与人工隐藏分别持久化。 |
+| 实际服务幂等能力 | GET 回执 200＋Idempotent-Replayed:true；精确同 key／正文／目标 POST 200、同 comment ID，评论数 1，Run 集合不变 | 旧服务、不支持／冲突／超期、一次安全重试与停止栅栏有自动化覆盖 | 当前云实例正面去重通过；没有实测等待 7 天或真实自部署能力。 |
+| 响应丢失与有界恢复 | 未对云注入断线 | 0.17.4：保存后丢响应 1 POST／1 effect；未保存后同 key 重试 2 POST／1 effect；两次均未保存后无第 3 POST；Stop 后 0 重试 | 这是实际 daemon＋隔离 HTTP，不是真实云故障注入。 |
+| 同账号续用、切换身份与请求栅栏 | 未旋转真实凭据或切换账号／profile | 0.17.4 合成 A→B→A 保留旧身份、隐藏、投递／Stop 告警，跨身份拒绝写入，回切原 ID；文件轮换／登出／profile／在途撤销有自动化覆盖 | **真实 CLI Token 轮换、命名 profile／账号切换未执行**。 |
+| 离线补读、daemon 重启与引导 | 独立 0.17.4 实例实际加载；真实浏览器连接未执行 | 实际 0.17.4 离线重启、5 个 canonical 原文身份和缓存描述／执行恢复通过；编译客户端验证无需打开管理页的 bootstrap 与重试 | 重启后仍需一次客户端连接；不声称无人连接自启或已看见实际 UI 自动连接。 |
+| 对象失权只读、连接级失败不误删 | 未撤销云权限或删除目标 | 公开边界测试覆盖对象 403／404、网络／401／503、缓存历史、写入竞态和恢复；实际 0.17.4 额外发现原生发送先解归档后拒收的生命周期问题 | 写入阻止有效；不匹配筛选时重新归档的修复与实际复验尚待集成。真实云失权未执行。 |
+
+## 原生发现的问题与修复
+
+实际 0.15.3 验收曾发现恢复已活跃 workspace 被宿主拒绝、导入早期活动事件丢失／完成 turn ID 复用、Stop 等待期间新 Run 导致原生活动丢失、重启后已保存回复重复 replay。实现分别改为核对完整原生目录、挂载后观察并为新周期分配 UUID、结束原 Stop 聚合后用新 turn 展示后来 Run、共享原始消息身份核对。均保留公开行为回归；Stop 后来 Run 及重启恢复有再次实际宿主证据。未通过降低宿主支持范围掩盖问题。
+
+应用从 0.15.3 更新到 0.17.4 时，旧 daemon 进程与新 plugin worker 文件混用曾造成协议拒绝；仅重启拥有的隔离 daemon 后恢复。用户原主 daemon 未被重启或 reload，本记录不声称最终源码已部署到用户原 daemon。遇到类似更新情况，先确认运行进程和安装文件版本，再按正常部署方式重启目标 daemon 使版本一致。
+
+## 证据范围与复验
+
+自动化在仓库执行 `npm ci --ignore-scripts && npm run check`；构建执行 `npm run build`。从产物独立解压后执行 `npm ci --omit=dev --ignore-scripts`，再在目标 daemon 安装并检查插件状态。真实服务复验需先核对当前账号、工作区、精确 Issue 与唯一可用 agent，限定筛选后再产生评论；不要把已用过的故障注入脚本当作干净状态直接重跑。
+
+私有临时证据位置仅作本次会话审计索引，不是发布包运行依赖，也没有提交完整响应、邮箱、凭据、运行状态或评论正文：
+
+- `/tmp/paseo-multica-real-final-acceptance.md` 及 `/tmp/paseo-multica-live-acceptance/{import,plain-comment,replay-proof,run-stop}-evidence.json`：本次真实云结果。
+- `/tmp/paseo-multica-runs-acceptance.md` 与 `/tmp/paseo-multica-runtime-egrktl_j/{runs-acceptance,stops-acceptance,interrupt-acceptance}-evidence.json`：早期 0.15.3 原生结果及其边界。
+- 同目录 `stop-late-run-fixed-evidence.json`、`recovery-acceptance52-evidence.json` 与 `/tmp/paseo-multica-recovery-identity-acceptance.md`：修复复验、0.17.4 离线重启和有界恢复／身份隔离。
+- `/tmp/paseo-multica-delivery-load-evidence.json`：干净产物依赖安装后的实际宿主编译／贡献加载检查；此项没有使用 daemon。
+- `/tmp/paseo-multica-delivery-runtime/install-evidence.json`：全新实际 `0.17.4` daemon 安装干净解压产物、catalog／隔离连接／零导入与精确停止清理的证据。
+
+真实服务留下两条授权验收评论作为痕迹，mention 产生的唯一 Run 已取消。未清除评论、重置 Issue 或扩展至其他任务。宿主原生 queue／视觉、真实自部署、真实 CLI 凭据轮换、丰富真实执行输出、真实对象失权和物理进程清理确认仍是明确的未验收边界。

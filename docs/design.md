@@ -1,7 +1,7 @@
 # Paseo–Multica 设计访谈
 
-27 项产品决定及用户补充的 S1（自部署与 CLI 登录复用）已获整体确认，并通过 `/to-spec` 发布 [规格 issue #1](https://github.com/henrylee20/paseo-multica-provider/issues/1)，尚未开始功能实现。
-实施规格见 [spec.md](./spec.md)，工程步骤与验证门槛见 [implementation-plan.md](./implementation-plan.md)；本文件保留逐项决定及源码证据。
+27 项产品决定及用户补充的 S1（自部署与 CLI 登录复用）已获整体确认，并通过 `/to-spec` 发布 [规格 issue #1](https://github.com/henrylee20/paseo-multica-provider/issues/1)。本文件保留实现前的逐项决定及固定版本源码证据；当前已集成 #2–#15，真实宿主和服务的后续结果见 [组合验收记录](./acceptance.md)，不将下文原始静态核查改写为运行通过。
+实施规格见 [spec.md](./spec.md)，工程步骤与验证门槛见 [implementation-plan.md](./implementation-plan.md)，安装与使用见 [README](../README.md)。
 
 ## 已确认
 
