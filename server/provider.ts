@@ -37,12 +37,25 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
       let closed = false;
       const emit = (event: ProviderEvent) => { if (!closed) for (const listener of listeners) listener(event); };
       const emittedRows = new Map<string, Set<string>>();
+      const originalIdentities = new Map<string, Set<string>>();
+      const rememberOriginal = (sessionId: string, row: StoredRow) => {
+        const identities = originalIdentities.get(sessionId) ?? new Set<string>();
+        const keys = [JSON.stringify([row.role, "comment", row.commentId]),
+          ...(row.role === "user" && row.clientMessageId ? [JSON.stringify(["user", "input", row.clientMessageId])] : [])];
+        const seen = keys.some(key => identities.has(key));
+        for (const key of keys) identities.add(key);
+        originalIdentities.set(sessionId, identities);
+        return !seen;
+      };
       const emitRow = (sessionId: string, address: { connectionKey: string; issueId: string; rootId: string }, row: StoredRow, includeOriginal = true) => {
         const emitted = emittedRows.get(sessionId) ?? new Set<string>();
         if (emitted.has(row.id)) return;
         emitted.add(row.id); emittedRows.set(sessionId, emitted);
         const timestamp = row.role === "event" ? row.sourceUpdatedAt ?? row.sourceCreatedAt : row.sourceCreatedAt;
-        if (includeOriginal || row.role === "event") emit({ type: "timeline.item", sessionId, item: projectRow(address, row), ...(timestamp && Number.isFinite(Date.parse(timestamp)) ? { timestamp } : {}) });
+        // Cached comments and durable inputs can be two representations of one
+        // original. Canonical recovery also acknowledges originals it skips.
+        const firstOriginal = row.role === "event" || rememberOriginal(sessionId, row);
+        if ((includeOriginal && firstOriginal) || row.role === "event") emit({ type: "timeline.item", sessionId, item: projectRow(address, row), ...(timestamp && Number.isFinite(Date.parse(timestamp)) ? { timestamp } : {}) });
         if (row.role !== "event") emit({ type: "timeline.item", sessionId, item: {
           type: "plugin", id: `multica:comment-source:${row.commentId}`, pluginId: "multica", kind: "comment-event", version: 1,
           data: { ...address, recordId: row.id, commentId: row.commentId, category: "source", truncated: false,
@@ -107,13 +120,10 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
             }
             const address = { connectionKey: parsed.data.data.connectionKey, issueId: parsed.data.data.issueId, rootId: parsed.data.data.discussion === "thread" ? parsed.data.data.rootId : "main" };
             addresses.set(input.sessionId, address);
-            const inputEchoes = new Set<string>();
             const projectDelivery = (record: (typeof issue.deliveries)[string], includeOriginal = false) => {
               emit({ type: "timeline.item", sessionId: input.sessionId, item: deliveryRow(record) });
-              if (includeOriginal && !inputEchoes.has(record.clientMessageId)) {
-                inputEchoes.add(record.clientMessageId);
-                emit({ type: "timeline.item", sessionId: input.sessionId, item: projectRow(address, deliveryInput(record)) });
-              }
+              const row = deliveryInput(record);
+              if (includeOriginal && rememberOriginal(input.sessionId, row)) emit({ type: "timeline.item", sessionId: input.sessionId, item: projectRow(address, row) });
             };
             for (const record of Object.values(issue.deliveries).filter(record => record.rootId === address.rootId)) projectDelivery(deliveries.presentation(record), input.history === "replay");
             deliverySubscriptions.set(input.sessionId, deliveries.subscribe(address, projectDelivery, input.history !== "replay"));
@@ -158,6 +168,7 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
           if (input.type === "session.close") {
             sessions.delete(input.sessionId);
             emittedRows.delete(input.sessionId);
+            originalIdentities.delete(input.sessionId);
             descriptionSubscriptions.get(input.sessionId)?.(); descriptionSubscriptions.delete(input.sessionId);
             addresses.delete(input.sessionId);
             activeTurns.delete(input.sessionId);
@@ -215,7 +226,7 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
           }
           if ("requestId" in input) emit({ type: "request.failed", requestId: input.requestId, error: { code: "unsupported", message: "此操作尚未支持。" } });
         },
-        async close() { emittedRows.clear(); for (const unsubscribe of deliverySubscriptions.values()) unsubscribe(); deliverySubscriptions.clear(); activeTurns.clear(); interruptSettlements.clear(); for (const unsubscribe of descriptionSubscriptions.values()) unsubscribe(); descriptionSubscriptions.clear(); for (const unsubscribe of runSubscriptions.values()) unsubscribe(); runSubscriptions.clear(); for (const unsubscribe of subscriptions.values()) unsubscribe(); subscriptions.clear(); sessions.clear(); addresses.clear(); listeners.clear(); closed = true; },
+        async close() { emittedRows.clear(); originalIdentities.clear(); for (const unsubscribe of deliverySubscriptions.values()) unsubscribe(); deliverySubscriptions.clear(); activeTurns.clear(); interruptSettlements.clear(); for (const unsubscribe of descriptionSubscriptions.values()) unsubscribe(); descriptionSubscriptions.clear(); for (const unsubscribe of runSubscriptions.values()) unsubscribe(); runSubscriptions.clear(); for (const unsubscribe of subscriptions.values()) unsubscribe(); subscriptions.clear(); sessions.clear(); addresses.clear(); listeners.clear(); closed = true; },
       };
     },
   };
