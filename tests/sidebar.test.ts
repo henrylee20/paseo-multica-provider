@@ -355,7 +355,7 @@ it("the main discussion replays a stable task description row without participan
   expect(f.requests).toHaveLength(beforeClose);
 });
 
-it("a large task description stays within the plugin row limit and can be read completely through authorized pages", async () => {
+it("a large task description stays within the row limit and its cached full text remains readable after CLI logout", async () => {
   const f = await fixture();
   const description = `${"中文😀\n\\\"".repeat(15_000)}最终段落，不能截断。`;
   f.issues[0].description = description;
@@ -375,11 +375,17 @@ it("a large task description stays within the plugin row limit and can be read c
   expect(row.item.data).toMatchObject({ truncated: true });
   const data = z.object({ connectionKey: z.string(), issueId: z.string(), revision: z.string(), preview: z.string() }).parse(row.item.data);
   expect(data.preview.length).toBeLessThan(description.length);
+  await f.dispose();
+  const reader = f.start();
+  const configPath = join(f.home, ".multica", "config.json");
+  const cliConfig = await readFile(configPath, "utf8");
+  await rm(configPath);
+  const requestsBeforeRead = f.requests.length;
   let offset: number | null = 0;
   let full = "";
   let pages = 0;
   while (offset !== null) {
-    const page: { text: string; nextOffset: number | null } = await f.server.rpc(readDescription,
+    const page: { text: string; nextOffset: number | null } = await reader.server.rpc(readDescription,
       { connectionKey: data.connectionKey, issueId: data.issueId, revision: data.revision, offset }, f.paseo);
     expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThan(64 * 1024);
     full += page.text;
@@ -388,10 +394,12 @@ it("a large task description stays within the plugin row limit and can be read c
   }
   expect(pages).toBeGreaterThan(1);
   expect(full).toBe(description);
-  await expect(f.server.rpc(readDescription, { ...data, connectionKey: "another-user", offset: 0 }, f.paseo)).rejects.toThrow();
+  expect(f.requests).toHaveLength(requestsBeforeRead);
+  await expect(reader.server.rpc(readDescription, { ...data, connectionKey: "another-user", offset: 0 }, f.paseo)).rejects.toThrow();
+  await writeFile(configPath, cliConfig);
   f.issues[0].description = "任务描述已更新";
-  await f.server.rpc(bootstrap, {}, f.paseo);
-  await expect(f.server.rpc(readDescription, { ...data, offset: 0 }, f.paseo)).rejects.toThrow();
+  await reader.server.rpc(bootstrap, {}, f.paseo);
+  await expect(reader.server.rpc(readDescription, { ...data, offset: 0 }, f.paseo)).rejects.toThrow();
 });
 
 it("typed multi-value filters intersect fields and keep directly assigned members distinct from owned agents", async () => {

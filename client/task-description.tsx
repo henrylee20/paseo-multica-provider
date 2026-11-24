@@ -30,7 +30,7 @@ function TaskDescriptionBody({ item, theme }: DescriptionProps) {
         offset = page.nextOffset;
       }
       setFullDescription(parts.join(""));
-    } catch { setError("完整描述暂不可用，请恢复原连接并重新打开讨论后重试。"); }
+    } catch { setError("完整描述暂不可用，请重新打开讨论后重试。"); }
     finally { setLoading(false); }
   }
   return <View style={{ gap: 8 }}>

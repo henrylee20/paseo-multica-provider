@@ -41,9 +41,9 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     const store = new StateStore(dependencies.stateDirectory ?? join(owningHome || join(dependencies.homeDirectory ?? homedir(), ".paseo"), "multica-provider"));
     server.registerProvider(createMulticaProvider(store));
     server.handle(readTaskDescription, async input => {
-      const current = await connection();
-      if (input.connectionKey !== current.connectionKey) throw new Error("Task description belongs to another connection");
-      const issue = (await store.read()).connections[current.connectionKey]?.issues[input.issueId];
+      // The host authenticates this RPC. Cached history belongs to its persisted
+      // connection, even while the CLI is offline, logged out, or using another account.
+      const issue = (await store.read()).connections[input.connectionKey]?.issues[input.issueId];
       if (!issue || descriptionRevision(issue.description) !== input.revision || input.offset > issue.description.length) {
         throw new Error("Task description changed or is unavailable; reopen the discussion");
       }
