@@ -41,4 +41,3 @@ function TaskDescriptionBody({ item, theme }: DescriptionProps) {
     {error ? <Text accessibilityRole="alert" style={{ color: theme.colors.statusDanger }}>{error}</Text> : null}
   </View>;
 }
-
