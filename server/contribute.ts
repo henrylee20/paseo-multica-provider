@@ -20,12 +20,13 @@ import { hiddenList, hiddenRestore } from "../shared/hiding.js";
 import { StopCoordinator } from "./stops.js";
 import { stopList, stopRetry } from "../shared/stops.js";
 import { CommentDelivery } from "./delivery.js";
-import { deliveryList, deliveryRead, deliveryTargets, deliveryMentions } from "../shared/delivery.js";
+import { deliveryList, deliveryRead, deliveryTargets, deliveryMentions, deliveryVerify, deliveryResend } from "../shared/delivery.js";
 
 export interface ServerDependencies extends ConnectionDependencies {
   stateDirectory: string;
   connectHost: (paseoHome: string) => Promise<NativeHost>;
   syncIntervalMs: number;
+  now: () => Date;
 }
 
 export function createServerContribution(dependencies: Partial<ServerDependencies> = {}): PluginServerContribution {
@@ -78,8 +79,10 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     const runs = new RunSynchronizer(store);
     const runDetails = new RunDetails(store, connection);
     const stops = new StopCoordinator(store, connection, runs);
-    const deliveries = new CommentDelivery(store, connection, stops, () => synchronizer.reconcile());
+    const deliveries = new CommentDelivery(store, connection, stops, () => synchronizer.reconcile(), dependencies.now);
     threads.coordinateDeliveries(() => deliveries.waitForPosts());
+    server.handle(deliveryVerify, async input => deliveries.verify(input));
+    server.handle(deliveryResend, async input => deliveries.resend(input));
     server.handle(deliveryList, async () => deliveries.list());
     server.handle(deliveryRead, async input => deliveries.read(input));
     server.handle(deliveryTargets, async () => deliveries.targets());
@@ -124,6 +127,7 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       onCached: async host => { await threads.reconcile(host); await deliveries.recover(host); },
       onIssue: async (connection, workspace, issueId, host) => {
         await descriptions.observe({ connectionKey: connection.connectionKey, issueId });
+        await deliveries.reconcile(connection, workspace, issueId);
         await threads.discover(connection, workspace, issueId, host);
         await runs.discover(connection, workspace, issueId);
       },

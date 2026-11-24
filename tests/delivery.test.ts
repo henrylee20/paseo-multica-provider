@@ -18,16 +18,25 @@ afterEach(async () => { for (const dispose of cleanup.splice(0).reverse()) await
 const stamp = "2026-11-24T10:00:00Z";
 const comment = (id: string, parent_id: string | null, content: string) => ({ id, parent_id, content, author_id: "me", author_type: "member", issue_id: "issue", type: "comment", created_at: stamp, updated_at: stamp, attachments: [] });
 const deliveryList = defineRpc({ name: "delivery.list", input: z.object({}), output: z.object({ records: z.array(z.object({
-  connectionKey: z.string(), issueId: z.string(), rootId: z.string(), clientMessageId: z.string(), idempotencyKey: z.string(), body: z.string(), createdAt: z.string(),
+  connectionKey: z.string(), issueId: z.string(), rootId: z.string(), clientMessageId: z.string(), retryOf: z.string().optional(), idempotencyKey: z.string(), body: z.string(), createdAt: z.string(),
   status: z.enum(["received", "saved", "failed", "pending_verification"]), commentId: z.string().optional(), threadRootId: z.string().optional(), threadAgentId: z.string().optional(), message: z.string().optional(),
 })) }) });
+const actionAddress = z.object({ connectionKey: z.string(), issueId: z.string(), rootId: z.string(), clientMessageId: z.string() });
+const deliveryVerify = defineRpc({ name: "delivery.verify", input: actionAddress, output: z.object({ status: z.enum(["saved", "pending_verification"]), message: z.string().optional() }) });
+const deliveryResend = defineRpc({ name: "delivery.resend", input: actionAddress.extend({ requestId: z.string(), acknowledgeDuplicateRisk: z.literal(true) }), output: z.object({ clientMessageId: z.string(), idempotencyKey: z.string() }) });
 const deliveryMentions = defineRpc({ name: "delivery.mentions", input: z.object({ connectionKey: z.string(), issueId: z.string() }), output: z.object({ agents: z.array(z.object({ id: z.string(), name: z.string(), reference: z.string() })) }) });
-async function fixture(active = false) {
+async function fixture(active = false, idempotent = false) {
   const home = await mkdtemp(join(tmpdir(), "multica-delivery-"));
   cleanup.push(() => rm(home, { recursive: true, force: true }));
   const comments = [comment("root", null, "Existing root")];
   const runs = active ? [{ id: "run", issue_id: "issue", agent_id: "agent", status: "running", trigger_comment_id: "root" }] : [];
   const posts: Array<{ path: string; body: unknown; key?: string; slug?: string }> = [];
+  const receipts = new Map<string, ReturnType<typeof comment>>();
+  const lookups: string[] = [];
+  const deletedReceipts = new Set<string>();
+  let lookupFailure: number | undefined;
+  let clock = new Date("2026-11-24T10:00:00Z");
+  let beforeLookup: ((key: string) => Promise<void>) | undefined;
   let identity = "me";
   let beforeMe: (() => Promise<void>) | undefined;
   let post: (body: { content: string; parent_id?: string }) => Promise<{ status?: number; body?: unknown; disconnect?: boolean }> = async body => {
@@ -42,11 +51,24 @@ async function fixture(active = false) {
       const input = text ? JSON.parse(text) : {};
       posts.push({ path: url.pathname, body: input, key: request.headers["idempotency-key"] as string, slug: request.headers["x-workspace-slug"] as string });
       if (url.pathname.endsWith("/cancel")) { runs[0].status = "cancelled"; body = runs[0]; }
-      else { const result = await post(input); if (result.disconnect) { response.destroy(); return; } response.statusCode = result.status ?? 200; body = result.body ?? {}; }
+      else {
+        const key = request.headers["idempotency-key"] as string;
+        const existing = idempotent ? receipts.get(key) : undefined;
+        const result = existing ? { body: existing } : await post(input);
+        if (idempotent && result.body && (result.body as { type?: string }).type === "comment") receipts.set(key, result.body as ReturnType<typeof comment>);
+        if (result.disconnect) { response.destroy(); return; } response.statusCode = result.status ?? 200; body = result.body ?? {}; }
     } else if (url.pathname === "/api/me") { await beforeMe?.(); body = { id: identity, name: "Lin" }; }
     else if (url.pathname === "/api/workspaces") body = [{ id: "workspace", name: "Product", slug: "product" }];
     else if (url.pathname === "/api/issues") body = { issues: [{ id: "issue", workspace_id: "workspace", title: "Task", description: "Description", status: "todo" }], total: 1 };
     else if (url.pathname === "/api/issues/issue/task-runs") body = runs;
+    else if (url.pathname === "/api/issues/issue/comments/idempotent" && idempotent) {
+      const key = request.headers["idempotency-key"] as string; lookups.push(key); await beforeLookup?.(key);
+      const receipt = receipts.get(key);
+      if (lookupFailure) { response.statusCode = lookupFailure; body = {}; }
+      else if (deletedReceipts.has(key)) { response.statusCode = 409; body = { error: "the comment created with this Idempotency-Key has been deleted" }; }
+      else if (receipt) { response.setHeader("Idempotent-Replayed", "true"); body = receipt; }
+      else { response.statusCode = 404; body = { error: "no comment has been posted with this Idempotency-Key" }; }
+    }
     else if (url.pathname === "/api/issues/issue/comments") body = url.searchParams.has("thread") ? comments.filter(c => c.id === url.searchParams.get("thread") || c.parent_id === url.searchParams.get("thread")) : comments;
     else if (url.pathname === "/api/agents") body = [{ id: "12345678-1234-4234-9234-123456789abc", name: "Agent [A]" }, { id: "22345678-1234-4234-9234-123456789abc", name: "Agent [A]" }];
     else { response.statusCode = 404; body = {}; }
@@ -89,14 +111,14 @@ async function fixture(active = false) {
     }, updateAgent: async () => {}, close: async () => {},
   } as unknown as DaemonClient;
   const paseo = { hosts: { list: async () => ({ self: { serverId: "daemon" } }) } } as unknown as PaseoApi;
-  const start = () => { provider = undefined; server = new FakeServer(); const dispose = createServerContribution({ homeDirectory: home, workingDirectory: home, environment: { PASEO_HOME: home }, connectHost: async () => host })(server.context); cleanup.push(dispose); return { server, dispose }; };
+  const start = () => { provider = undefined; server = new FakeServer(); const dispose = createServerContribution({ homeDirectory: home, workingDirectory: home, environment: { PASEO_HOME: home }, now: () => clock, connectHost: async () => host })(server.context); cleanup.push(dispose); return { server, dispose }; };
   const started = start(); cleanup.push(async () => { await provider?.close(); });
   await server!.rpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, paseo);
   const send = async (rootId: string, text: string, clientMessageId: string, delivery: "auto" | "steer" = "auto") => {
     const agent = agents.find(agent => agent.labels["multica.discussion"] === rootId)!;
     await (await connect()).send({ type: "session.prompt", sessionId: agent.id, prompt: { clientMessageId, delivery, input: { type: "message", content: [{ type: "text", text }] } } });
   };
-  return { ...started, home, paseo, agents, events, canonical, nativeHistory, comments, runs, posts, connect, send, start, identity: (id: string) => { identity = id; }, beforeMe: (handler?: () => Promise<void>) => { beforeMe = handler; }, post: (handler: typeof post) => { post = handler; } };
+  return { ...started, home, paseo, agents, events, canonical, nativeHistory, comments, runs, posts, lookups, receipts, deletedReceipts, connect, send, start, lookupFailure: (status?: number) => { lookupFailure = status; }, advance: (milliseconds: number) => { clock = new Date(clock.getTime() + milliseconds); }, beforeLookup: (handler: typeof beforeLookup) => { beforeLookup = handler; }, identity: (id: string) => { identity = id; }, beforeMe: (handler?: () => Promise<void>) => { beforeMe = handler; }, post: (handler: typeof post) => { post = handler; } };
 }
 
 it("main discussion saves an ordinary text comment, preserves its identity and offers the new Thread", async () => {
@@ -345,4 +367,173 @@ it("a receipt storage failure keeps the remote result visibly unknown and never 
     expect(f.events).toContainEqual(expect.objectContaining({ type: "timeline.item", item: expect.objectContaining({ type: "plugin", kind: "comment-delivery", data: expect.objectContaining({ status: "pending_verification" }) }) }));
     expect(f.posts).toHaveLength(1);
   } finally { await rm(join(f.home, "multica-provider/state.json.next"), { recursive: true, force: true }); }
+});
+
+
+it("recovers a saved comment after a lost response and restart using its authoritative keyed receipt", async () => {
+  const f = await fixture(false, true);
+  f.post(async body => { const saved = comment("receipt-after-crash", "root", body.content); f.comments.push(saved); return { body: saved, disconnect: true }; });
+  await f.send("root", "Exactly one remote effect", "recover-input");
+  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[0]?.status).toBe("pending_verification");
+  const original = (await f.server.rpc(deliveryList, {}, f.paseo)).records[0];
+  await f.dispose(); const restarted = f.start();
+  await restarted.server.rpc(syncBootstrap, {}, f.paseo);
+  expect((await restarted.server.rpc(deliveryList, {}, f.paseo)).records[0]).toMatchObject({ ...original, status: "saved", commentId: "receipt-after-crash", threadRootId: "root", message: expect.any(String) });
+  expect(f.lookups).toContain(original.idempotencyKey);
+  expect(f.posts).toHaveLength(1);
+  expect(f.comments.filter(value => value.content === "Exactly one remote effect")).toHaveLength(1);
+});
+
+
+it("retries a missing receipt only after fresh positive proof, preserving key, content and original native input", async () => {
+  const f = await fixture(false, true);
+  await f.send("root", "Capability anchor", "anchor");
+  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[0]?.status).toBe("saved");
+  f.post(async () => ({ status: 503 }));
+  await f.send("root", "Same immutable body", "safe-retry");
+  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[1]?.status).toBe("pending_verification");
+  const original = (await f.server.rpc(deliveryList, {}, f.paseo)).records[1];
+  const boundary = f.lookups.length;
+  f.post(async body => { const saved = comment("safe-receipt", "root", body.content); f.comments.push(saved); return { body: saved }; });
+  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  expect((await f.server.rpc(deliveryList, {}, f.paseo)).records[1]).toMatchObject({ ...original, status: "saved", commentId: "safe-receipt", message: expect.any(String) });
+  expect(f.lookups.slice(boundary)).toContain(original.idempotencyKey);
+  expect(f.posts.filter(post => post.key === original.idempotencyKey)).toEqual([
+    { path: "/api/issues/issue/comments", body: { content: "Same immutable body", type: "comment", parent_id: "root" }, key: original.idempotencyKey, slug: "product" },
+    { path: "/api/issues/issue/comments", body: { content: "Same immutable body", type: "comment", parent_id: "root" }, key: original.idempotencyKey, slug: "product" },
+  ]);
+  expect(f.comments.filter(value => value.content === "Same immutable body")).toHaveLength(1);
+  expect(new TextEncoder().encode(original.idempotencyKey).length).toBeLessThanOrEqual(255);
+});
+
+
+it("a missing receipt at the seven-day bound stays pending despite a currently working receipt API", async () => {
+  const f = await fixture(false, true);
+  await f.send("root", "Working receipt anchor", "expiry-anchor");
+  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[0]?.status).toBe("saved");
+  f.post(async () => ({ status: 503 }));
+  await f.send("root", "Expired original request", "expired-input");
+  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[1]?.status).toBe("pending_verification");
+  const original = (await f.server.rpc(deliveryList, {}, f.paseo)).records[1];
+  f.advance(7 * 24 * 60 * 60 * 1000);
+  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  expect(f.posts).toHaveLength(2);
+  expect((await f.server.rpc(deliveryList, {}, f.paseo)).records[1]).toMatchObject({ idempotencyKey: original.idempotencyKey, createdAt: original.createdAt, status: "pending_verification", message: expect.stringContaining("7 天") });
+});
+
+
+it("Stop during receipt recovery fences the old retry while preserving pending input", async () => {
+  const f = await fixture(true, true);
+  await f.send("root", "Receipt anchor before Stop", "stop-anchor", "steer");
+  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[0]?.status).toBe("saved");
+  f.post(async () => ({ status: 503 }));
+  await f.send("root", "Do not execute after Stop", "stop-retry", "steer");
+  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[1]?.status).toBe("pending_verification");
+  const original = (await f.server.rpc(deliveryList, {}, f.paseo)).records[1];
+  let release!: () => void, reached!: () => void;
+  const blocked = new Promise<void>(resolve => { release = resolve; }), waiting = new Promise<void>(resolve => { reached = resolve; });
+  f.beforeLookup(async key => { if (key === original.idempotencyKey) { reached(); await blocked; } });
+  const refresh = f.server.rpc(syncBootstrap, {}, f.paseo);
+  await waiting;
+  const thread = f.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
+  await (await f.connect()).send({ type: "session.interrupt", requestId: "stop-recovery", sessionId: thread.id });
+  release(); await refresh;
+  expect(f.posts.filter(post => post.path.endsWith("/comments"))).toHaveLength(2);
+  expect((await f.server.rpc(deliveryList, {}, f.paseo)).records[1]).toMatchObject({ body: "Do not execute after Stop", status: "pending_verification", message: expect.stringContaining("stopped") });
+});
+
+
+it("management verification never sends, and explicit resend creates one separately identified attempt", async () => {
+  const f = await fixture();
+  f.post(async body => { const saved = comment("uncertain-original", "root", body.content); f.comments.push(saved); return { body: saved, disconnect: true }; });
+  await f.send("root", "User decides about duplication", "uncertain-original");
+  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[0]?.status).toBe("pending_verification");
+  const original = (await f.server.rpc(deliveryList, {}, f.paseo)).records[0];
+  const address = { connectionKey: original.connectionKey, issueId: original.issueId, rootId: original.rootId, clientMessageId: original.clientMessageId };
+  expect(await f.server.rpc(deliveryVerify, address, f.paseo)).toMatchObject({ status: "pending_verification" });
+  expect(f.posts).toHaveLength(1);
+  f.post(async body => { const saved = comment("explicit-new-attempt", "root", body.content); f.comments.push(saved); return { body: saved }; });
+  f.advance(1000);
+  const input = { ...address, requestId: "one-explicit-decision", acknowledgeDuplicateRisk: true as const };
+  const next = await f.server.rpc(deliveryResend, input, f.paseo);
+  expect(await f.server.rpc(deliveryResend, input, f.paseo)).toEqual(next);
+  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[1]?.status).toBe("saved");
+  const records = (await f.server.rpc(deliveryList, {}, f.paseo)).records;
+  expect(records[0]).toMatchObject({ ...original, status: "pending_verification", message: expect.any(String) });
+  expect(records[1]).toMatchObject({ retryOf: original.idempotencyKey, body: original.body, rootId: "root", commentId: "explicit-new-attempt" });
+  expect(next.idempotencyKey).not.toBe(original.idempotencyKey);
+  expect(next.clientMessageId).not.toBe(original.clientMessageId);
+  expect(records[1].createdAt).not.toBe(original.createdAt);
+  expect(f.posts).toHaveLength(2);
+  f.identity("another-user");
+  await expect(f.server.rpc(deliveryResend, { ...input, requestId: "wrong-identity" }, f.paseo)).rejects.toThrow("原 Multica 身份");
+  expect(f.posts).toHaveLength(2);
+});
+
+
+it("a deleted original comment stops automatic recovery and an altered body cannot reuse the input key", async () => {
+  const f = await fixture(false, true);
+  f.post(async body => { const saved = comment("deleted-original", "root", body.content); f.comments.push(saved); return { body: saved, disconnect: true }; });
+  await f.send("root", "Immutable original content", "deleted-input");
+  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[0]?.status).toBe("pending_verification");
+  const original = (await f.server.rpc(deliveryList, {}, f.paseo)).records[0];
+  f.deletedReceipts.add(original.idempotencyKey);
+  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  expect((await f.server.rpc(deliveryList, {}, f.paseo)).records[0]).toMatchObject({ status: "pending_verification", body: "Immutable original content", message: expect.stringContaining("已删除") });
+  await f.send("root", "Changed body under same client identity", "deleted-input");
+  expect(f.events).toContainEqual(expect.objectContaining({ type: "session.prompt_result", clientMessageId: "deleted-input", result: expect.objectContaining({ type: "failed", error: expect.objectContaining({ message: expect.stringContaining("不能改变正文") }) }) }));
+  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  expect(f.posts).toHaveLength(1);
+});
+
+
+it("a CLI credential change during receipt lookup cannot authorize an old recovery POST", async () => {
+  const f = await fixture(false, true);
+  await f.send("root", "Positive receipt proof", "identity-proof");
+  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[0]?.status).toBe("saved");
+  f.post(async () => ({ status: 503 }));
+  await f.send("root", "Original identity only", "identity-recovery");
+  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[1]?.status).toBe("pending_verification");
+  const original = (await f.server.rpc(deliveryList, {}, f.paseo)).records[1];
+  f.beforeLookup(async key => {
+    if (key !== original.idempotencyKey) return;
+    const path = join(f.home, ".multica/config.json");
+    const config = JSON.parse(await readFile(path, "utf8"));
+    await writeFile(path, JSON.stringify({ ...config, token: "replacement-cli-credential" }));
+  });
+  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  expect(f.posts).toHaveLength(2);
+  expect((await f.server.rpc(deliveryList, {}, f.paseo)).records[1]).toMatchObject({ body: original.body, idempotencyKey: original.idempotencyKey, status: "pending_verification" });
+});
+
+
+it("an unavailable receipt lookup halts automatic retries and explicit verification can later recover the same original", async () => {
+  const f = await fixture(false, true);
+  f.post(async body => { const saved = comment("receipt-after-outage", "root", body.content); f.comments.push(saved); return { body: saved, disconnect: true }; });
+  await f.send("root", "Keep the original through outage", "lookup-outage");
+  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[0]?.status).toBe("pending_verification");
+  const original = (await f.server.rpc(deliveryList, {}, f.paseo)).records[0];
+  f.lookupFailure(503);
+  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  f.lookupFailure();
+  const boundary = f.lookups.length;
+  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  expect(f.lookups).toHaveLength(boundary);
+  expect(f.posts).toHaveLength(1);
+  expect(await f.server.rpc(deliveryVerify, { connectionKey: original.connectionKey, issueId: original.issueId, rootId: original.rootId, clientMessageId: original.clientMessageId }, f.paseo)).toMatchObject({ status: "saved" });
+  expect((await f.server.rpc(deliveryList, {}, f.paseo)).records[0]).toMatchObject({ ...original, status: "saved", commentId: "receipt-after-outage", message: expect.any(String) });
+  expect(f.posts).toHaveLength(1);
+});
+
+it("a replay whose remotely edited body differs cannot bind to or replace the immutable original input", async () => {
+  const f = await fixture(false, true);
+  f.post(async body => { const saved = comment("edited-remote-original", "root", body.content); f.comments.push(saved); return { body: saved, disconnect: true }; });
+  await f.send("root", "Keep exactly this original body", "edited-receipt");
+  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[0]?.status).toBe("pending_verification");
+  const original = (await f.server.rpc(deliveryList, {}, f.paseo)).records[0];
+  // The real service fingerprints only target/type; a later edit is not our original payload.
+  f.receipts.get(original.idempotencyKey)!.content = "A later remote edit";
+  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  expect((await f.server.rpc(deliveryList, {}, f.paseo)).records[0]).toMatchObject({ body: "Keep exactly this original body", status: "pending_verification" });
+  expect(f.posts).toHaveLength(1);
 });
