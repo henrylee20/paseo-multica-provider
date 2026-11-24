@@ -6,7 +6,7 @@ import { z } from "zod";
 import { taskRuleSchema, type TaskRule, type SyncStatus } from "../shared/contracts.js";
 import { issueQuery } from "./filters.js";
 import { WorkspaceEvents, type WorkspaceEvent } from "./workspace-events.js";
-import type { AuthenticatedConnection } from "./connection.js";
+import { remoteFetch, type AuthenticatedConnection } from "./connection.js";
 import { ensureWorkspaceActive, findActiveWorkspace, type NativeHost } from "./native-host.js";
 import { StateStore, connectionState } from "./state.js";
 import { hiddenAgent } from "./hiding.js";
@@ -27,12 +27,11 @@ export function issueLabels(connectionKey: string, issueId: string) {
 function stableId(...parts: string[]) { return createHash("sha256").update(JSON.stringify(parts)).digest("hex"); }
 
 export async function remoteJson(connection: AuthenticatedConnection, path: string, schema: z.ZodType, workspace?: RemoteWorkspace) {
-  const response = await fetch(`${connection.apiUrl}${path}`, {
-    headers: { Authorization: `Bearer ${connection.token}`, ...(workspace ? { "X-Workspace-Slug": workspace.slug } : {}) },
-    redirect: "error", signal: AbortSignal.timeout(10_000),
-  });
+  const response = await remoteFetch(connection, path, { headers: workspace ? { "X-Workspace-Slug": workspace.slug } : {} });
   if (!response.ok) { await response.body?.cancel(); throw new Error(`Multica read failed (HTTP ${response.status})`); }
-  return schema.parse(await response.json());
+  const value = schema.parse(await response.json());
+  await connection.assertCurrent?.();
+  return value;
 }
 
 export class SidebarSynchronizer {
