@@ -1,6 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
+import { storedRunSchema } from "./run-state.js";
 import { threadSchema } from "./thread-state.js";
 import { taskRuleSchema } from "../shared/contracts.js";
 
@@ -10,6 +11,8 @@ const issueSchema = z.object({
   description: z.string(), updatedAt: z.string().optional(), workspaceCreated: z.boolean().default(false), mainAgentId: z.string().optional(),
   archiveReason: z.enum(["rule_disabled", "filter_exit"]).optional(), ruleArchivedAgentIds: z.array(z.string()).default([]), archivePending: z.boolean().default(false),
   threads: z.record(z.string(), threadSchema).default({}),
+  runs: z.record(z.string(), storedRunSchema).default({}),
+  commentCreatedAt: z.record(z.string(), z.string()).default({}),
   commentRoots: z.record(z.string(), z.string()).default({}),
   unresolvedCommentIds: z.array(z.string()).default([]),
   systemRootIds: z.array(z.string()).default([]),

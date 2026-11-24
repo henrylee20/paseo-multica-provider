@@ -1,3 +1,5 @@
+import { runObserve } from "../shared/runs.js";
+import { RunSynchronizer } from "./runs.js";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { PluginServerContribution } from "@getpaseo/plugin/server";
@@ -42,7 +44,8 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     const owningHome = environment.PASEO_HOME ?? "";
     const store = new StateStore(dependencies.stateDirectory ?? join(owningHome || join(dependencies.homeDirectory ?? homedir(), ".paseo"), "multica-provider"));
     const threads = new ThreadSynchronizer(store, connection);
-    server.registerProvider(createMulticaProvider(store, threads));
+    const runs = new RunSynchronizer(store);
+    server.registerProvider(createMulticaProvider(store, threads, runs));
     server.handle(readTaskDescription, async input => {
       // The host authenticates this RPC. Cached history belongs to its persisted
       // connection, even while the CLI is offline, logged out, or using another account.
@@ -54,12 +57,13 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       const nextOffset = input.offset + text.length;
       return { text, nextOffset: nextOffset < issue.description.length ? nextOffset : null };
     });
+    server.handle(runObserve, async input => runs.observe(input));
     server.handle(threadOpen, async input => threads.open(input));
     server.handle(threadResolve, async input => {
       const issue = (await store.read()).connections[input.connectionKey]?.issues[input.issueId];
       return { comments: input.commentIds.map(commentId => {
         const rootId = issue?.commentRoots[commentId];
-        return rootId ? { commentId, rootId, status: "resolved" as const } : { commentId, status: "unresolved" as const };
+        return rootId ? { commentId, rootId, createdAt: issue?.commentCreatedAt[commentId], status: "resolved" as const } : { commentId, status: "unresolved" as const };
       }) };
     });
     server.handle(commentEventDetail, async input => {
@@ -69,7 +73,10 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       return { text: row.text };
     });
     const synchronizer = new SidebarSynchronizer({ store, connection,
-      onIssue: (connection, workspace, issueId, host) => threads.discover(connection, workspace, issueId, host),
+      onIssue: async (connection, workspace, issueId, host) => {
+        await threads.discover(connection, workspace, issueId, host);
+        await runs.discover(connection, workspace, issueId);
+      },
       connectHost: () => (dependencies.connectHost ?? connectNativeHost)(owningHome), intervalMs: dependencies.syncIntervalMs ?? 15_000 });
     server.handle(syncBootstrap, async (_, context) => {
       try { await synchronizer.bootstrap(context.paseo); return { status: "ready" as const }; }
@@ -95,6 +102,6 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       try { await synchronizer.rule(context.paseo, input.workspaceId, input.rule); return { status: "ready" as const }; }
       catch { return { status: "unavailable" as const, message: "筛选规则保存或同步失败，请检查连接后重试。" }; }
     });
-    return async () => { await synchronizer.close(); await threads.close(); };
+    return async () => { await synchronizer.close(); await threads.close(); runs.close(); };
   };
 }

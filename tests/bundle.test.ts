@@ -148,7 +148,7 @@ it("the native thread renderer lazily opens history and comment events render as
   });
   const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {},
     addTimelineRenderer: (renderer: any) => { renderers.push(renderer); return () => {}; } });
-  expect(renderers.map(renderer => renderer.kind)).toEqual(["task-description", "thread", "comment-event"]);
+  expect(renderers.map(renderer => renderer.kind)).toEqual(["task-description", "thread", "run-summary", "comment-event"]);
   expect(calls).toEqual([]);
   const address = { connectionKey: "connection", issueId: "issue", rootId: "root" };
   const theme = { colors: { foreground: "black", foregroundMuted: "gray" } };
@@ -167,4 +167,29 @@ it("the native thread renderer lazily opens history and comment events render as
   expect(JSON.stringify(source)).toContain("2020-01-01T00:00:00Z");
   expect(JSON.stringify(source)).toContain("2026-11-24T12:00:00Z");
   dispose();
+});
+
+it("renders each run's agent and actual state as a bounded summary and observes activity after timeline mounting", async () => {
+  const effects: Array<() => unknown> = [];
+  const calls: Array<{ name: string; input: unknown }> = [];
+  const renderers: Array<{ kind: string; schema: zod.ZodType; Component: (props: any) => any }> = [];
+  const setup = await bundledContribution("../index.client.tsx", {
+    "@getpaseo/plugin/client": { useRpc: (contract: { name: string }) => async (input: unknown) => { calls.push({ name: contract.name, input }); return { status: "ready" }; } },
+    "@getpaseo/plugin/client/ui": {}, "react-native": { Text: "Text", View: "View", Pressable: "Pressable" },
+    react: { useEffect: (effect: () => unknown) => effects.push(effect), useState: (initial: unknown) => [initial, () => {}] },
+  });
+  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: any) => { renderers.push(renderer); return () => {}; } });
+  try {
+    const renderer = renderers.find(renderer => renderer.kind === "run-summary");
+    expect(renderer, "a native run needs a visible registered summary renderer").toBeDefined();
+    const address = { connectionKey: "connection", issueId: "issue", rootId: "root" };
+    const data = renderer!.schema.parse({ ...address, runId: "run-one", agentId: "agent", agentName: "Build Agent", status: "waiting_local_directory" });
+    const tree = renderer!.Component({ item: { data }, theme: { colors: { foreground: "black", foregroundMuted: "gray" } } });
+    expect(renderedText(tree)).toContain("Build Agent");
+    expect(renderedText(tree)).toContain("waiting_local_directory");
+    expect(calls).toEqual([]);
+    for (const effect of effects) effect();
+    await Promise.resolve();
+    expect(calls).toEqual([{ name: "run.observe", input: address }]);
+  } finally { dispose(); }
 });

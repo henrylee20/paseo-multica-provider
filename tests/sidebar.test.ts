@@ -59,7 +59,7 @@ async function fixture(syncIntervalMs = 15_000, homePrefix = "multica-sidebar-")
       return;
     }
     response.end(JSON.stringify(url.pathname === "/api/me" ? { id: "user-42", name: "Lin" }
-      : url.pathname.endsWith("/comments") ? []
+      : (url.pathname.endsWith("/comments") || url.pathname.endsWith("/task-runs")) ? []
       : url.pathname.endsWith("/members") ? [{ id: "membership-row", user_id: "user-42", name: "Lin", email: "lin@example.test" }]
       : url.pathname === "/api/agents" ? [{ id: "agent-owned", name: "Builder", owner_id: "user-42" }]
       : url.pathname === "/api/squads" ? [{ id: "squad-owned", name: "Team", leader_id: "agent-owned" }]

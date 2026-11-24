@@ -1,3 +1,5 @@
+import { RunSummary } from "./client/run-summary.js";
+import { runSummarySchema } from "./shared/runs.js";
 import type { PluginClientContext, PluginSidebarItemProps } from "@getpaseo/plugin/client";
 import { SidebarRow } from "@getpaseo/plugin/client/ui";
 import { ConnectionScreen } from "./client/connection-screen.js";
@@ -30,6 +32,7 @@ export default function contribute(client: PluginClientContext) {
   const removeDescription = client.addTimelineRenderer({ kind: taskDescriptionKind, version: taskDescriptionVersion,
     schema: taskDescriptionSchema, Component: TaskDescription });
   const removeThread = client.addTimelineRenderer({ kind: "thread", version: 1, schema: threadSummarySchema, Component: ThreadSummary });
+  const removeRun = client.addTimelineRenderer({ kind: "run-summary", version: 1, schema: runSummarySchema, Component: RunSummary });
   const removeEvent = client.addTimelineRenderer({ kind: "comment-event", version: 1, schema: commentEventSchema, Component: CommentEvent });
-  return () => { disposed = true; clearInterval(timer); removeEvent(); removeThread(); removeDescription(); removeItem(); removeScreen(); removeSettings(); };
+  return () => { disposed = true; clearInterval(timer); removeRun(); removeEvent(); removeThread(); removeDescription(); removeItem(); removeScreen(); removeSettings(); };
 }

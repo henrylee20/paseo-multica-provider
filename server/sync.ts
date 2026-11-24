@@ -186,6 +186,7 @@ export class SidebarSynchronizer {
           local.issues[issue.id] = { ...local.issues[issue.id], remoteWorkspaceId: workspaceId,
             workspaceId: local.issues[issue.id]?.workspaceId ?? `wks_${stableId(connection.connectionKey, issue.id).slice(0, 16)}`,
             workspaceCreated: local.issues[issue.id]?.workspaceCreated ?? false,
+            runs: local.issues[issue.id]?.runs ?? {}, commentCreatedAt: local.issues[issue.id]?.commentCreatedAt ?? {},
             threads: local.issues[issue.id]?.threads ?? {}, commentRoots: local.issues[issue.id]?.commentRoots ?? {}, unresolvedCommentIds: local.issues[issue.id]?.unresolvedCommentIds ?? [],
             systemRootIds: local.issues[issue.id]?.systemRootIds ?? [], mainHistory: local.issues[issue.id]?.mainHistory ?? { title: "主讨论", historyLoaded: false, rows: [], observed: {} },
             ruleArchivedAgentIds: local.issues[issue.id]?.ruleArchivedAgentIds ?? [], archivePending: local.issues[issue.id]?.archivePending ?? false, cwd, title, description: issue.description ?? "", updatedAt: issue.updated_at };

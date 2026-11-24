@@ -3,3 +3,11 @@
 Multica 的一个 Run 可能处理多个 Thread 的评论，但 Paseo 只在一个位置展示该 Run 的执行流，不在每个相关 Thread 中复制。
 对有评论关联的 Run，优先选择触发评论所属 Thread，没有触发评论时选择最早关联评论所属 Thread；确定后不因其他 Thread 的合并或追加评论而迁移。
 首次展示时完全无评论关联的 Run 固定展示在该 Issue 的本地主讨论 tab，后续即使发现评论关联也不迁移；该 tab 同时承载 Issue 描述，且仅同步展示不会自动向 Multica 发表评论。
+
+#7 从完整成功的 Issue `task-runs?view=timeline` 快照读取关联。远端触发、合并、已交付和补充评论 ID 分开保存，首次 `ownerRootId` 独立持久化。优先解析触发评论；无触发时按评论的真实 `created_at`（含 RFC3339Nano 精度与时区）选择最早关联评论。缺失父链或跨 Thread 评论缺少可靠时间时等待补齐，不按 ID 猜测，也不固定到主讨论。成功读取且确实零关联时才使用主讨论。
+
+每个 Run 使用稳定 `multica:run:<runId>` 插件行；后续状态更新替换同一行。行内只保存有界的 agent、状态、身份和来源时间；执行输出由后续按需读取切片提供，不追加日志 assistant 消息。
+
+同一原生会话中的所有归属 Run 共同决定一个活动 turn：queued、dispatched、running、waiting_local_directory、deferred 均保持活动，全部终结后才完成聚合 turn。每次从空闲进入活动都生成新 UUID，不能重复使用已经完成的 turn ID。Paseo 0.15.3 实测复用已完成 ID 会使后续完成事件被忽略，造成原生状态停留在运行中。
+
+原生导入在 provider `session.open` 后才注册活动观察；0.15.3 实测在 `session.ready` 前发送 started 不会使导入记录变为运行中。因此缓存重放只输出执行摘要，在导入返回后的同步中发布活动；实际摘要 renderer 挂载后通过只读 `run.observe` 再次发布缓存活动，后续后台快照也会核对。这里不通过虚构 prompt、refresh 活动 agent 或远端写入来启动展示。

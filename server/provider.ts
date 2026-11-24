@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import { isActiveRun, runSummary, type RunSynchronizer } from "./runs.js";
 import { z } from "zod";
 import type { ProviderEvent, ProviderRegistration } from "@getpaseo/plugin/server/provider";
 import { StateStore } from "./state.js";
@@ -13,7 +15,7 @@ const persistenceSchema = z.object({ version: z.literal(1), data: z.object({
 const supported = ["session.persistence", "session.list", "timeline.plugin", "session.archive", "session.unarchive"];
 
 /** A Multica discussion projection, never a local code execution engine. */
-export function createMulticaProvider(store: StateStore, threads: ThreadSynchronizer): ProviderRegistration {
+export function createMulticaProvider(store: StateStore, threads: ThreadSynchronizer, runs: RunSynchronizer): ProviderRegistration {
   return {
     id: providerId, label: "Multica", description: "Multica 任务讨论（目录仅为本地占位目录）",
     status: async () => ({ available: true }),
@@ -22,6 +24,7 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
       const capabilities = supported.filter(value => request.capabilities.includes(value));
       const listeners = new Set<(event: ProviderEvent) => void>();
       const sessions = new Set<string>();
+      const runSubscriptions = new Map<string, () => void>();
       const subscriptions = new Map<string, () => void>();
       let closed = false;
       const emit = (event: ProviderEvent) => { if (!closed) for (const listener of listeners) listener(event); };
@@ -83,11 +86,35 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
               if (input.history === "replay") for (const row of issue.mainHistory.rows) emitRow(input.sessionId, address, row);
               subscriptions.set(input.sessionId, threads.subscribe(address, row => emitRow(input.sessionId, address, row)));
             }
+            const address = { connectionKey: parsed.data.data.connectionKey, issueId: parsed.data.data.issueId, rootId: parsed.data.data.discussion === "thread" ? parsed.data.data.rootId : "main" };
+            const projected = new Map<string, string>();
+            let activeTurnId: string | undefined;
+            const projectRuns = (owned: typeof issue.runs, activity = true) => {
+              for (const [runId, run] of Object.entries(owned)) {
+                const row = runSummary(address, runId, run);
+                const fingerprint = JSON.stringify(row);
+                if (projected.get(runId) !== fingerprint) { emit({ type: "timeline.item", sessionId: input.sessionId, item: row }); projected.set(runId, fingerprint); }
+              }
+              if (!activity) return;
+              const active = Object.values(owned).some(run => isActiveRun(run.status));
+              if (active && !activeTurnId) {
+                activeTurnId = `multica:aggregate:${randomUUID()}`;
+                emit({ type: "session.turn", sessionId: input.sessionId, turnId: activeTurnId, state: "started" });
+              } else if (!active && activeTurnId) {
+                emit({ type: "session.turn", sessionId: input.sessionId, turnId: activeTurnId, state: "completed" });
+                activeTurnId = undefined;
+              }
+            };
+            const owned = Object.fromEntries(Object.entries(issue.runs).filter(([, run]) => run.ownerRootId === address.rootId));
+            if (input.history === "replay") projectRuns(owned, false);
+            else for (const [runId, run] of Object.entries(owned)) projected.set(runId, JSON.stringify(runSummary(address, runId, run)));
+            runSubscriptions.set(input.sessionId, runs.subscribe(address, owned => projectRuns(owned)));
             emit({ type: "session.ready", requestId: input.requestId, sessionId: input.sessionId });
             return;
           }
           if (input.type === "session.close") {
             sessions.delete(input.sessionId);
+            runSubscriptions.get(input.sessionId)?.(); runSubscriptions.delete(input.sessionId);
             subscriptions.get(input.sessionId)?.(); subscriptions.delete(input.sessionId);
             emit({ type: "session.closed", sessionId: input.sessionId });
             emit({ type: "request.completed", requestId: input.requestId });
@@ -104,7 +131,7 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
           }
           if ("requestId" in input) emit({ type: "request.failed", requestId: input.requestId, error: { code: "unsupported", message: "此操作尚未支持。" } });
         },
-        async close() { for (const unsubscribe of subscriptions.values()) unsubscribe(); subscriptions.clear(); sessions.clear(); listeners.clear(); closed = true; },
+        async close() { for (const unsubscribe of runSubscriptions.values()) unsubscribe(); runSubscriptions.clear(); for (const unsubscribe of subscriptions.values()) unsubscribe(); subscriptions.clear(); sessions.clear(); listeners.clear(); closed = true; },
       };
     },
   };
