@@ -18,3 +18,5 @@ Paseo 0.15.3 实际导入时，notification 映射未保留 provider 稳定 ID�
 任务描述另外通过只读 `description.observe` 观测缓存并刷新同一插件行；renderer 挂载后立即及定期观察，不依赖历史 replay。已读全文依然按版本分片，过期版本不会混接新正文。恢复不会自动下载所有曾读过的 Thread／Run 正文；原文缓存与原生缺失核对独立于本次展开的远端增量读取。
 
 #10 的自身评论还保存原输入 clientMessageId。宿主会把提供此 ID 的 user_message 对应到同一原生乐观输入，公开 canonical 记录可能以 clientMessageId 作为 item.messageId，来源 commentId 则在宿主内部单独关联。因此缓存原文核对还接受相同 clientMessageId 的同角色／全文精确匹配，不能只依赖来源 ID。主讨论的新输入与其新建 Thread 根分属不同 native agent；新 Thread 导入不复用主讨论的 clientMessageId。插件接收但尚未取得回执的输入从独立 deliveries 恢复，不能伪装成远端已保存评论。
+
+真实 0.15.3 重启验收发现，同一已保存回复可同时存在于 Thread 评论缓存与 durable delivery 中。provider replay 与 `history:skip` 缺失恢复因此共用本次 native 会话的原文身份集合，以角色／commentId 与自身输入 clientMessageId 关联两种表示；已经核对存在的评论原文也进入该集合。来源插件行仍独立投影，但同一轮不再分别追加评论原文与投递原输入。集合随会话关闭释放，不跨主讨论或新 Thread 去重，也不按相同正文推断未知回执；失败、待核实与仅本地保存的缺失输入仍逐条恢复。正常实时输入后的精确回执 echo 继续携带原 clientMessageId，供宿主关联其乐观输入。
