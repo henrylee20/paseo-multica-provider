@@ -10,6 +10,7 @@ import { HiddenObjects } from "./hidden-objects.js";
 import { StopResults } from "./stop-results.js";
 import { DeliveryManagement } from "./delivery-status.js";
 import { ConnectionHistory } from "./connection-history.js";
+import { ReadonlyHistory } from "./readonly-history.js";
 
 const labels: Record<ConnectionStatus["status"], string> = {
   ready: "已连接", missing_config: "未配置 CLI", unreadable_config: "配置无法读取", invalid_config: "配置无效",
@@ -110,6 +111,7 @@ export function ConnectionScreen({ host, theme, navigation }: PluginSurfaceProps
       <Text style={muted}>连接凭据仅在 daemon 内使用。</Text>
     </SettingsSection>
     <ConnectionHistory theme={theme} currentKey={status?.connectionKey} />
+    <ReadonlyHistory theme={theme} />
     <SettingsSection title="工作区与筛选规则">
       <Text style={muted}>显式启用后导入“未开始”和“进行中”状态类别的任务；初始不限制具体状态、负责人、Multica 项目和标签，可配置组合条件。未启用的工作区不会导入。</Text>
       {workspaceFailure ? <Text accessibilityRole="alert" style={{ color: theme.colors.statusDanger }}>{workspaceFailure}</Text> : null}

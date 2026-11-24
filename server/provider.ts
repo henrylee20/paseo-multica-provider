@@ -73,7 +73,7 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
           if (input.type === "sessions") {
             const state = await store.read();
             const entries = Object.entries(state.connections).flatMap(([connectionKey, connection]) =>
-              Object.entries(connection.issues).flatMap(([issueId, issue]) => [{
+              Object.entries(connection.issues).filter(([, issue]) => issue.access?.status !== "inaccessible").flatMap(([issueId, issue]) => [{
                 persistence: mainPersistence(connectionKey, issueId), cwd: issue.cwd, title: issue.title,
                 description: issue.description, updatedAt: issue.updatedAt,
               }, ...Object.entries(issue.threads).map(([rootId, thread]) => ({ persistence: threadPersistence(connectionKey, issueId, rootId), cwd: issue.cwd, title: thread.title,
@@ -215,7 +215,7 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
                 // This acknowledgement only keeps the existing host turn; the
                 // explicit error states that no durable admission took place.
                 emit({ type: "timeline.item", sessionId: input.sessionId, item: { type: "error", id: `multica:input-not-received:${input.prompt.clientMessageId}`,
-                  message: "插件未能持久接收此输入；未发送远端评论。请保留原生输入，核实存储或输入格式后重新发送。" } });
+                  message: `插件未能持久接收此输入；未发送远端评论。${error instanceof Error ? error.message : "请保留原生输入，核实存储或输入格式后重新发送。"}` } });
                 emit({ type: "session.prompt_result", sessionId: input.sessionId, clientMessageId: input.prompt.clientMessageId, result: { type: "steer", turnId: capturedTurnId } });
                 return;
               }

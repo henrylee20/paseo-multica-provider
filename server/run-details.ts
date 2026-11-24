@@ -4,6 +4,7 @@ import { runAddress, runMessageSchema } from "../shared/runs.js";
 import type { AuthenticatedConnection } from "./connection.js";
 import { StateStore } from "./state.js";
 import { remoteJson, workspaceSchema, type RemoteWorkspace } from "./sync.js";
+import { assertWritableIssue } from "./access.js";
 
 type Address = z.infer<typeof runAddress>;
 const key = (address: Address) => JSON.stringify([address.connectionKey, address.issueId, address.rootId, address.runId]);
@@ -37,6 +38,7 @@ export class RunDetails {
   }
   private async refresh(address: Address) {
     const { issue, cache } = await this.cached(address);
+    assertWritableIssue(issue);
     // Resolve /api/me anew before every remote output read. A cached mapping is
     // sufficient for local history, never authority to reuse another login.
     const connection = await this.connection();
@@ -44,6 +46,7 @@ export class RunDetails {
     const workspaces = await remoteJson(connection, "/api/workspaces", z.array(workspaceSchema)) as RemoteWorkspace[];
     const workspace = workspaces.find(value => value.id === issue.remoteWorkspaceId);
     if (!workspace) throw new Error("Workspace unavailable");
+    assertWritableIssue((await this.store.read()).connections[address.connectionKey]?.issues[address.issueId]);
     const known = new Set(cache?.messages.map(message => message.seq));
     // Strict seq > since. Never advance across a missing sequence, including
     // the first message; old/partial sources are safe to reread in full.

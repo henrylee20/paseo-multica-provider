@@ -137,7 +137,7 @@ export class SidebarSynchronizer {
       });
     }).then(() => this.bootstrap(paseo));
   }
-  private async archive(connectionKey: string, issueId: string, reason: "rule_disabled" | "filter_exit") {
+  private async archive(connectionKey: string, issueId: string, reason: "rule_disabled" | "filter_exit" | "inaccessible") {
     const issue = (await this.options.store.read()).connections[connectionKey].issues[issueId];
     if (!issue.workspaceCreated || issue.manualHidden.workspace || (issue.archiveReason && !issue.archivePending)) return;
     if (!issue.archiveReason) {
@@ -161,6 +161,39 @@ export class SidebarSynchronizer {
     const result = await this.host!.archiveWorkspace(issue.workspaceId);
     if (result.error) throw new Error("Native workspace archive failed");
     await this.options.store.update(state => { state.connections[connectionKey].issues[issueId].archivePending = false; });
+  }
+
+  /** A filtered list cannot distinguish a rule exit from loss of object access. */
+  private async objectAccess(connection: AuthenticatedConnection, workspace: RemoteWorkspace, issueId: string) {
+    const response = await remoteFetch(connection, `/api/issues/${encodeURIComponent(issueId)}`, { headers: { "X-Workspace-Slug": workspace.slug } });
+    if (response.ok) {
+      const parsed = issueSchema.safeParse(await response.json());
+      await connection.assertCurrent?.();
+      if (!parsed.success || parsed.data.id !== issueId || parsed.data.workspace_id !== workspace.id) return "unknown" as const;
+      return "available" as const;
+    }
+    const status = response.status;
+    let error = "";
+    try { error = z.object({ error: z.string() }).parse(await response.json()).error; } catch { /* An HTML/generic route error is not object evidence. */ }
+    await connection.assertCurrent?.();
+    if (status !== 403 && status !== 404) throw new Error(`Multica object read failed (HTTP ${status})`);
+    const issue = (await this.options.store.read()).connections[connection.connectionKey]?.issues[issueId];
+    const explicitIssueError = /\bissue\b/i.test(error) && /not found|forbidden|denied|permission/i.test(error);
+    if (!error || (!issue?.access?.objectVerifiedAt && !explicitIssueError)) return "unknown" as const;
+    // Recheck both account and workspace AFTER denial. Token expiry, a service
+    // outage or a workspace-wide rejection must not retire every cached Issue.
+    const me = await remoteJson(connection, "/api/me", z.object({ id: z.string() })) as { id: string };
+    if (me.id !== connection.userId || !(await this.workspaces(connection)).some(item => item.id === workspace.id && item.slug === workspace.slug)) {
+      throw new Error("Multica connection or workspace unavailable");
+    }
+    return status === 403 ? "forbidden" as const : "not_found" as const;
+  }
+  private async inaccessible(connectionKey: string, issueId: string, reason: "forbidden" | "not_found") {
+    await this.options.store.update(state => {
+      const issue = state.connections[connectionKey].issues[issueId];
+      issue.access = { ...issue.access, status: "inaccessible", reason, checkedAt: new Date().toISOString() };
+    });
+    await this.archive(connectionKey, issueId, "inaccessible");
   }
 
   private serialize(operation: () => Promise<void>) {
@@ -207,7 +240,19 @@ export class SidebarSynchronizer {
       // Only the complete successful snapshot is authoritative for rule exits.
       const matchingIds = new Set(issues.map(issue => issue.id));
       for (const [issueId, mapping] of Object.entries(local?.issues ?? {})) {
-        if (mapping.remoteWorkspaceId === workspaceId && !matchingIds.has(issueId)) await this.archive(connection.connectionKey, issueId, "filter_exit");
+        if (mapping.remoteWorkspaceId !== workspaceId || matchingIds.has(issueId)) continue;
+        const access = await this.objectAccess(connection, workspace, issueId);
+        if (access === "forbidden" || access === "not_found") await this.inaccessible(connection.connectionKey, issueId, access);
+        else {
+          // A readable object that left the filter remains outside active work.
+          // Unknown legacy routes retain their prior access classification.
+          if (access === "available") await this.options.store.update(state => {
+            const issue = state.connections[connection.connectionKey].issues[issueId];
+            issue.access = { ...issue.access, status: "available", checkedAt: new Date().toISOString(), objectVerifiedAt: new Date().toISOString() };
+            delete issue.access.reason;
+          });
+          await this.archive(connection.connectionKey, issueId, "filter_exit");
+        }
       }
       // AgentStorage flattens the entire cwd into one filename component.
       // Keep existing mappings bound to their original directories and history.
@@ -220,6 +265,14 @@ export class SidebarSynchronizer {
       await this.host.renameProject(projectId, workspace.name);
       await this.options.store.update(state => { connectionState(state, connection.connectionKey).projects[workspaceId] = { cwd: projectDirectory, projectId, name: workspace.name }; });
       for (const issue of issues) {
+        const previous = (await this.options.store.read()).connections[connection.connectionKey]?.issues[issue.id];
+        // A returned list row alone does not undo a confirmed object denial.
+        const access = await this.objectAccess(connection, workspace, issue.id);
+        if (access === "forbidden" || access === "not_found") {
+          if (previous) await this.inaccessible(connection.connectionKey, issue.id, access);
+          continue;
+        }
+        if (previous?.access?.status === "inaccessible" && access !== "available") continue;
         const title = [issue.identifier, issue.title].filter(Boolean).join(" ");
         const cwd = local?.issues[issue.id]?.cwd ?? join(projectDirectory, stableId(issue.id).slice(0, 20));
         await mkdir(cwd, { recursive: true });
@@ -227,6 +280,8 @@ export class SidebarSynchronizer {
         await this.options.store.update(state => {
           const local = connectionState(state, connection.connectionKey);
           local.issues[issue.id] = { ...local.issues[issue.id], remoteWorkspaceId: workspaceId,
+            access: { ...local.issues[issue.id]?.access, status: "available", reason: undefined, checkedAt: new Date().toISOString(),
+              ...(access === "available" ? { objectVerifiedAt: new Date().toISOString() } : {}) },
             workspaceId: local.issues[issue.id]?.workspaceId ?? `wks_${stableId(connection.connectionKey, issue.id).slice(0, 16)}`,
             workspaceCreated: local.issues[issue.id]?.workspaceCreated ?? false,
             commentSourceTaskIds: local.issues[issue.id]?.commentSourceTaskIds ?? {},
@@ -284,6 +339,11 @@ export class SidebarSynchronizer {
         if (mainAgentId && !mapping.manualHidden.discussions.includes("main")) await this.host.updateAgent(mainAgentId, { name: "主讨论" });
         this.syncState.stage = "history";
         await this.options.onIssue?.(connection, workspace, issue.id, this.host);
+        await this.options.store.update(state => {
+          const saved = state.connections[connection.connectionKey].issues[issue.id];
+          saved.access = { ...saved.access, status: "available", lastSuccessAt: new Date().toISOString() };
+          delete saved.access.reason;
+        });
       }
       this.syncState.completedWorkspaces++;
     }

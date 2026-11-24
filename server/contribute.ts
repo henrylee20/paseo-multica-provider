@@ -21,6 +21,8 @@ import { StopCoordinator } from "./stops.js";
 import { stopList, stopRetry } from "../shared/stops.js";
 import { CommentDelivery } from "./delivery.js";
 import { deliveryList, deliveryRead, deliveryTargets, deliveryMentions, deliveryVerify, deliveryResend } from "../shared/delivery.js";
+import { issueHistoryList, issueHistoryRead } from "../shared/access.js";
+import { IssueHistory } from "./access.js";
 
 export interface ServerDependencies extends ConnectionDependencies {
   stateDirectory: string;
@@ -72,6 +74,9 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
         stopWarningCount: issues.reduce((count, issue) => count + Object.values(issue.stopRecords).filter(record => record.retryable || record.cleanup === "pending" || record.cleanup === "unconfirmed").length, 0) };
     }) }));
     const threads = new ThreadSynchronizer(store, connection);
+    const history = new IssueHistory(store);
+    server.handle(issueHistoryList, () => history.list());
+    server.handle(issueHistoryRead, input => history.read(input));
     const hiding = new ManualHiding(store);
     server.addHook("agent.archive.after", async ({ agent }) => { await hiding.archivedAgent(agent); });
     server.addHook("workspace.archive.after", async ({ workspace }) => { await hiding.archivedWorkspace(workspace.id); });
