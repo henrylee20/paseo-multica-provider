@@ -33,16 +33,17 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
   return server => {
     const settings = server.registerSettings(multicaSettings);
     const resolve = createConnectionResolver({ homeDirectory: dependencies.homeDirectory ?? homedir(),
-      workingDirectory: dependencies.workingDirectory ?? process.cwd(), environment: dependencies.environment ?? process.env });
+      workingDirectory: dependencies.workingDirectory ?? process.cwd(), environment: dependencies.environment ?? process.env,
+      currentProfile: async () => { const state = await settings.read(); return state.status === "ready" ? state.values.profile : undefined; } });
     server.handle(connectionStatus, async (): Promise<ConnectionStatus> => {
       const state = await settings.read();
-      if (state.status !== "ready") return { status: "invalid_settings", profile: "", source: { api: "none", credentials: "none", app: "none" },
-        message: "Multica 插件设置无效，请重新选择 CLI profile。", loginCommand: "multica login" };
+      if (state.status !== "ready") { resolve.invalidate(); return { status: "invalid_settings", profile: "", source: { api: "none", credentials: "none", app: "none" },
+        message: "Multica 插件设置无效，请重新选择 CLI profile。", loginCommand: "multica login" }; }
       return resolve(state.values.profile);
     });
     async function connection() {
       const state = await settings.read();
-      if (state.status !== "ready") throw new Error("Multica settings unavailable");
+      if (state.status !== "ready") { resolve.invalidate(); throw new Error("Multica settings unavailable"); }
       let authenticated: AuthenticatedConnection | undefined;
       await resolve(state.values.profile, value => { authenticated = value; });
       if (!authenticated) throw new Error("Multica connection unavailable");
