@@ -11,6 +11,7 @@ import type { StoredRow } from "./thread-state.js";
 import type { StopCoordinator } from "./stops.js";
 import type { RunAddress } from "./runs.js";
 import { deliveryRow, deliveryInput, type CommentDelivery } from "./delivery.js";
+import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
 
 const persistenceSchema = z.object({ version: z.literal(1), data: z.object({
   connectionKey: z.string(), issueId: z.string(),
@@ -18,7 +19,7 @@ const persistenceSchema = z.object({ version: z.literal(1), data: z.object({
 const supported = ["prompt.message", "prompt.steer", "session.persistence", "session.list", "timeline.plugin", "session.archive", "session.unarchive"];
 
 /** A Multica discussion projection, never a local code execution engine. */
-export function createMulticaProvider(store: StateStore, threads: ThreadSynchronizer, runs: RunSynchronizer, stops: StopCoordinator, deliveries: CommentDelivery, descriptions: TaskDescriptions): ProviderRegistration {
+export function createMulticaProvider(store: StateStore, threads: ThreadSynchronizer, runs: RunSynchronizer, stops: StopCoordinator, deliveries: CommentDelivery, descriptions: TaskDescriptions, lifecycle: DiscussionLifecycle): ProviderRegistration {
   return {
     id: providerId, label: "Multica", description: "Multica 任务讨论（目录仅为本地占位目录）",
     status: async () => ({ available: true }),
@@ -33,9 +34,24 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
       const subscriptions = new Map<string, () => void>();
       const deliverySubscriptions = new Map<string, () => void>();
       const activeTurns = new Map<string, string>();
+      const lifecycleSubscriptions = new Map<string, () => void>();
+      const acceptedInterrupts = new Map<string, Set<Promise<void>>>();
       const interruptSettlements = new Map<string, (turnId: string) => void>();
       let closed = false;
       const emit = (event: ProviderEvent) => { if (!closed) for (const listener of listeners) listener(event); };
+      const releaseSession = (sessionId: string) => {
+        sessions.delete(sessionId);
+        emittedRows.delete(sessionId);
+        originalIdentities.delete(sessionId);
+        descriptionSubscriptions.get(sessionId)?.(); descriptionSubscriptions.delete(sessionId);
+        addresses.delete(sessionId);
+        activeTurns.delete(sessionId);
+        interruptSettlements.delete(sessionId);
+        deliverySubscriptions.get(sessionId)?.(); deliverySubscriptions.delete(sessionId);
+        runSubscriptions.get(sessionId)?.(); runSubscriptions.delete(sessionId);
+        subscriptions.get(sessionId)?.(); subscriptions.delete(sessionId);
+        lifecycleSubscriptions.get(sessionId)?.(); lifecycleSubscriptions.delete(sessionId);
+      };
       const emittedRows = new Map<string, Set<string>>();
       const originalIdentities = new Map<string, Set<string>>();
       const rememberOriginal = (sessionId: string, row: StoredRow) => {
@@ -86,6 +102,12 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
           if (input.type === "session.open") {
             const parsed = persistenceSchema.safeParse(input.persistence);
             const issue = parsed.success ? (await store.read()).connections[parsed.data.data.connectionKey]?.issues[parsed.data.data.issueId] : undefined;
+            const openingAddress = parsed.success ? { connectionKey: parsed.data.data.connectionKey, issueId: parsed.data.data.issueId,
+              rootId: parsed.data.data.discussion === "thread" ? parsed.data.data.rootId : "main" } : undefined;
+            if (openingAddress && lifecycle.unavailable(openingAddress)) {
+              emit({ type: "request.failed", requestId: input.requestId, error: { code: "discussion_unavailable", message: "此隐藏讨论正在核对本地归档状态，请稍后重试。" } });
+              return;
+            }
             if (!parsed.success || !issue || (parsed.data.data.discussion === "thread" && !issue.threads[parsed.data.data.rootId]) || issue.cwd !== input.config.cwd || sessions.has(input.sessionId)) {
               emit({ type: "request.failed", requestId: input.requestId, error: { code: "unmapped_issue", message: "请在 Multica 管理页启用任务工作区后打开已导入的主讨论。" } });
               return;
@@ -120,6 +142,18 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
             }
             const address = { connectionKey: parsed.data.data.connectionKey, issueId: parsed.data.data.issueId, rootId: parsed.data.data.discussion === "thread" ? parsed.data.data.rootId : "main" };
             addresses.set(input.sessionId, address);
+            lifecycleSubscriptions.set(input.sessionId, lifecycle.subscribe(address, async () => {
+              // A Stop accepted before this resource began closing retains its
+              // result before session.closed rejects outstanding host requests.
+              await Promise.all([...(acceptedInterrupts.get(input.sessionId) ?? [])]);
+              if (!sessions.has(input.sessionId)) return;
+              const turnId = activeTurns.get(input.sessionId);
+              // End only this local projection; cached remote Run status and
+              // already accepted explicit Stop operations remain independent.
+              if (turnId) emit({ type: "session.turn", sessionId: input.sessionId, turnId, state: "completed" });
+              releaseSession(input.sessionId);
+              emit({ type: "session.closed", sessionId: input.sessionId });
+            }));
             const projectDelivery = (record: (typeof issue.deliveries)[string], includeOriginal = false) => {
               emit({ type: "timeline.item", sessionId: input.sessionId, item: deliveryRow(record) });
               const row = deliveryInput(record);
@@ -166,31 +200,28 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
             return;
           }
           if (input.type === "session.close") {
-            sessions.delete(input.sessionId);
-            emittedRows.delete(input.sessionId);
-            originalIdentities.delete(input.sessionId);
-            descriptionSubscriptions.get(input.sessionId)?.(); descriptionSubscriptions.delete(input.sessionId);
-            addresses.delete(input.sessionId);
-            activeTurns.delete(input.sessionId);
-            interruptSettlements.delete(input.sessionId);
-            deliverySubscriptions.get(input.sessionId)?.(); deliverySubscriptions.delete(input.sessionId);
-            runSubscriptions.get(input.sessionId)?.(); runSubscriptions.delete(input.sessionId);
-            subscriptions.get(input.sessionId)?.(); subscriptions.delete(input.sessionId);
+            releaseSession(input.sessionId);
             emit({ type: "session.closed", sessionId: input.sessionId });
             emit({ type: "request.completed", requestId: input.requestId });
             return;
           }
           if (input.type === "session.interrupt") {
             const interruptedTurnId = activeTurns.get(input.sessionId);
-            try {
-              const address = addresses.get(input.sessionId);
-              if (!address) throw new Error("Discussion unavailable");
-              await stops.interrupt(address);
-              if (interruptedTurnId) interruptSettlements.get(input.sessionId)?.(interruptedTurnId);
-              emit({ type: "request.completed", requestId: input.requestId });
-            } catch (error) {
-              emit({ type: "request.failed", requestId: input.requestId, error: { code: "stop_incomplete", message: error instanceof Error ? error.message : "停止失败，请在管理页重试。" } });
-            }
+            const operation = (async () => {
+              try {
+                const address = addresses.get(input.sessionId);
+                if (!address || lifecycle.unavailable(address)) throw new Error("Discussion unavailable");
+                await stops.interrupt(address);
+                if (interruptedTurnId) interruptSettlements.get(input.sessionId)?.(interruptedTurnId);
+                emit({ type: "request.completed", requestId: input.requestId });
+              } catch (error) {
+                emit({ type: "request.failed", requestId: input.requestId, error: { code: "stop_incomplete", message: error instanceof Error ? error.message : "停止失败，请在管理页重试。" } });
+              }
+            })();
+            const accepted = acceptedInterrupts.get(input.sessionId) ?? new Set();
+            accepted.add(operation); acceptedInterrupts.set(input.sessionId, accepted);
+            try { await operation; }
+            finally { accepted.delete(operation); if (!accepted.size) acceptedInterrupts.delete(input.sessionId); }
             return;
           }
           if (input.type === "session.archive" || input.type === "session.unarchive") {
@@ -204,6 +235,7 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
             try {
               const address = addresses.get(input.sessionId);
               if (!address) throw new Error("请在 Multica 管理页启用任务工作区后打开已导入的讨论。");
+              if (lifecycle.unavailable(address)) throw new Error("此隐藏讨论正在核对本地归档状态，请稍后重试。");
               const record = await deliveries.admit(address, input.prompt);
               emit({ type: "timeline.item", sessionId: input.sessionId, item: projectRow(address, deliveryInput(record)) });
               emit({ type: "session.prompt_result", sessionId: input.sessionId, clientMessageId: input.prompt.clientMessageId,
@@ -226,7 +258,7 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
           }
           if ("requestId" in input) emit({ type: "request.failed", requestId: input.requestId, error: { code: "unsupported", message: "此操作尚未支持。" } });
         },
-        async close() { emittedRows.clear(); originalIdentities.clear(); for (const unsubscribe of deliverySubscriptions.values()) unsubscribe(); deliverySubscriptions.clear(); activeTurns.clear(); interruptSettlements.clear(); for (const unsubscribe of descriptionSubscriptions.values()) unsubscribe(); descriptionSubscriptions.clear(); for (const unsubscribe of runSubscriptions.values()) unsubscribe(); runSubscriptions.clear(); for (const unsubscribe of subscriptions.values()) unsubscribe(); subscriptions.clear(); sessions.clear(); addresses.clear(); listeners.clear(); closed = true; },
+        async close() { for (const sessionId of [...sessions]) releaseSession(sessionId); listeners.clear(); closed = true; },
       };
     },
   };

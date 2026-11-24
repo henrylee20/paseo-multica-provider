@@ -7,9 +7,10 @@ import { taskRuleSchema, type TaskRule, type SyncStatus } from "../shared/contra
 import { issueQuery } from "./filters.js";
 import { WorkspaceEvents, type WorkspaceEvent } from "./workspace-events.js";
 import { remoteFetch, type AuthenticatedConnection } from "./connection.js";
-import { ensureWorkspaceActive, findActiveWorkspace, type NativeHost } from "./native-host.js";
+import { archiveClosedDiscussion, ensureWorkspaceActive, findActiveWorkspace, type NativeHost } from "./native-host.js";
 import { StateStore, connectionState } from "./state.js";
-import { hiddenAgent } from "./hiding.js";
+import { discussionAgent, hiddenAgent } from "./hiding.js";
+import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
 
 export const workspaceSchema = z.object({ id: z.string().min(1), name: z.string(), slug: z.string().min(1) });
 const issueSchema = z.object({ id: z.string().min(1), workspace_id: z.string(), identifier: z.string().optional(), title: z.string(),
@@ -65,7 +66,7 @@ export class SidebarSynchronizer {
     this.eventTimer.unref?.();
   }
   constructor(private readonly options: {
-    store: StateStore; connection: () => Promise<AuthenticatedConnection>;
+    store: StateStore; connection: () => Promise<AuthenticatedConnection>; lifecycle: DiscussionLifecycle;
     connectHost: () => Promise<NativeHost>; intervalMs: number; onRemoteEvent?: (event: WorkspaceEvent) => void;
     onCached?: (host: NativeHost) => Promise<void>;
     onIssue?: (connection: AuthenticatedConnection, workspace: RemoteWorkspace, issueId: string, host: NativeHost) => Promise<void>;
@@ -139,25 +140,37 @@ export class SidebarSynchronizer {
   }
   private async archive(connectionKey: string, issueId: string, reason: "rule_disabled" | "filter_exit" | "inaccessible") {
     const issue = (await this.options.store.read()).connections[connectionKey].issues[issueId];
-    if (!issue.workspaceCreated || issue.manualHidden.workspace || (issue.archiveReason && !issue.archivePending)) return;
-    if (!issue.archiveReason) {
-      const restoreAgents: string[] = [];
-      let cursor: string | undefined;
-      do {
-        const page = await this.host!.fetchAgents({ filter: { labels: { "multica.connection": connectionKey, "multica.issue": issueId }, includeArchived: true }, page: { limit: 100, cursor } });
-        restoreAgents.push(...page.entries.filter(item => item.agent.workspaceId === issue.workspaceId && !item.agent.archivedAt).map(item => item.agent.id));
-        if (!page.pageInfo.hasMore) break;
-        if (!page.pageInfo.nextCursor || page.pageInfo.nextCursor === cursor) throw new Error("Incomplete native agent pagination");
-        cursor = page.pageInfo.nextCursor;
-      } while (true);
-      // Keep the pre-archive active set across response loss and restart.
-      await this.options.store.update(state => {
-        const mapping = state.connections[connectionKey].issues[issueId];
-        mapping.archiveReason = reason;
-        mapping.archivePending = true;
-        mapping.ruleArchivedAgentIds = restoreAgents;
-      });
+    if (!issue.workspaceCreated || issue.manualHidden.workspace) return;
+    const activeAgents: string[] = [];
+    let cursor: string | undefined;
+    const cursors = new Set<string>();
+    for (;;) {
+      const page = await this.host!.fetchAgents({ filter: { labels: { "multica.connection": connectionKey, "multica.issue": issueId }, includeArchived: true }, page: { limit: 100, cursor } });
+      activeAgents.push(...page.entries.filter(item => item.agent.workspaceId === issue.workspaceId && !item.agent.archivedAt).map(item => item.agent.id));
+      if (!page.pageInfo.hasMore) break;
+      const next = page.pageInfo.nextCursor;
+      if (!next || cursors.has(next)) throw new Error("Incomplete native agent pagination");
+      cursors.add(next);
+      cursor = next;
     }
+    const workspaceActive = await findActiveWorkspace(this.host!, issue.workspaceId);
+    if (issue.archiveReason && !workspaceActive && !activeAgents.length) {
+      if (issue.archivePending) await this.options.store.update(state => { state.connections[connectionKey].issues[issueId].archivePending = false; });
+      return;
+    }
+    // Native prompt admission can reopen an agent inside an archived workspace.
+    // Preserve the original restore set while repairing that later native drift.
+    await this.options.store.update(state => {
+      const mapping = state.connections[connectionKey].issues[issueId];
+      if (!mapping.archiveReason) {
+        mapping.archiveReason = reason;
+        mapping.ruleArchivedAgentIds = activeAgents;
+      }
+      mapping.archivePending = true;
+    });
+    // An already archived workspace ignores bulk archive. Restore its record
+    // before bulk teardown, whose close path does not interrupt remote Runs.
+    if (!workspaceActive) await ensureWorkspaceActive(this.host!, issue.workspaceId);
     const result = await this.host!.archiveWorkspace(issue.workspaceId);
     if (result.error) throw new Error("Native workspace archive failed");
     await this.options.store.update(state => { state.connections[connectionKey].issues[issueId].archivePending = false; });
@@ -215,7 +228,7 @@ export class SidebarSynchronizer {
     this.syncState.enabledWorkspaces = enabled.length;
     this.syncState.stage = "workspaces";
     const disabledIssues = Object.entries(local?.issues ?? {}).filter(([, issue]) =>
-      local?.rules[issue.remoteWorkspaceId]?.enabled === false && (!issue.archiveReason || issue.archivePending));
+      local?.rules[issue.remoteWorkspaceId]?.enabled === false);
     if (!enabled.length && !disabledIssues.length) { this.events.reconcile(connection, []); return; }
     const workspaces = enabled.length ? await this.workspaces(connection) : [];
     this.events.reconcile(connection, workspaces.filter(workspace => local?.rules[workspace.id]?.enabled));
@@ -272,7 +285,10 @@ export class SidebarSynchronizer {
           if (previous) await this.inaccessible(connection.connectionKey, issue.id, access);
           continue;
         }
-        if (previous?.access?.status === "inaccessible" && access !== "available") continue;
+        if (previous?.access?.status === "inaccessible" && access !== "available") {
+          await this.archive(connection.connectionKey, issue.id, "inaccessible");
+          continue;
+        }
         const title = [issue.identifier, issue.title].filter(Boolean).join(" ");
         const cwd = local?.issues[issue.id]?.cwd ?? join(projectDirectory, stableId(issue.id).slice(0, 20));
         await mkdir(cwd, { recursive: true });
@@ -296,7 +312,17 @@ export class SidebarSynchronizer {
         const mapping = (await this.options.store.read()).connections[connection.connectionKey].issues[issue.id];
         if (mapping.manualHidden.workspace) continue;
         if (mapping.archiveReason) {
-          await ensureWorkspaceActive(this.host, mapping.workspaceId);
+          const releaseHidden = await this.options.lifecycle.hold(mapping.manualHidden.discussions.map(rootId => ({ connectionKey: connection.connectionKey, issueId: issue.id, rootId })));
+          try {
+            await ensureWorkspaceActive(this.host, mapping.workspaceId);
+            // Some hosts restore archived child records with the workspace,
+            // including legacy timestamp matches. Reapply durable tab hiding
+            // only after its provider resource and native activity are closed.
+            for (const rootId of mapping.manualHidden.discussions) {
+              const agentId = discussionAgent(mapping, rootId);
+              if (agentId) await archiveClosedDiscussion(this.host, agentId, mapping);
+            }
+          } finally { releaseHidden(); }
           for (const agentId of mapping.ruleArchivedAgentIds) {
             if (hiddenAgent(mapping, agentId)) continue;
             const existing = await this.host.fetchAgent(agentId);

@@ -11,6 +11,7 @@ import { SidebarSynchronizer } from "./sync.js";
 import { connectNativeHost, type NativeHost } from "./native-host.js";
 import { workspaceCatalogs } from "./catalogs.js";
 import { createMulticaProvider } from "./provider.js";
+import { DiscussionLifecycle } from "./discussion-lifecycle.js";
 import { readTaskDescription, observeTaskDescription } from "../shared/description.js";
 import { descriptionRevision, descriptionSlice, TaskDescriptions } from "./task-description.js";
 import { projectionHistory, ThreadSynchronizer } from "./threads.js";
@@ -98,7 +99,8 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       catch (error) { return { status: "unavailable" as const, message: error instanceof Error ? error.message : "停止重试失败。" }; }
     });
     const descriptions = new TaskDescriptions(store);
-    server.registerProvider(createMulticaProvider(store, threads, runs, stops, deliveries, descriptions));
+    const lifecycle = new DiscussionLifecycle();
+    server.registerProvider(createMulticaProvider(store, threads, runs, stops, deliveries, descriptions, lifecycle));
     server.handle(observeTaskDescription, input => descriptions.observe(input));
     server.handle(readTaskDescription, async input => {
       // The host authenticates this RPC. Cached history belongs to its persisted
@@ -128,7 +130,7 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       if (!row) throw new Error("Comment event unavailable");
       return { text: row.text };
     });
-    const synchronizer = new SidebarSynchronizer({ store, connection,
+    const synchronizer = new SidebarSynchronizer({ store, connection, lifecycle,
       onCached: async host => { await threads.reconcile(host); await deliveries.recover(host); },
       onIssue: async (connection, workspace, issueId, host) => {
         await descriptions.observe({ connectionKey: connection.connectionKey, issueId });
