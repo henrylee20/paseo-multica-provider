@@ -206,7 +206,10 @@ it("preserves the first obtainable snapshot and appends stable edit and deletion
   await f.server.rpc(threadOpen, address, f.paseo);
   expect(conversationRows(f.timelines.get(thread.id))).toHaveLength(6);
   expect(conversationRows(f.timelines.get(thread.id))?.at(-1)).toMatchObject({ type: "plugin", data: { category: "deletion", commentId: "grandchild" } });
+  await f.dispose();
   const restarted = f.start();
+  expect(await restarted.server.rpc(syncBootstrap, {}, f.paseo)).toEqual({ status: "ready" });
+  expect(f.native.agents).toHaveLength(2);
   const connection = await restarted.server.providers.get("multica")!.connect({ versions: [1], capabilities: ["session.persistence"] });
   const replay: ProviderEvent[] = [];
   connection.onEvent(event => replay.push(event));
@@ -313,4 +316,17 @@ it("duplicate authenticated comment events append one correction and discover ne
   expect(f.native.agents[2].labels["multica.discussion"]).toBe("new-thread");
   expect(f.requests.some(request => request.url.includes("thread=new-thread"))).toBe(false);
   expect(f.requests.every(request => request.method === "GET")).toBe(true);
+});
+
+it("appends deletion records when a fully deleted Thread vanishes from a complete issue snapshot", async () => {
+  const f = await fixture();
+  const thread = f.native.agents[1];
+  const address = JSON.parse(thread.handle.slice(7)).data;
+  await f.server.rpc(threadOpen, address, f.paseo);
+  f.comments.splice(0);
+  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  expect(conversationRows(f.timelines.get(thread.id))).toContainEqual(expect.objectContaining({ type: "plugin", data: expect.objectContaining({ category: "deletion", commentId: "root" }) }));
+  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  expect(conversationRows(f.timelines.get(thread.id))).toHaveLength(7);
+  expect(f.native.agents).toHaveLength(2);
 });

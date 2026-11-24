@@ -113,6 +113,26 @@ export class ThreadSynchronizer {
         else issue.unresolvedCommentIds.push(comment.id);
       }
     });
+    // A completely removed root cannot be fetched via ?thread any more. The
+    // complete activity sweep still proves missing IDs, unless ancestry broke.
+    if (![...roots.values()].some(rootId => rootId === undefined)) {
+      const deletions: Array<{ address: Address; row: StoredRow }> = [];
+      await this.store.update(state => {
+        const issue = state.connections[connection.connectionKey].issues[issueId];
+        for (const [rootId, history] of [["main", issue.mainHistory] as const, ...Object.entries(issue.threads)]) {
+          for (const [commentId, previous] of Object.entries(history.observed)) {
+            if (comments.has(commentId) || previous.deleted) continue;
+            const row: StoredRow = { id: `multica:deletion:${commentId}:missing`, commentId, role: "event", category: "deletion", text: "此评论已不在完整远端快照中；保留先前读到的原始记录。" };
+            if (!history.rows.some(existing => existing.id === row.id)) {
+              history.rows.push(row);
+              deletions.push({ address: { connectionKey: connection.connectionKey, issueId, rootId }, row });
+            }
+            previous.deleted = true;
+          }
+        }
+      });
+      for (const { address, row } of deletions) for (const listener of this.listeners.get(key(address)) ?? []) listener(row);
+    }
     for (const root of [...comments.values()].filter(comment => !comment.parent_id && comment.type === "comment" && comment.author_type !== "system")) {
       await this.store.update(state => {
         const threads = state.connections[connection.connectionKey].issues[issueId].threads;
