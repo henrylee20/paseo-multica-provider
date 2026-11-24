@@ -24,7 +24,21 @@ export const connectionStatus = defineRpc({ name: "connection.status", input: z.
 export const syncBootstrap = defineRpc({ name: "sync.bootstrap", input: z.object({}), output: z.object({
   status: z.enum(["ready", "unavailable"]), message: z.string().optional(),
 }) });
+const filterValue = z.string().trim().min(1).max(256).refine(value => !value.includes(","), "Filter values cannot include commas");
+export const taskRuleSchema = z.object({
+  statusCategories: z.array(z.enum(["unstarted", "started", "done", "closed"])).default(["unstarted", "started"]),
+  statuses: z.array(filterValue).default([]),
+  assignees: z.array(z.object({ type: z.enum(["member", "agent", "squad"]), id: filterValue })).default([]),
+  projectIds: z.array(filterValue).default([]), labelIds: z.array(filterValue).default([]),
+});
+export type TaskRule = z.output<typeof taskRuleSchema>;
+export const workspaceRule = defineRpc({ name: "workspace.rule", input: z.object({ workspaceId: z.string().min(1), rule: taskRuleSchema }), output: syncBootstrap.output });
+const catalogItem = z.object({ id: z.string(), name: z.string() });
+export const workspaceCatalog = defineRpc({ name: "workspace.catalog", input: z.object({ workspaceId: z.string().min(1) }), output: z.object({
+  assignees: z.array(catalogItem.extend({ type: z.enum(["member", "agent", "squad"]) })),
+  statuses: z.array(z.object({ key: z.string(), name: z.string(), category: z.string() })), projects: z.array(catalogItem), labels: z.array(catalogItem),
+}) });
 export const workspaceList = defineRpc({ name: "workspace.list", input: z.object({}), output: z.object({
-  workspaces: z.array(z.object({ id: z.string(), name: z.string(), enabled: z.boolean() })),
+  workspaces: z.array(z.object({ id: z.string(), name: z.string(), enabled: z.boolean(), rule: taskRuleSchema })),
 }) });
 export const workspaceEnable = defineRpc({ name: "workspace.enable", input: z.object({ workspaceId: z.string().min(1), enabled: z.boolean() }), output: syncBootstrap.output });
