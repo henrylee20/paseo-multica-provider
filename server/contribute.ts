@@ -16,6 +16,8 @@ import { projectionHistory, ThreadSynchronizer } from "./threads.js";
 import { threadOpen, commentEventDetail, threadResolve } from "../shared/threads.js";
 import { ManualHiding } from "./hiding.js";
 import { hiddenList, hiddenRestore } from "../shared/hiding.js";
+import { StopCoordinator } from "./stops.js";
+import { stopList, stopRetry } from "../shared/stops.js";
 
 export interface ServerDependencies extends ConnectionDependencies {
   stateDirectory: string;
@@ -51,7 +53,13 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     server.addHook("workspace.archive.after", async ({ workspace }) => { await hiding.archivedWorkspace(workspace.id); });
     server.handle(hiddenList, async () => hiding.list());
     const runs = new RunSynchronizer(store);
-    server.registerProvider(createMulticaProvider(store, threads, runs));
+    const stops = new StopCoordinator(store, connection, runs);
+    server.handle(stopList, async () => stops.list());
+    server.handle(stopRetry, async input => {
+      try { await stops.retry(input); return { status: "ready" as const }; }
+      catch (error) { return { status: "unavailable" as const, message: error instanceof Error ? error.message : "停止重试失败。" }; }
+    });
+    server.registerProvider(createMulticaProvider(store, threads, runs, stops));
     server.handle(readTaskDescription, async input => {
       // The host authenticates this RPC. Cached history belongs to its persisted
       // connection, even while the CLI is offline, logged out, or using another account.
@@ -112,6 +120,6 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       try { await synchronizer.rule(context.paseo, input.workspaceId, input.rule); return { status: "ready" as const }; }
       catch { return { status: "unavailable" as const, message: "筛选规则保存或同步失败，请检查连接后重试。" }; }
     });
-    return async () => { await synchronizer.close(); await threads.close(); runs.close(); };
+    return async () => { await synchronizer.close(); await stops.close(); await threads.close(); runs.close(); };
   };
 }

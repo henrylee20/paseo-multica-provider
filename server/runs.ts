@@ -63,11 +63,13 @@ export class RunSynchronizer {
       const issue = state.connections[connection.connectionKey].issues[issueId];
       for (const run of records) {
         const previous = issue.runs[run.id];
+        // A Run ID is one execution: a stale read must not reopen its terminal cycle.
+        const staleActive = previous && !isActiveRun(previous.status) && isActiveRun(run.status);
         const generatedCommentIds = Object.entries(issue.commentSourceTaskIds).filter(([, taskId]) => taskId === run.id).map(([commentId]) => commentId);
-        issue.runs[run.id] = { agentId: run.agent_id, agentName: agents.find(agent => agent.id === run.agent_id)?.name ?? `Agent ${run.agent_id}`, status: run.status,
+        issue.runs[run.id] = { agentId: run.agent_id, agentName: agents.find(agent => agent.id === run.agent_id)?.name ?? `Agent ${run.agent_id}`, status: staleActive ? previous.status : run.status,
           ownerRootId: previous?.ownerRootId ?? owner(issue, run, generatedCommentIds), generatedCommentIds, triggerCommentId: run.trigger_comment_id,
           coalescedCommentIds: run.coalesced_comment_ids ?? [], deliveredCommentIds: run.delivered_comment_ids ?? undefined, supplementCommentIds: run.supplement_comment_ids ?? [],
-          createdAt: run.created_at, startedAt: run.started_at ?? undefined, completedAt: run.completed_at ?? undefined };
+          createdAt: run.created_at, startedAt: run.started_at ?? undefined, completedAt: staleActive ? previous.completedAt : run.completed_at ?? undefined };
       }
     });
     const issue = (await this.store.read()).connections[connection.connectionKey].issues[issueId];

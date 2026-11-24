@@ -199,6 +199,7 @@ export class SidebarSynchronizer {
             workspaceCreated: local.issues[issue.id]?.workspaceCreated ?? false,
             commentSourceTaskIds: local.issues[issue.id]?.commentSourceTaskIds ?? {},
             runs: local.issues[issue.id]?.runs ?? {}, commentCreatedAt: local.issues[issue.id]?.commentCreatedAt ?? {},
+            stopEpochs: local.issues[issue.id]?.stopEpochs ?? {}, stopRecords: local.issues[issue.id]?.stopRecords ?? {},
             manualHidden: local.issues[issue.id]?.manualHidden ?? { workspace: false, discussions: [] },
             threads: local.issues[issue.id]?.threads ?? {}, commentRoots: local.issues[issue.id]?.commentRoots ?? {}, unresolvedCommentIds: local.issues[issue.id]?.unresolvedCommentIds ?? [],
             systemRootIds: local.issues[issue.id]?.systemRootIds ?? [], mainHistory: local.issues[issue.id]?.mainHistory ?? { title: "主讨论", historyLoaded: false, rows: [], observed: {} },

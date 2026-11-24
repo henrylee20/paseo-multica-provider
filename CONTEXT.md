@@ -51,3 +51,7 @@
 2026-11-24 #7 加入 Run 的持久首次展示归属、稳定执行摘要与原生活动聚合。后台准确读取 `GET /api/issues/{id}/task-runs?view=timeline`，与成功的评论概要祖先／创建时间缓存组合确定唯一 owner；远端输入关联与生成评论 provenance 分开保存，后补关联、跨 Thread 合并和正常重启不迁移 owner。未知父链、读取失败与跨 Thread 创建时间缺失均不等于零关联。首次确实无关联的 Run 固定留在主讨论。
 
 执行摘要以稳定插件行展示 agent 与真实状态，状态更新替换同一 Run，不生成日志 assistant 消息，也不读取执行消息正文。一个 tab 的所有未结束 Run 共享一个原生 turn；全部终结才结束，每个后续活动周期生成新 UUID。缓存 replay 先输出摘要，原生导入返回后的后台同步及 renderer 挂载后的只读 `run.observe` 负责在宿主注册后发布活动。实际 0.15.3 导入前活动事件会丢失、复用已完成 turn ID 会卡住活动状态，这两项已由母任务独立实测；执行正文与原生取消仍分别由 #8、#9 交付。
+
+2026-11-24 #9 接入 provider 原生 `session.interrupt`，在网络等待前持久固定本次 tab 归属的所有未结束 Run，并按精确 Issue／Run 取消接口逐项请求。其他 tab、终态历史和停止后新发现的 Run 不扩大进集合；跨 Thread Run 整体处理。实际返回 completed／failed／cancelled 按原样保存；HTTP 200 不自动记为取消，进程清理证据与任务状态分列。停止回执和缓存 Run 状态原子保存，旧活动快照不得重新打开已终结 Run 的原生活动周期。
+
+管理页独立列出所有连接的本地停止记录；部分失败使原生停止返回失败，并持续提供单 Run 重试，tab 随后关闭、CLI 离线和正常重启仍可看到。重试不恢复 workspace 或讨论，不改变人工隐藏。整 workspace 归档、规则退出、单纯 session.archive／unarchive／close、连接关闭和贡献清理均不发起远端取消；清理等待已接受的停止请求。`StopCoordinator.epoch`／`guardDelivery` 为 #10／#11 提供持久停止栅栏，旧待投递必须在发送或重试领取前检查同一讨论的 epoch。真实宿主及真实服务验证仍由母工单负责。

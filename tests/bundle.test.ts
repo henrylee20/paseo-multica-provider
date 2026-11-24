@@ -219,6 +219,9 @@ it("management lists shared hidden objects and offers separate workspace and sel
       useRpc: (contract: { name: string }) => {
         if (!rpcs.has(contract.name)) rpcs.set(contract.name, async input => {
           calls.push({ name: contract.name, input });
+          if (contract.name === "stop.list") return { records: [{ connectionKey: "old-connection", issueId: "issue", rootId: "root", runId: "failed-run", title: "Closed Task", status: "running", cleanup: "unknown", retryable: true, message: "cancel failed" },
+            { connectionKey: "old-connection", issueId: "issue", rootId: "root", runId: "cancelled-run", title: "Stopped Task", status: "cancelled", cleanup: "pending", retryable: false }] };
+          if (contract.name === "stop.retry") return { status: "ready" };
           if (contract.name === "hidden.list") return { objects };
           if (contract.name === "hidden.restore") return { status: "ready" };
           if (contract.name === "workspace.list") return { workspaces: [] };
@@ -238,6 +241,11 @@ it("management lists shared hidden objects and offers separate workspace and sel
     render();
     for (const effect of effects.splice(0)) { const cleanup = effect(); if (typeof cleanup === "function") cleanups.push(cleanup as () => void); }
     await vi.waitFor(() => { expect(render()).toContain("人工隐藏"); expect(render()).toContain("Task · Root"); });
+    expect(render()).toContain("原生停止结果");
+    expect(render()).toContain("cancel failed");
+    expect(render()).toContain("进程清理尚待确认");
+    actions.find(action => action.actionLabel === "重试此 Run")!.onPress();
+    await vi.waitFor(() => expect(calls).toContainEqual({ name: "stop.retry", input: { connectionKey: "old-connection", issueId: "issue", rootId: "root", runId: "failed-run" } }));
     expect(actions.map(action => action.actionLabel)).toContain("仅恢复工作区");
     const action = actions.find(action => action.actionLabel === "恢复此讨论")!;
     action.onPress();

@@ -8,6 +8,8 @@ import { taskDescriptionKind, taskDescriptionVersion } from "../shared/descripti
 import { taskDescriptionData } from "./task-description.js";
 import { projectRow, threadPersistence, type ThreadSynchronizer } from "./threads.js";
 import type { StoredRow } from "./thread-state.js";
+import type { StopCoordinator } from "./stops.js";
+import type { RunAddress } from "./runs.js";
 
 const persistenceSchema = z.object({ version: z.literal(1), data: z.object({
   connectionKey: z.string(), issueId: z.string(),
@@ -15,7 +17,7 @@ const persistenceSchema = z.object({ version: z.literal(1), data: z.object({
 const supported = ["session.persistence", "session.list", "timeline.plugin", "session.archive", "session.unarchive"];
 
 /** A Multica discussion projection, never a local code execution engine. */
-export function createMulticaProvider(store: StateStore, threads: ThreadSynchronizer, runs: RunSynchronizer): ProviderRegistration {
+export function createMulticaProvider(store: StateStore, threads: ThreadSynchronizer, runs: RunSynchronizer, stops: StopCoordinator): ProviderRegistration {
   return {
     id: providerId, label: "Multica", description: "Multica 任务讨论（目录仅为本地占位目录）",
     status: async () => ({ available: true }),
@@ -24,6 +26,7 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
       const capabilities = supported.filter(value => request.capabilities.includes(value));
       const listeners = new Set<(event: ProviderEvent) => void>();
       const sessions = new Set<string>();
+      const addresses = new Map<string, RunAddress>();
       const runSubscriptions = new Map<string, () => void>();
       const subscriptions = new Map<string, () => void>();
       let closed = false;
@@ -87,6 +90,7 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
               subscriptions.set(input.sessionId, threads.subscribe(address, row => emitRow(input.sessionId, address, row)));
             }
             const address = { connectionKey: parsed.data.data.connectionKey, issueId: parsed.data.data.issueId, rootId: parsed.data.data.discussion === "thread" ? parsed.data.data.rootId : "main" };
+            addresses.set(input.sessionId, address);
             const projected = new Map<string, string>();
             let activeTurnId: string | undefined;
             const projectRuns = (owned: typeof issue.runs, activity = true) => {
@@ -114,10 +118,22 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
           }
           if (input.type === "session.close") {
             sessions.delete(input.sessionId);
+            addresses.delete(input.sessionId);
             runSubscriptions.get(input.sessionId)?.(); runSubscriptions.delete(input.sessionId);
             subscriptions.get(input.sessionId)?.(); subscriptions.delete(input.sessionId);
             emit({ type: "session.closed", sessionId: input.sessionId });
             emit({ type: "request.completed", requestId: input.requestId });
+            return;
+          }
+          if (input.type === "session.interrupt") {
+            try {
+              const address = addresses.get(input.sessionId);
+              if (!address) throw new Error("Discussion unavailable");
+              await stops.interrupt(address);
+              emit({ type: "request.completed", requestId: input.requestId });
+            } catch (error) {
+              emit({ type: "request.failed", requestId: input.requestId, error: { code: "stop_incomplete", message: error instanceof Error ? error.message : "停止失败，请在管理页重试。" } });
+            }
             return;
           }
           if (input.type === "session.archive" || input.type === "session.unarchive") {
@@ -131,7 +147,7 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
           }
           if ("requestId" in input) emit({ type: "request.failed", requestId: input.requestId, error: { code: "unsupported", message: "此操作尚未支持。" } });
         },
-        async close() { for (const unsubscribe of runSubscriptions.values()) unsubscribe(); runSubscriptions.clear(); for (const unsubscribe of subscriptions.values()) unsubscribe(); subscriptions.clear(); sessions.clear(); listeners.clear(); closed = true; },
+        async close() { for (const unsubscribe of runSubscriptions.values()) unsubscribe(); runSubscriptions.clear(); for (const unsubscribe of subscriptions.values()) unsubscribe(); subscriptions.clear(); sessions.clear(); addresses.clear(); listeners.clear(); closed = true; },
       };
     },
   };
