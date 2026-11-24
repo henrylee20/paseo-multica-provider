@@ -6,7 +6,7 @@ import type { DeliveryRecord } from "./delivery-state.js";
 import type { RunAddress } from "./runs.js";
 import { StateStore } from "./state.js";
 import type { StopCoordinator } from "./stops.js";
-import { remoteJson, workspaceSchema } from "./sync.js";
+import { remoteJson, workspaceSchema, type RemoteWorkspace } from "./sync.js";
 import { nativeOriginals, hasNativeOriginal } from "./projection-recovery.js";
 import type { NativeHost } from "./native-host.js";
 import type { StoredRow } from "./thread-state.js";
@@ -21,7 +21,7 @@ export function deliveryRow(record: DeliveryRecord): ProviderTimelineItem {
   return { type: "plugin", id: `multica:delivery:${record.idempotencyKey}`, pluginId: "multica", kind: "comment-delivery", version: 1, data: {
     connectionKey: record.connectionKey, issueId: record.issueId, rootId: record.rootId, clientMessageId: record.clientMessageId,
     idempotencyKey: record.idempotencyKey, createdAt: record.createdAt, status: record.status, body: [...record.body].slice(0, 4000).join(""), truncated: [...record.body].length > 4000,
-    ...(record.commentId ? { commentId: record.commentId } : {}), ...(record.threadRootId ? { threadRootId: record.threadRootId } : {}), ...(record.message ? { message: record.message } : {}),
+    ...(record.retryOf ? { retryOf: record.retryOf } : {}), ...(record.commentId ? { commentId: record.commentId } : {}), ...(record.threadRootId ? { threadRootId: record.threadRootId } : {}), ...(record.message ? { message: record.message } : {}),
   } };
 }
 export function deliveryInput(record: DeliveryRecord): StoredRow {
@@ -29,20 +29,20 @@ export function deliveryInput(record: DeliveryRecord): StoredRow {
     clientMessageId: record.clientMessageId, text: record.body, sourceCreatedAt: record.receipt?.createdAt ?? record.createdAt, sourceUpdatedAt: record.receipt?.updatedAt };
 }
 
-/** Durable input admission and truthful remote receipts; no automatic resend. */
+/** Durable immutable input and receipt-first recovery within verified service guarantees. */
 export class CommentDelivery {
   private readonly listeners = new Map<string, Set<{ deliver(record: DeliveryRecord, includeOriginal?: boolean): void; recovery: boolean }>>();
   private readonly posts = new Map<string, Promise<void>>();
   private readonly operations = new Set<Promise<void>>();
   constructor(private readonly store: StateStore, private readonly connection: () => Promise<AuthenticatedConnection>, private readonly stops: StopCoordinator,
-    private readonly onSaved: () => Promise<void>) {}
+    private readonly onSaved: () => Promise<void>, private readonly now: () => Date = () => new Date()) {}
   subscribe(address: RunAddress, deliver: (record: DeliveryRecord, includeOriginal?: boolean) => void, recovery = false) {
     const listener = { deliver, recovery };
     const id = addressKey(address), listeners = this.listeners.get(id) ?? new Set();
     listeners.add(listener); this.listeners.set(id, listeners);
     return () => { listeners.delete(listener); if (!listeners.size) this.listeners.delete(id); };
   }
-  private publish(record: DeliveryRecord) { for (const listener of this.listeners.get(addressKey(record)) ?? []) listener.deliver(record); }
+  private publish(record: DeliveryRecord, includeOriginal = false) { for (const listener of this.listeners.get(addressKey(record)) ?? []) listener.deliver(record, includeOriginal); }
   presentation(record: DeliveryRecord): DeliveryRecord {
     return record.status === "received" && record.claimedAt && !this.posts.has(record.idempotencyKey)
       ? { ...record, status: "pending_verification", message: "上次投递中断，保存结果待核实；不会自动重发。" } : record;
@@ -64,6 +64,80 @@ export class CommentDelivery {
       }
     }
   }
+  /** Each pass proves the live receipt API using a successful keyed lookup. */
+  async reconcile(connection: AuthenticatedConnection, workspace: RemoteWorkspace, issueId: string) {
+    const local = (await this.store.read()).connections[connection.connectionKey];
+    const issue = local?.issues[issueId];
+    if (!issue) return;
+    const pending = Object.values(issue.deliveries).filter(record => record.status !== "saved" && record.status !== "failed" && !record.recoveryHalted);
+    if (!pending.length) return;
+    let proof = false;
+    // A first keyed POST is not evidence. Verify an existing immutable receipt
+    // against this actual service on every pass that might POST a retry.
+    for (const anchor of Object.values(local.issues).filter(candidate => candidate.remoteWorkspaceId === workspace.id).flatMap(candidate => Object.values(candidate.deliveries)).filter(record => record.status === "saved")) {
+      if (this.posts.has(anchor.idempotencyKey)) continue;
+      if ((await this.lookup(anchor, connection, workspace)).kind === "saved") { proof = true; break; }
+    }
+    for (const record of pending) {
+      if (this.posts.has(record.idempotencyKey)) continue;
+      await this.track(record, async () => {
+        const result = await this.lookup(record, connection, workspace);
+        if (result.kind === "saved") {
+          proof = true;
+          await this.finish(record, "saved", "已核实原评论保存；是否执行以独立 Run 状态为准。", result.comment);
+        } else if (result.kind === "absent" && !this.withinRetention(record)) {
+          await this.halt(record, "已达到 7 天回执保证期限；查无记录不能证明从未发表，请核实后决定重新发送。");
+        } else if (result.kind === "absent" && proof && (record.retryCount ?? 0) === 0) {
+          await this.perform(record, true, { connection, workspace });
+        } else await this.halt(record, result.kind === "absent" ? "未取得可用的服务幂等保证或重试仍无回执；请核实后决定重新发送。" : result.message);
+      });
+    }
+  }
+  private withinRetention(record: DeliveryRecord) {
+    const age = this.now().getTime() - Date.parse(record.createdAt);
+    return age >= 0 && age < 7 * 24 * 60 * 60 * 1000;
+  }
+  private validKey(record: DeliveryRecord) {
+    return !!record.idempotencyKey && record.idempotencyKey.trim() === record.idempotencyKey && Buffer.byteLength(record.idempotencyKey, "utf8") <= 255;
+  }
+  private matches(record: DeliveryRecord, connection: AuthenticatedConnection, comment: z.infer<typeof receiptSchema>) {
+    return comment.issue_id === record.issueId && (comment.parent_id ?? null) === (record.rootId === "main" ? null : record.rootId)
+      && comment.content === record.body && comment.author_id === connection.userId && (!record.commentId || comment.id === record.commentId);
+  }
+  private async lookup(record: DeliveryRecord, connection: AuthenticatedConnection, workspace: RemoteWorkspace): Promise<
+    { kind: "saved"; comment: z.infer<typeof receiptSchema> } | { kind: "absent" } | { kind: "unknown"; message: string }> {
+    try {
+      if (connection.connectionKey !== record.connectionKey || (record.remoteWorkspaceId && record.remoteWorkspaceId !== workspace.id)) throw new Error("请连接原 Multica 身份与工作区。");
+      if (!this.validKey(record)) throw new Error("原请求 key 无效。");
+      const query = new URLSearchParams({ type: "comment", ...(record.rootId === "main" ? {} : { parent_id: record.rootId }) });
+      const response = await fetch(`${connection.apiUrl}/api/issues/${encodeURIComponent(record.issueId)}/comments/idempotent?${query}`, {
+        headers: { Authorization: `Bearer ${connection.token}`, "X-Workspace-Slug": workspace.slug, "Idempotency-Key": record.idempotencyKey },
+        redirect: "error", signal: AbortSignal.timeout(10_000),
+      });
+      if (response.ok && response.headers.get("Idempotent-Replayed") === "true") {
+        const comment = receiptSchema.parse(await response.json());
+        if (this.matches(record, connection, comment)) return { kind: "saved", comment };
+      }
+      if (response.status === 404) {
+        const body = await response.json() as { error?: string };
+        if (body.error === "no comment has been posted with this Idempotency-Key") return { kind: "absent" };
+      }
+      await response.body?.cancel();
+      return { kind: "unknown", message: response.status === 409 ? "原评论已删除；不会自动重建，请核实后决定重新发送。" : "服务不支持可核实回执，或回执与原输入冲突；请核实后决定重新发送。" };
+    } catch { return { kind: "unknown", message: "回执无法确定；已停止自动重试，请核实原评论。" }; }
+  }
+  private async halt(record: DeliveryRecord, message: string) {
+    await this.store.update(state => { state.connections[record.connectionKey].issues[record.issueId].deliveries[deliveryKey(record.rootId, record.clientMessageId)].recoveryHalted = true; });
+    await this.finish(record, "pending_verification", message);
+  }
+  private track(record: DeliveryRecord, action: () => Promise<void>) {
+    const existing = this.posts.get(record.idempotencyKey);
+    if (existing) return existing;
+    const post = Promise.resolve().then(action);
+    this.posts.set(record.idempotencyKey, post); this.operations.add(post);
+    void post.finally(() => { this.posts.delete(record.idempotencyKey); this.operations.delete(post); }).catch(() => {});
+    return post;
+  }
   async admit(address: RunAddress, prompt: ProviderPrompt): Promise<DeliveryRecord> {
     const body = prompt.input.type === "message" && prompt.input.content.every(part => part.type === "text" && !("mimeType" in part))
       ? prompt.input.content.map(part => part.type === "text" ? part.text : "").join("") : undefined;
@@ -79,38 +153,39 @@ export class CommentDelivery {
         if (existing.body !== body || existing.nativeDelivery !== prompt.delivery) throw new Error("同一输入身份不能改变正文或目标。");
         record = existing; return;
       }
-      record = issue.deliveries[id] = { ...address, clientMessageId: prompt.clientMessageId, idempotencyKey: randomUUID(), body, createdAt: new Date().toISOString(), stopEpoch, nativeDelivery: prompt.delivery, status: "received" };
+      record = issue.deliveries[id] = { ...address, remoteWorkspaceId: issue.remoteWorkspaceId, clientMessageId: prompt.clientMessageId, idempotencyKey: randomUUID(), body, createdAt: this.now().toISOString(), stopEpoch, nativeDelivery: prompt.delivery, status: "received", retryCount: 0 };
     });
     this.publish(record); return record;
   }
   start(record: DeliveryRecord) {
     const id = record.idempotencyKey;
     if (record.status !== "received" || record.claimedAt || this.posts.has(id)) return;
-    const post = this.perform(record);
-    this.posts.set(id, post);
+    const post = this.track(record, () => this.perform(record));
     const operation = post.then(async () => {
       const current = (await this.store.read()).connections[record.connectionKey]?.issues[record.issueId]?.deliveries[deliveryKey(record.rootId, record.clientMessageId)];
       if (current?.status === "saved") await this.onSaved();
     }).catch(() => {}).finally(() => { this.operations.delete(operation); });
     this.operations.add(operation);
-    void post.finally(() => this.posts.delete(id)).catch(() => {});
   }
   async waitForPosts() { await Promise.allSettled([...this.posts.values()]); }
-  private async perform(record: DeliveryRecord) {
+  private async perform(record: DeliveryRecord, retry = false, context?: { connection: AuthenticatedConnection; workspace: RemoteWorkspace }) {
     let sent = false;
     try {
-      const connection = await this.connection();
+      const connection = context?.connection ?? await this.connection();
       if (connection.connectionKey !== record.connectionKey) throw new Error("登录身份已变化；原输入不会转发到新连接。");
       const issue = (await this.store.read()).connections[record.connectionKey]?.issues[record.issueId];
       if (!issue) throw new Error("讨论不可用。");
-      const workspaces = await remoteJson(connection, "/api/workspaces", z.array(workspaceSchema)) as z.infer<typeof workspaceSchema>[];
+      const workspaces = context ? [context.workspace] : await remoteJson(connection, "/api/workspaces", z.array(workspaceSchema)) as z.infer<typeof workspaceSchema>[];
       const workspace = workspaces.find(workspace => workspace.id === issue.remoteWorkspaceId);
-      if (!workspace) throw new Error("Multica 工作区不可用。");
+      if (!workspace || (record.remoteWorkspaceId && record.remoteWorkspaceId !== workspace.id)) throw new Error("原 Multica 工作区不可用；不会更改原投递目标。");
+      if (!this.validKey(record)) throw new Error("原请求 key 超过服务的 255 字节限制或无效。");
       let claimed = false;
       await this.stops.guardDelivery(record, record.stopEpoch, state => {
         const current = state.connections[record.connectionKey].issues[record.issueId].deliveries[deliveryKey(record.rootId, record.clientMessageId)];
-        if (current.status !== "received" || current.claimedAt) return;
-        current.claimedAt = new Date().toISOString(); claimed = true;
+        if (retry ? current.status === "saved" || current.recoveryHalted || current.retryCount > 0 : current.status !== "received" || current.claimedAt) return;
+        if (retry && !this.withinRetention(current)) throw new Error("已达到 7 天回执保证期限；需要用户核实。");
+        if (retry) current.retryCount += 1;
+        current.claimedAt ??= this.now().toISOString(); claimed = true;
       });
       if (!claimed) return;
       // No asynchronous gap between the durable Stop fence and issuing POST.
@@ -122,15 +197,15 @@ export class CommentDelivery {
       if (!response.ok) {
         await response.body?.cancel();
         // A server error can follow a committed transaction; it is not proof of absence.
-        await this.finish(record, response.status >= 500 || response.status === 408 ? "pending_verification" : "failed", `评论未确认保存（HTTP ${response.status}）；原输入已保留，不会自动重发。`); return;
+        await this.finish(record, retry || response.status >= 500 || [408, 409, 422].includes(response.status) ? "pending_verification" : "failed", `评论未确认保存（HTTP ${response.status}）；原输入已保留，不会自动重发。`); return;
       }
       const comment = receiptSchema.parse(await response.json());
-      if (comment.issue_id !== record.issueId || (comment.parent_id ?? null) !== (record.rootId === "main" ? null : record.rootId) || comment.content !== record.body || comment.author_id !== connection.userId) throw new Error("评论回执与原输入不匹配。");
+      if (!this.matches(record, connection, comment)) throw new Error("评论回执与原输入不匹配。");
       await this.finish(record, "saved", "评论已保存；是否开始执行以独立 Run 状态为准。", comment);
     } catch (error) {
-      const status = sent ? "pending_verification" : "failed";
+      const status = sent || retry ? "pending_verification" : "failed";
       const message = sent ? "响应丢失或回执无法核实；原输入已保留，不会自动重发。" : error instanceof Error ? error.message : "投递失败；原输入已保留。";
-      try { await this.finish(record, status, message); }
+      try { if (retry && !sent) await this.halt(record, message); else await this.finish(record, status, message); }
       catch { this.publish({ ...record, status, message: "无法持久保存投递结果；请保留原生输入并核实。不会自动重发。" }); }
     }
   }
@@ -142,6 +217,61 @@ export class CommentDelivery {
         receipt: { authorId: comment.author_id, parentId: comment.parent_id ?? null, createdAt: comment.created_at, updatedAt: comment.updated_at, triggerOutcomes: comment.trigger_outcomes } } : {}) });
     });
     this.publish(current);
+  }
+  private async record(address: RunAddress & { clientMessageId: string }) {
+    const record = (await this.store.read()).connections[address.connectionKey]?.issues[address.issueId]?.deliveries[deliveryKey(address.rootId, address.clientMessageId)];
+    if (!record) throw new Error("原投递记录不可用。");
+    return record;
+  }
+  private async context(record: DeliveryRecord) {
+    const connection = await this.connection();
+    if (connection.connectionKey !== record.connectionKey) throw new Error("请连接此投递的原 Multica 身份；不会转发到新连接。");
+    const issue = (await this.store.read()).connections[record.connectionKey]?.issues[record.issueId];
+    const workspaces = await remoteJson(connection, "/api/workspaces", z.array(workspaceSchema)) as z.infer<typeof workspaceSchema>[];
+    const workspace = workspaces.find(workspace => workspace.id === issue?.remoteWorkspaceId);
+    if (!workspace || (record.remoteWorkspaceId && record.remoteWorkspaceId !== workspace.id)) throw new Error("原 Multica 工作区不可用；不会更改原投递目标。");
+    return { connection, workspace };
+  }
+  async verify(address: RunAddress & { clientMessageId: string }) {
+    const record = await this.record(address);
+    const { connection, workspace } = await this.context(record);
+    await this.track(record, async () => {
+      const result = await this.lookup(record, connection, workspace);
+      if (result.kind === "saved") await this.finish(record, "saved", "已核实原评论保存；是否执行以独立 Run 状态为准。", result.comment);
+      else await this.halt(record, result.kind === "absent" ? (this.withinRetention(record)
+        ? "当前未查到回执；此次核实没有重新发送，请检查远端后明确决定是否重发。"
+        : "已达到 7 天回执保证期限；查无记录不能证明从未发表，请检查远端后决定是否重发。") : result.message);
+    });
+    const current = await this.record(address);
+    if (current.status === "saved") await this.onSaved();
+    return { status: current.status === "saved" ? "saved" as const : "pending_verification" as const, message: current.message };
+  }
+  async resend(address: RunAddress & { clientMessageId: string; requestId: string; acknowledgeDuplicateRisk: true }) {
+    const original = await this.record(address);
+    // Revalidate the original identity before accepting a new user-authorized attempt.
+    await this.context(original);
+    await this.posts.get(original.idempotencyKey);
+    const clientMessageId = `multica:resend:${address.requestId}`;
+    let next!: DeliveryRecord;
+    await this.store.update(state => {
+      const issue = state.connections[original.connectionKey].issues[original.issueId];
+      const existing = issue.deliveries[deliveryKey(original.rootId, clientMessageId)];
+      if (existing) {
+        if (existing.retryOf !== original.idempotencyKey) throw new Error("此重发决定已用于另一条输入。");
+        next = existing; return;
+      }
+      const current = issue.deliveries[deliveryKey(original.rootId, original.clientMessageId)];
+      if (current.status === "saved") throw new Error("原评论已确认保存，无需重新发送。");
+      current.recoveryHalted = true;
+      next = issue.deliveries[deliveryKey(original.rootId, clientMessageId)] = {
+        connectionKey: original.connectionKey, issueId: original.issueId, rootId: original.rootId, remoteWorkspaceId: original.remoteWorkspaceId ?? issue.remoteWorkspaceId,
+        clientMessageId, idempotencyKey: randomUUID(), retryOf: original.idempotencyKey, body: original.body,
+        createdAt: this.now().toISOString(), stopEpoch: issue.stopEpochs[original.rootId] ?? 0,
+        nativeDelivery: "auto", status: "received", retryCount: 0,
+      };
+    });
+    this.publish(next, true); this.start(next);
+    return { clientMessageId: next.clientMessageId, idempotencyKey: next.idempotencyKey };
   }
   async list() {
     const state = await this.store.read();

@@ -335,7 +335,9 @@ it("management lists shared hidden objects and offers separate workspace and sel
           if (contract.name === "stop.list") return { records: [{ connectionKey: "old-connection", issueId: "issue", rootId: "root", runId: "failed-run", title: "Closed Task", status: "running", cleanup: "unknown", retryable: true, message: "cancel failed" },
             { connectionKey: "old-connection", issueId: "issue", rootId: "root", runId: "cancelled-run", title: "Stopped Task", status: "cancelled", cleanup: "pending", retryable: false }] };
           if (contract.name === "stop.retry") return { status: "ready" };
-          if (contract.name === "delivery.list") return { records: [{ connectionKey: "old-connection", issueId: "issue", rootId: "main", clientMessageId: "native-input", idempotencyKey: "key", body: "Saved input", createdAt: "2026-11-24T10:00:00Z", status: "saved", threadRootId: "new-root", threadAgentId: "new-thread-agent" }] };
+          if (contract.name === "delivery.list") return { records: [{ connectionKey: "old-connection", issueId: "issue", rootId: "main", clientMessageId: "native-input", idempotencyKey: "key", body: "Saved input", createdAt: "2026-11-24T10:00:00Z", status: "saved", threadRootId: "new-root", threadAgentId: "new-thread-agent" }, { connectionKey: "old-connection", issueId: "issue", rootId: "root", clientMessageId: "uncertain-input", idempotencyKey: "uncertain-key", body: "Please verify original", createdAt: "2026-11-24T10:00:00Z", status: "pending_verification" }] };
+          if (contract.name === "delivery.verify") return { status: "pending_verification", message: "Original remains uncertain" };
+          if (contract.name === "delivery.resend") return { clientMessageId: "new-input", idempotencyKey: "new-key" };
           if (contract.name === "delivery.targets") return { issues: [{ connectionKey: "old-connection", issueId: "issue", title: "Task" }] };
           if (contract.name === "delivery.mentions") return { agents: [{ id: "agent-id", name: "Agent A", reference: "[@Agent A](mention://agent/agent-id)" }] };
           if (contract.name === "hidden.list") return { objects };
@@ -361,6 +363,15 @@ it("management lists shared hidden objects and offers separate workspace and sel
     expect(render()).toContain("cancel failed");
     expect(render()).toContain("进程清理尚待确认");
     expect(render()).toContain("评论已保存");
+    actions.find(action => action.actionLabel === "核实原投递")!.onPress();
+    await vi.waitFor(() => expect(calls).toContainEqual({ name: "delivery.verify", input: { connectionKey: "old-connection", issueId: "issue", rootId: "root", clientMessageId: "uncertain-input" } }));
+    render();
+    actions.find(action => action.actionLabel === "重新发送…")!.onPress();
+    expect(render()).toContain("可能重复触发执行");
+    expect(calls.some(call => call.name === "delivery.resend")).toBe(false);
+    actions.find(action => action.actionLabel === "确认另发一次")!.onPress();
+    await vi.waitFor(() => expect(calls).toContainEqual({ name: "delivery.resend", input: expect.objectContaining({ connectionKey: "old-connection", issueId: "issue", rootId: "root", clientMessageId: "uncertain-input", acknowledgeDuplicateRisk: true, requestId: expect.any(String) }) }));
+    render();
     expect(navigation).toEqual([]);
     actions.find(action => action.actionLabel === "继续此 Thread")!.onPress();
     expect(navigation).toEqual([{ agentId: "new-thread-agent", serverId: "host" }]);
