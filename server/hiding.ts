@@ -1,6 +1,6 @@
 import type { PluginHookAgent } from "@getpaseo/plugin/server";
 import { StateStore, type IssueMapping } from "./state.js";
-import type { NativeHost } from "./native-host.js";
+import { ensureWorkspaceActive, type NativeHost } from "./native-host.js";
 
 export function discussionAgent(issue: IssueMapping, rootId: string) {
   return rootId === "main" ? issue.mainAgentId : issue.threads[rootId]?.agentId;
@@ -49,7 +49,7 @@ export class ManualHiding {
     if (input.rootId !== undefined && !agentId) throw new Error("Mapped discussion unavailable");
     // Native workspace restoration does not restore its agents. Keep the original
     // identities, cwd and history; refresh only a confirmed archived selected agent.
-    await host.restoreWorkspace(issue.workspaceId);
+    await ensureWorkspaceActive(host, issue.workspaceId);
     if (agentId) {
       const existing = await host.fetchAgent(agentId);
       if (!existing?.agent || existing.agent.workspaceId !== issue.workspaceId || existing.agent.cwd !== issue.cwd) throw new Error("Mapped native discussion unavailable");
