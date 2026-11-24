@@ -10,6 +10,7 @@ import { remoteJson, workspaceSchema, type RemoteWorkspace } from "./sync.js";
 import { nativeOriginals, hasNativeOriginal } from "./projection-recovery.js";
 import type { NativeHost } from "./native-host.js";
 import type { StoredRow } from "./thread-state.js";
+import { assertWritableIssue } from "./access.js";
 
 export const deliveryKey = (rootId: string, clientMessageId: string) => createHash("sha256").update(JSON.stringify([rootId, clientMessageId])).digest("hex");
 const addressKey = (address: RunAddress) => JSON.stringify([address.connectionKey, address.issueId, address.rootId]);
@@ -154,6 +155,7 @@ export class CommentDelivery {
         if (existing.body !== body || existing.nativeDelivery !== prompt.delivery) throw new Error("同一输入身份不能改变正文或目标。");
         record = existing; return;
       }
+      assertWritableIssue(issue);
       record = issue.deliveries[id] = { ...address, remoteWorkspaceId: issue.remoteWorkspaceId, clientMessageId: prompt.clientMessageId, idempotencyKey: randomUUID(), body, createdAt: this.now().toISOString(), stopEpoch, nativeDelivery: prompt.delivery, status: "received", retryCount: 0 };
     });
     this.publish(record); return record;
@@ -175,7 +177,7 @@ export class CommentDelivery {
       const connection = context?.connection ?? await this.connection();
       if (connection.connectionKey !== record.connectionKey) throw new Error("登录身份已变化；原输入不会转发到新连接。");
       const issue = (await this.store.read()).connections[record.connectionKey]?.issues[record.issueId];
-      if (!issue) throw new Error("讨论不可用。");
+      assertWritableIssue(issue);
       const workspaces = context ? [context.workspace] : await remoteJson(connection, "/api/workspaces", z.array(workspaceSchema)) as z.infer<typeof workspaceSchema>[];
       const workspace = workspaces.find(workspace => workspace.id === issue.remoteWorkspaceId);
       if (!workspace || (record.remoteWorkspaceId && record.remoteWorkspaceId !== workspace.id)) throw new Error("原 Multica 工作区不可用；不会更改原投递目标。");
@@ -184,6 +186,7 @@ export class CommentDelivery {
       await connection.assertCurrent?.();
       let claimed = false;
       await this.stops.guardDelivery(record, record.stopEpoch, state => {
+        assertWritableIssue(state.connections[record.connectionKey]?.issues[record.issueId]);
         const current = state.connections[record.connectionKey].issues[record.issueId].deliveries[deliveryKey(record.rootId, record.clientMessageId)];
         if (retry ? !["received", "pending_verification"].includes(current.status) || current.recoveryHalted || current.retryCount > 0 : current.status !== "received" || current.claimedAt) return;
         if (!this.withinRetention(current)) throw new Error("已达到 7 天回执保证期限；需要用户核实。");
@@ -228,10 +231,11 @@ export class CommentDelivery {
     if (!record) throw new Error("原投递记录不可用。");
     return record;
   }
-  private async context(record: DeliveryRecord) {
+  private async context(record: DeliveryRecord, writable = true) {
+    const issue = (await this.store.read()).connections[record.connectionKey]?.issues[record.issueId];
+    if (writable) assertWritableIssue(issue);
     const connection = await this.connection();
     if (connection.connectionKey !== record.connectionKey) throw new Error("请连接此投递的原 Multica 身份；不会转发到新连接。");
-    const issue = (await this.store.read()).connections[record.connectionKey]?.issues[record.issueId];
     const workspaces = await remoteJson(connection, "/api/workspaces", z.array(workspaceSchema)) as z.infer<typeof workspaceSchema>[];
     const workspace = workspaces.find(workspace => workspace.id === issue?.remoteWorkspaceId);
     if (!workspace || (record.remoteWorkspaceId && record.remoteWorkspaceId !== workspace.id)) throw new Error("原 Multica 工作区不可用；不会更改原投递目标。");
@@ -239,7 +243,7 @@ export class CommentDelivery {
   }
   async verify(address: RunAddress & { clientMessageId: string }) {
     const record = await this.record(address);
-    const { connection, workspace } = await this.context(record);
+    const { connection, workspace } = await this.context(record, false);
     await this.track(record, async () => {
       const result = await this.lookup(record, connection, workspace);
       if (result.kind === "saved") await this.finish(record, "saved", "已核实原评论保存；是否执行以独立 Run 状态为准。", result.comment);
@@ -260,6 +264,7 @@ export class CommentDelivery {
     let next!: DeliveryRecord;
     await this.store.update(state => {
       const issue = state.connections[original.connectionKey].issues[original.issueId];
+      assertWritableIssue(issue);
       const existing = issue.deliveries[deliveryKey(original.rootId, clientMessageId)];
       if (existing) {
         if (existing.retryOf !== original.idempotencyKey) throw new Error("此重发决定已用于另一条输入。");
@@ -293,9 +298,10 @@ export class CommentDelivery {
     const text = record.body.slice(address.offset, address.offset + 8192), next = address.offset + text.length;
     return { text, nextOffset: next < record.body.length ? next : null };
   }
-  async targets() { const state = await this.store.read(); return { issues: Object.entries(state.connections).flatMap(([connectionKey, connection]) => Object.entries(connection.issues).map(([issueId, issue]) => ({ connectionKey, issueId, title: issue.title }))) }; }
+  async targets() { const state = await this.store.read(); return { issues: Object.entries(state.connections).flatMap(([connectionKey, connection]) => Object.entries(connection.issues).filter(([, issue]) => issue.access?.status !== "inaccessible").map(([issueId, issue]) => ({ connectionKey, issueId, title: issue.title }))) }; }
   async mentions(address: { connectionKey: string; issueId: string }) {
     const issue = (await this.store.read()).connections[address.connectionKey]?.issues[address.issueId];
+    assertWritableIssue(issue);
     const connection = await this.connection();
     if (!issue || connection.connectionKey !== address.connectionKey) throw new Error("请连接此讨论的原 Multica 身份。");
     const workspaces = await remoteJson(connection, "/api/workspaces", z.array(workspaceSchema)) as z.infer<typeof workspaceSchema>[];

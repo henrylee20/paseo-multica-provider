@@ -1,3 +1,4 @@
+import { assertWritableIssue } from "./access.js";
 import { nativeOriginals, hasNativeOriginal } from "./projection-recovery.js";
 import { createHash } from "node:crypto";
 import { z } from "zod";
@@ -194,8 +195,11 @@ export class ThreadSynchronizer {
     const issue = (await this.store.read()).connections[address.connectionKey]?.issues[address.issueId];
     const thread = issue ? projectionHistory(issue, address.rootId) : undefined;
     if (!thread) return { status: "unavailable", message: "此 Thread 尚未映射。" };
+    if (issue?.access?.status === "inaccessible") return { status: thread.historyLoaded ? "cached" : "unavailable",
+      message: `此任务已不可访问，仅显示只读缓存。最后完整同步：${issue.access.lastSuccessAt ?? "未知"}。` };
     this.opened.add(key(address));
     try {
+      assertWritableIssue(issue);
       const connection = await this.connection();
       if (connection.connectionKey !== address.connectionKey) throw new Error("Connection identity changed");
       const workspaces = await remoteJson(connection, "/api/workspaces", z.array(workspaceSchema)) as RemoteWorkspace[];
@@ -209,6 +213,7 @@ export class ThreadSynchronizer {
     const id = key(address);
     const operation = (this.pending.get(id) ?? Promise.resolve()).catch(() => {}).then(async () => {
       const issue = (await this.store.read()).connections[address.connectionKey].issues[address.issueId];
+      assertWritableIssue(issue);
       const rootIds = address.rootId === "main" ? issue.systemRootIds : [address.rootId];
       const comments = new Map<string, Comment>();
       for (const rootId of rootIds) for (const [id, comment] of await this.pages(connection, workspace, address.issueId, { thread: rootId, tail: "100" })) comments.set(id, comment);

@@ -333,6 +333,8 @@ it("management lists shared hidden objects and offers separate workspace and sel
       useRpc: (contract: { name: string }) => {
         if (!rpcs.has(contract.name)) rpcs.set(contract.name, async input => {
           calls.push({ name: contract.name, input });
+          if (contract.name === "issue.history.list") return { issues: [{ connectionKey: "old-connection", issueId: "issue", workspaceId: "workspace", title: "Read-only Task", status: "inaccessible", reason: "forbidden", lastSuccessAt: "2026-11-24T10:00:00Z", checkedAt: "2026-11-24T11:00:00Z", revision: "cache-revision" }] };
+          if (contract.name === "issue.history.read") return { text: JSON.stringify({ title: "Read-only Task", description: "Preserved goal", discussions: [{ rootId: "root", title: "Original thread", rows: [{ id: "comment", role: "user", text: "Original cached comment" }] }], runs: [{ id: "run", agentName: "Original agent", status: "running", ownerRootId: "root", messages: [{ task_id: "run", issue_id: "issue", seq: 1, type: "text", content: "Preserved output" }] }], deliveries: [], stops: [] }), nextOffset: null };
           if (contract.name === "connection.history") return { connections: [{ connectionKey: "old-connection", apiUrl: "https://original.example.test", user: { id: "original-user", name: "Original account", email: "" }, profiles: ["office"], projectCount: 1, issueCount: 2, hiddenCount: 1, pendingDeliveryCount: 1, stopWarningCount: 1 }] };
           if (contract.name === "stop.list") return { records: [{ connectionKey: "old-connection", issueId: "issue", rootId: "root", runId: "failed-run", title: "Closed Task", status: "running", cleanup: "unknown", retryable: true, message: "cancel failed" },
             { connectionKey: "old-connection", issueId: "issue", rootId: "root", runId: "cancelled-run", title: "Stopped Task", status: "cancelled", cleanup: "pending", retryable: false }] };
@@ -350,7 +352,7 @@ it("management lists shared hidden objects and offers separate workspace and sel
         return rpcs.get(contract.name);
       },
     },
-    "@getpaseo/plugin/client/ui": { SettingsSection: passthrough, SettingsCard: passthrough, SettingsInput: passthrough, SettingsRow: passthrough,
+    "@getpaseo/plugin/client/ui": { Markdown: ({ children }: { children: string }) => children, SettingsSection: passthrough, SettingsCard: passthrough, SettingsInput: passthrough, SettingsRow: passthrough,
       SettingsAction: (props: { label: string; actionLabel: string; onPress(): unknown }) => { actions.push(props); return [props.label, props.actionLabel]; } },
     "react-native": { View: "View", Text: "Text" },
   });
@@ -369,6 +371,14 @@ it("management lists shared hidden objects and offers separate workspace and sel
     expect(render()).toContain("cancel failed");
     expect(render()).toContain("进程清理尚待确认");
     expect(render()).toContain("评论已保存");
+    expect(render()).toContain("只读历史");
+    expect(render()).toContain("Read-only Task");
+    expect(render()).toContain("访问受限");
+    actions.find(action => action.actionLabel === "读取缓存历史")!.onPress();
+    await vi.waitFor(() => expect(render()).toContain("Original cached comment"));
+    expect(render()).toContain("Preserved output");
+    expect(render()).toContain("Preserved goal");
+    expect(calls).toContainEqual({ name: "issue.history.read", input: { connectionKey: "old-connection", issueId: "issue", revision: "cache-revision", offset: 0 } });
     actions.find(action => action.actionLabel === "核实原投递")!.onPress();
     await vi.waitFor(() => expect(calls).toContainEqual({ name: "delivery.verify", input: { connectionKey: "old-connection", issueId: "issue", rootId: "root", clientMessageId: "uncertain-input" } }));
     render();

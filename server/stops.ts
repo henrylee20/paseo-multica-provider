@@ -5,6 +5,7 @@ import { remoteFetch, type AuthenticatedConnection } from "./connection.js";
 import { isActiveRun, type RunAddress, type RunSynchronizer } from "./runs.js";
 import { StateStore, type LocalState } from "./state.js";
 import { remoteJson, workspaceSchema, type RemoteWorkspace } from "./sync.js";
+import { assertWritableIssue } from "./access.js";
 
 const cancelledRunSchema = z.object({ id: z.string(), issue_id: z.string(), status: runStatusSchema,
   completed_at: z.string().nullish(), failure_reason: z.string().nullish(),
@@ -78,6 +79,7 @@ export class StopCoordinator {
       connection = await this.connection();
       if (connection.connectionKey !== address.connectionKey) throw new Error("请先切换回此停止记录所属的 Multica 连接。");
       const issue = (await this.store.read()).connections[address.connectionKey].issues[address.issueId];
+      assertWritableIssue(issue);
       const workspaces = await remoteJson(connection, "/api/workspaces", z.array(workspaceSchema)) as RemoteWorkspace[];
       const found = workspaces.find(item => item.id === issue.remoteWorkspaceId);
       if (!found) throw new Error("Multica 工作区不可用。");
@@ -88,6 +90,7 @@ export class StopCoordinator {
     let failed = false;
     for (const runId of runIds) {
       try {
+        assertWritableIssue((await this.store.read()).connections[address.connectionKey]?.issues[address.issueId]);
         const response = await remoteFetch(connection, `/api/issues/${encodeURIComponent(address.issueId)}/tasks/${encodeURIComponent(runId)}/cancel`, {
           method: "POST", headers: { "X-Workspace-Slug": workspace.slug },
         });
