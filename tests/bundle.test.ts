@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { runInThisContext } from "node:vm";
 import * as pluginRuntime from "@getpaseo/plugin";
 import * as zod from "zod";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { FakeServer } from "./support/fake-server.js";
 
 async function bundledContribution(entry: string, runtime: Record<string, unknown> = {}) {
@@ -25,7 +25,7 @@ it("the host-compiled server entry registers CLI connection management", async (
   const server = new FakeServer();
   const dispose = setup(server.context);
   expect(server.settings.has("multica")).toBe(true);
-  expect(server.providers.size).toBe(0);
+  expect(server.providers.has("multica")).toBe(true);
   dispose();
 });
 
@@ -36,11 +36,28 @@ it("the host-compiled client entry offers a Multica management screen and sideba
     entries.push({ kind, ...entry });
     return () => { entries.splice(entries.findIndex(value => value.kind === kind && value.id === entry.id), 1); };
   };
-  const dispose = setup({ addSettingsScreen: add("settings"), addScreen: add("screen"), addSidebarHeaderItem: add("sidebar") });
+  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: add("settings"), addScreen: add("screen"), addSidebarHeaderItem: add("sidebar") });
   expect(entries.map(({ kind, id }) => ({ kind, id }))).toEqual([
     { kind: "settings", id: "multica" }, { kind: "screen", id: "management" }, { kind: "sidebar", id: "multica" },
   ]);
   expect(entries.every(entry => typeof entry.Component === "function")).toBe(true);
   dispose();
   expect(entries).toEqual([]);
+});
+
+it("client contribution bootstraps without opening management and retries after a disconnected RPC", async () => {
+  const setup = await bundledContribution("../index.client.tsx", { "@getpaseo/plugin/client": {}, "@getpaseo/plugin/client/ui": {}, "react-native": {} });
+  vi.useFakeTimers();
+  try {
+    const calls: string[] = [];
+    const dispose = setup({ rpc: async (contract: { name: string }) => { calls.push(contract.name); if (calls.length === 1) throw new Error("disconnected"); return { status: "ready" }; },
+      addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {} });
+    await Promise.resolve();
+    expect(calls).toEqual(["sync.bootstrap"]);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(calls).toEqual(["sync.bootstrap", "sync.bootstrap"]);
+    dispose();
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(calls).toHaveLength(2);
+  } finally { vi.useRealTimers(); }
 });

@@ -20,3 +20,11 @@ export const connectionStatusSchema = z.object({
 });
 export type ConnectionStatus = z.output<typeof connectionStatusSchema>;
 export const connectionStatus = defineRpc({ name: "connection.status", input: z.object({}), output: connectionStatusSchema });
+
+export const syncBootstrap = defineRpc({ name: "sync.bootstrap", input: z.object({}), output: z.object({
+  status: z.enum(["ready", "unavailable"]), message: z.string().optional(),
+}) });
+export const workspaceList = defineRpc({ name: "workspace.list", input: z.object({}), output: z.object({
+  workspaces: z.array(z.object({ id: z.string(), name: z.string(), enabled: z.boolean() })),
+}) });
+export const workspaceEnable = defineRpc({ name: "workspace.enable", input: z.object({ workspaceId: z.string().min(1), enabled: z.boolean() }), output: syncBootstrap.output });

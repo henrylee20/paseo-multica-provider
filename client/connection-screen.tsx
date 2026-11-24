@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Text, View } from "react-native";
 import { useRpc, useSettings, type PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { ExternalLink, SettingsAction, SettingsCard, SettingsInput, SettingsRow, SettingsSection } from "@getpaseo/plugin/client/ui";
-import { connectionStatus, multicaSettings, type ConnectionStatus } from "../shared/contracts.js";
+import { connectionStatus, multicaSettings, workspaceList, workspaceEnable, type ConnectionStatus } from "../shared/contracts.js";
 
 const labels: Record<ConnectionStatus["status"], string> = {
   ready: "已连接", missing_config: "未配置 CLI", unreadable_config: "配置无法读取", invalid_config: "配置无效",
@@ -13,6 +13,11 @@ const sourceLabel = { config: "CLI 配置", environment: "daemon 环境变量", 
 export function ConnectionScreen({ host, theme }: PluginSurfaceProps) {
   const settings = useSettings(multicaSettings);
   const readStatus = useRpc(connectionStatus);
+  const listWorkspaces = useRpc(workspaceList);
+  const enableWorkspace = useRpc(workspaceEnable);
+  const [workspaces, setWorkspaces] = useState<Array<{ id: string; name: string; enabled: boolean }>>([]);
+  const [workspaceFailure, setWorkspaceFailure] = useState<string | null>(null);
+  const [savingWorkspace, setSavingWorkspace] = useState<string | null>(null);
   const [status, setStatus] = useState<ConnectionStatus | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
@@ -29,6 +34,12 @@ export function ConnectionScreen({ host, theme }: PluginSurfaceProps) {
       try {
         const next = await readStatus({});
         if (active) { setStatus(next); setFailure(null); }
+        if (next.status === "ready") {
+          try {
+            const result = await listWorkspaces({});
+            if (active) { setWorkspaces(result.workspaces); setWorkspaceFailure(null); }
+          } catch { if (active) setWorkspaceFailure("无法读取 Multica 工作区，请检查连接后刷新。"); }
+        } else if (active) setWorkspaces([]);
       } catch {
         if (active) { setStatus(null); setFailure("无法读取此主机的连接状态，请检查 Paseo daemon 连接后重试。"); }
       }
@@ -36,7 +47,7 @@ export function ConnectionScreen({ host, theme }: PluginSurfaceProps) {
     }
     void update();
     return () => { active = false; if (timer) clearTimeout(timer); };
-  }, [readStatus, attempt, configuredProfile, host.id]);
+  }, [readStatus, listWorkspaces, attempt, configuredProfile, host.id]);
 
   async function saveProfile() {
     if (settings.status !== "ready") return;
@@ -44,6 +55,17 @@ export function ConnectionScreen({ host, theme }: PluginSurfaceProps) {
     if (!parsed.success) { setProfileError("Profile 必须是单个名称，不能包含路径分隔符或 .. 路径。"); return; }
     setProfileError(null);
     if (await settings.save(parsed.data, settings.revision)) setAttempt(value => value + 1);
+  }
+
+  async function toggleWorkspace(workspace: { id: string; enabled: boolean }) {
+    setSavingWorkspace(workspace.id);
+    try {
+      const result = await enableWorkspace({ workspaceId: workspace.id, enabled: !workspace.enabled });
+      if (result.status !== "ready") { setWorkspaceFailure(result.message ?? "同步暂不可用，请重试。"); return; }
+      setWorkspaceFailure(null);
+      setAttempt(value => value + 1);
+    } catch { setWorkspaceFailure("工作区规则保存或同步失败，请重试。"); }
+    finally { setSavingWorkspace(null); }
   }
 
   const text = { color: theme.colors.foreground };
@@ -76,7 +98,18 @@ export function ConnectionScreen({ host, theme }: PluginSurfaceProps) {
         </SettingsCard>
         {status.status !== "ready" ? <Text selectable style={muted}>在 daemon 主机恢复 CLI 登录后刷新：{status.loginCommand}</Text> : null}
       </> : !failure ? <Text style={muted}>正在验证 CLI 连接…</Text> : null}
-      <Text style={muted}>任务筛选配置为空时不会导入任何任务。连接凭据仅在 daemon 内使用。</Text>
+      <Text style={muted}>连接凭据仅在 daemon 内使用。</Text>
+    </SettingsSection>
+    <SettingsSection title="工作区与默认规则">
+      <Text style={muted}>显式启用后导入“未开始”和“进行中”状态类别的任务；具体状态、负责人、Multica 项目和标签均不限。未启用的工作区不会导入。</Text>
+      {workspaceFailure ? <Text accessibilityRole="alert" style={{ color: theme.colors.statusDanger }}>{workspaceFailure}</Text> : null}
+      {workspaces.map(workspace => <SettingsCard key={workspace.id}>
+        <SettingsAction label={workspace.name} hint={workspace.enabled ? "已启用：未开始、进行中" : "尚未启用"}
+          actionLabel={workspace.enabled ? "停用默认规则" : "启用默认规则"} disabled={savingWorkspace !== null}
+          onPress={() => { void toggleWorkspace(workspace); }} />
+      </SettingsCard>)}
+      {status?.status === "ready" && !workspaces.length && !workspaceFailure ? <Text style={muted}>当前没有可用的 Multica 工作区。</Text> : null}
+      <Text style={muted}>每项任务使用独立的非 Git 占位目录，主讨论中可读任务描述。原生文件与终端打开的是占位目录。</Text>
     </SettingsSection>
   </View>;
 }

@@ -10,12 +10,20 @@ export interface ConnectionDependencies {
   environment: NodeJS.ProcessEnv;
 }
 
+/** Daemon-only request context. Never return this value from an RPC or persist it. */
+export interface AuthenticatedConnection {
+  apiUrl: string;
+  token: string;
+  connectionKey: string;
+  userId: string;
+}
+
 const cliConfig = z.object({ server_url: z.string().nullish(), app_url: z.string().nullish(), token: z.string().nullish() });
 const remoteUser = z.object({ id: z.string().min(1), name: z.string().nullish(), email: z.string().nullish() });
 
 /** Every resolution reads the effective CLI file anew; credentials never enter an RPC result. */
 export function createConnectionResolver(dependencies: ConnectionDependencies) {
-  return async (profile: string): Promise<ConnectionStatus> => {
+  return async (profile: string, authenticated?: (connection: AuthenticatedConnection) => void): Promise<ConnectionStatus> => {
     const env = dependencies.environment;
     const base: ConnectionStatus = {
       status: "not_logged_in", profile,
@@ -74,8 +82,10 @@ export function createConnectionResolver(dependencies: ConnectionDependencies) {
         return fail("offline", `Multica 身份验证暂不可用（HTTP ${response.status}）。`);
       }
       const user = remoteUser.parse(await response.json());
+      const connectionKey = createHash("sha256").update(JSON.stringify([base.apiUrl, user.id])).digest("hex");
+      authenticated?.({ apiUrl: base.apiUrl!, token, connectionKey, userId: user.id });
       return { ...base, status: "ready", user: { id: user.id, name: user.name ?? "", email: user.email ?? "" },
-        connectionKey: createHash("sha256").update(JSON.stringify([base.apiUrl, user.id])).digest("hex"),
+        connectionKey,
         message: "已验证 CLI 连接。" };
     } catch { return fail("offline", "无法验证 Multica 身份，请检查服务连接后重试。"); }
   };
