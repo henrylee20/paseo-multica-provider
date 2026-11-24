@@ -7,6 +7,7 @@ import { connectionStatus, multicaSettings, workspaceList, workspaceEnable, type
 import { WorkspaceRuleEditor } from "./workspace-rule.js";
 import { HiddenObjects } from "./hidden-objects.js";
 import { StopResults } from "./stop-results.js";
+import { DeliveryManagement } from "./delivery-status.js";
 
 const labels: Record<ConnectionStatus["status"], string> = {
   ready: "已连接", missing_config: "未配置 CLI", unreadable_config: "配置无法读取", invalid_config: "配置无效",
@@ -14,7 +15,7 @@ const labels: Record<ConnectionStatus["status"], string> = {
 };
 const sourceLabel = { config: "CLI 配置", environment: "daemon 环境变量", none: "未配置" };
 
-export function ConnectionScreen({ host, theme }: PluginSurfaceProps) {
+export function ConnectionScreen({ host, theme, navigation }: PluginSurfaceProps) {
   const settings = useSettings(multicaSettings);
   const readStatus = useRpc(connectionStatus);
   const listWorkspaces = useRpc(workspaceList);
@@ -122,5 +123,6 @@ export function ConnectionScreen({ host, theme }: PluginSurfaceProps) {
     </SettingsSection>
     <HiddenObjects theme={theme} refreshKey={`${host.id}:${configuredProfile}:${attempt}`} />
     <StopResults theme={theme} refreshKey={`${host.id}:${configuredProfile}:${attempt}`} />
+    <DeliveryManagement theme={theme} navigation={navigation} host={host} refreshKey={`${host.id}:${configuredProfile}:${attempt}`} />
   </View>;
 }

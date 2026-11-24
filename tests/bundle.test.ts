@@ -148,7 +148,7 @@ it("the native thread renderer lazily opens history and comment events render as
   });
   const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {},
     addTimelineRenderer: (renderer: any) => { renderers.push(renderer); return () => {}; } });
-  expect(renderers.map(renderer => renderer.kind)).toEqual(["task-description", "thread", "run-summary", "comment-event"]);
+  expect(renderers.map(renderer => renderer.kind)).toEqual(["task-description", "thread", "run-summary", "comment-event", "comment-delivery"]);
   expect(calls).toEqual([]);
   const address = { connectionKey: "connection", issueId: "issue", rootId: "root" };
   const theme = { colors: { foreground: "black", foregroundMuted: "gray" } };
@@ -167,6 +167,27 @@ it("the native thread renderer lazily opens history and comment events render as
   expect(JSON.stringify(source)).toContain("2020-01-01T00:00:00Z");
   expect(JSON.stringify(source)).toContain("2026-11-24T12:00:00Z");
   dispose();
+});
+
+it("delivery rows distinguish durable input, saved comments and unknown results without claiming a Run started", async () => {
+  const renderers: Array<{ kind: string; schema: zod.ZodType; Component: (props: any) => any }> = [];
+  const setup = await bundledContribution("../index.client.tsx", {
+    "@getpaseo/plugin/client": { useRpc: () => async () => ({}) }, "@getpaseo/plugin/client/ui": {},
+    "react-native": { Text: "Text", View: "View", Pressable: "Pressable" },
+    react: { useState: (initial: unknown) => [initial, () => {}] },
+  });
+  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: any) => { renderers.push(renderer); return () => {}; } });
+  try {
+    const renderer = renderers.find(renderer => renderer.kind === "comment-delivery");
+    expect(renderer).toBeDefined();
+    const base = { connectionKey: "connection", issueId: "issue", rootId: "main", clientMessageId: "input", idempotencyKey: "key", createdAt: "2026-11-24T10:00:00Z", body: "Preserved input" };
+    const render = (status: string) => renderedText(renderer!.Component({ item: { data: renderer!.schema.parse({ ...base, status }) }, theme: { colors: { foreground: "black", foregroundMuted: "gray", statusDanger: "red" } } }));
+    expect(render("received")).toContain("插件已接收");
+    expect(render("saved")).toContain("评论已保存");
+    expect(render("saved")).toContain("Run 状态");
+    expect(render("pending_verification")).toContain("待核实");
+    expect(render("failed")).toContain("投递失败");
+  } finally { dispose(); }
 });
 
 it("renders each run's agent and actual state as a bounded summary and observes activity after timeline mounting", async () => {
@@ -313,6 +334,8 @@ it("management lists shared hidden objects and offers separate workspace and sel
           if (contract.name === "stop.list") return { records: [{ connectionKey: "old-connection", issueId: "issue", rootId: "root", runId: "failed-run", title: "Closed Task", status: "running", cleanup: "unknown", retryable: true, message: "cancel failed" },
             { connectionKey: "old-connection", issueId: "issue", rootId: "root", runId: "cancelled-run", title: "Stopped Task", status: "cancelled", cleanup: "pending", retryable: false }] };
           if (contract.name === "stop.retry") return { status: "ready" };
+          if (contract.name === "delivery.list") return { records: [] };
+          if (contract.name === "delivery.targets") return { issues: [] };
           if (contract.name === "hidden.list") return { objects };
           if (contract.name === "hidden.restore") return { status: "ready" };
           if (contract.name === "workspace.list") return { workspaces: [] };

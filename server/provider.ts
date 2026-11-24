@@ -10,14 +10,15 @@ import { projectRow, threadPersistence, type ThreadSynchronizer } from "./thread
 import type { StoredRow } from "./thread-state.js";
 import type { StopCoordinator } from "./stops.js";
 import type { RunAddress } from "./runs.js";
+import { deliveryRow, type CommentDelivery } from "./delivery.js";
 
 const persistenceSchema = z.object({ version: z.literal(1), data: z.object({
   connectionKey: z.string(), issueId: z.string(),
 }).and(z.discriminatedUnion("discussion", [z.object({ discussion: z.literal("main") }), z.object({ discussion: z.literal("thread"), rootId: z.string() })])) });
-const supported = ["session.persistence", "session.list", "timeline.plugin", "session.archive", "session.unarchive"];
+const supported = ["prompt.message", "prompt.steer", "session.persistence", "session.list", "timeline.plugin", "session.archive", "session.unarchive"];
 
 /** A Multica discussion projection, never a local code execution engine. */
-export function createMulticaProvider(store: StateStore, threads: ThreadSynchronizer, runs: RunSynchronizer, stops: StopCoordinator): ProviderRegistration {
+export function createMulticaProvider(store: StateStore, threads: ThreadSynchronizer, runs: RunSynchronizer, stops: StopCoordinator, deliveries: CommentDelivery): ProviderRegistration {
   return {
     id: providerId, label: "Multica", description: "Multica 任务讨论（目录仅为本地占位目录）",
     status: async () => ({ available: true }),
@@ -29,6 +30,8 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
       const addresses = new Map<string, RunAddress>();
       const runSubscriptions = new Map<string, () => void>();
       const subscriptions = new Map<string, () => void>();
+      const deliverySubscriptions = new Map<string, () => void>();
+      const activeTurns = new Map<string, string>();
       let closed = false;
       const emit = (event: ProviderEvent) => { if (!closed) for (const listener of listeners) listener(event); };
       const emitRow = (sessionId: string, address: { connectionKey: string; issueId: string; rootId: string }, row: StoredRow) => {
@@ -91,6 +94,9 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
             }
             const address = { connectionKey: parsed.data.data.connectionKey, issueId: parsed.data.data.issueId, rootId: parsed.data.data.discussion === "thread" ? parsed.data.data.rootId : "main" };
             addresses.set(input.sessionId, address);
+            const projectDelivery = (record: (typeof issue.deliveries)[string]) => emit({ type: "timeline.item", sessionId: input.sessionId, item: deliveryRow(record) });
+            if (input.history === "replay") for (const record of Object.values(issue.deliveries).filter(record => record.rootId === address.rootId)) projectDelivery(record);
+            deliverySubscriptions.set(input.sessionId, deliveries.subscribe(address, projectDelivery));
             const projected = new Map<string, string>();
             let activeTurnId: string | undefined;
             const projectRuns = (owned: typeof issue.runs, activity = true) => {
@@ -103,10 +109,12 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
               const active = Object.values(owned).some(run => isActiveRun(run.status));
               if (active && !activeTurnId) {
                 activeTurnId = `multica:aggregate:${randomUUID()}`;
+                activeTurns.set(input.sessionId, activeTurnId);
                 emit({ type: "session.turn", sessionId: input.sessionId, turnId: activeTurnId, state: "started" });
               } else if (!active && activeTurnId) {
                 emit({ type: "session.turn", sessionId: input.sessionId, turnId: activeTurnId, state: "completed" });
                 activeTurnId = undefined;
+                activeTurns.delete(input.sessionId);
               }
             };
             const owned = Object.fromEntries(Object.entries(issue.runs).filter(([, run]) => run.ownerRootId === address.rootId));
@@ -119,6 +127,8 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
           if (input.type === "session.close") {
             sessions.delete(input.sessionId);
             addresses.delete(input.sessionId);
+            activeTurns.delete(input.sessionId);
+            deliverySubscriptions.get(input.sessionId)?.(); deliverySubscriptions.delete(input.sessionId);
             runSubscriptions.get(input.sessionId)?.(); runSubscriptions.delete(input.sessionId);
             subscriptions.get(input.sessionId)?.(); subscriptions.delete(input.sessionId);
             emit({ type: "session.closed", sessionId: input.sessionId });
@@ -141,13 +151,26 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
             return;
           }
           if (input.type === "session.prompt") {
-            emit({ type: "session.prompt_result", sessionId: input.sessionId, clientMessageId: input.prompt.clientMessageId,
-              result: { type: "failed", error: { code: "read_only", message: "当前切片只读；评论投递尚未启用。" } } });
+            // Capture before awaiting durability: returning a replacement cycle's ID
+            // violates the host's actual changed-turn admission guard.
+            const capturedTurnId = activeTurns.get(input.sessionId);
+            try {
+              const address = addresses.get(input.sessionId);
+              if (!address) throw new Error("请在 Multica 管理页启用任务工作区后打开已导入的讨论。");
+              const record = await deliveries.admit(address, input.prompt);
+              emit({ type: "timeline.item", sessionId: input.sessionId, item: { type: "user_message", id: `multica:input:${record.idempotencyKey}`, messageId: record.commentId ?? `multica:input:${record.idempotencyKey}`, clientMessageId: record.clientMessageId, text: record.body } });
+              emit({ type: "session.prompt_result", sessionId: input.sessionId, clientMessageId: input.prompt.clientMessageId,
+                result: input.prompt.delivery === "steer" && capturedTurnId ? { type: "steer", turnId: capturedTurnId } : { type: "completed" } });
+              deliveries.start(record);
+            } catch (error) {
+              emit({ type: "session.prompt_result", sessionId: input.sessionId, clientMessageId: input.prompt.clientMessageId,
+                result: { type: "failed", error: { code: "delivery_not_received", message: error instanceof Error ? error.message : "未能持久接收输入。" } } });
+            }
             return;
           }
           if ("requestId" in input) emit({ type: "request.failed", requestId: input.requestId, error: { code: "unsupported", message: "此操作尚未支持。" } });
         },
-        async close() { for (const unsubscribe of runSubscriptions.values()) unsubscribe(); runSubscriptions.clear(); for (const unsubscribe of subscriptions.values()) unsubscribe(); subscriptions.clear(); sessions.clear(); addresses.clear(); listeners.clear(); closed = true; },
+        async close() { for (const unsubscribe of deliverySubscriptions.values()) unsubscribe(); deliverySubscriptions.clear(); activeTurns.clear(); for (const unsubscribe of runSubscriptions.values()) unsubscribe(); runSubscriptions.clear(); for (const unsubscribe of subscriptions.values()) unsubscribe(); subscriptions.clear(); sessions.clear(); addresses.clear(); listeners.clear(); closed = true; },
       };
     },
   };

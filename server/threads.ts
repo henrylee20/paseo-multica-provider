@@ -57,7 +57,8 @@ function body(comment: Comment, apiUrl: string): string {
 }
 
 export function projectRow(address: Address, row: StoredRow): ProviderTimelineItem {
-  if (row.role !== "event") return { type: row.role === "user" ? "user_message" : "assistant_message", id: row.id, messageId: row.commentId, text: row.text };
+  if (row.role === "user") return { type: "user_message", id: row.id, messageId: row.commentId, text: row.text, ...(row.clientMessageId ? { clientMessageId: row.clientMessageId } : {}) };
+  if (row.role === "assistant") return { type: "assistant_message", id: row.id, messageId: row.commentId, text: row.text };
   // Row payloads stay below the host's 64 KiB limit; full correction text stays available via RPC.
   const preview = [...row.text].slice(0, 6000).join("");
   return { type: "plugin", id: row.id, pluginId: "multica", kind: "comment-event", version: 1, data: {
@@ -70,7 +71,9 @@ export function projectRow(address: Address, row: StoredRow): ProviderTimelineIt
 export class ThreadSynchronizer {
   private readonly listeners = new Map<string, Set<(row: StoredRow) => void>>();
   private readonly pending = new Map<string, Promise<void>>();
+  private waitForDeliveries: () => Promise<void> = async () => {};
   constructor(private readonly store: StateStore, private readonly connection: () => Promise<AuthenticatedConnection>) {}
+  coordinateDeliveries(wait: () => Promise<void>) { this.waitForDeliveries = wait; }
   subscribe(address: Address, listener: (row: StoredRow) => void) {
     const id = key(address);
     const listeners = this.listeners.get(id) ?? new Set();
@@ -197,8 +200,12 @@ export class ThreadSynchronizer {
           ? remoteJson(connection, `/api/agents?workspace_id=${encodeURIComponent(workspace.id)}&include_archived=true`, z.array(z.object({ id: z.string(), name: z.string() })), workspace) : [],
       ]) as [Array<{ user_id: string; name: string }>, Array<{ id: string; name: string }>];
       const newRows: StoredRow[] = [];
+      // A WS invalidation can beat the HTTP receipt. Wait for active POSTs so
+      // their source IDs can reconcile the host's optimistic input safely.
+      await this.waitForDeliveries();
       await this.store.update(state => {
-        const thread = projectionHistory(state.connections[address.connectionKey].issues[address.issueId], address.rootId);
+        const issue = state.connections[address.connectionKey].issues[address.issueId];
+        const thread = projectionHistory(issue, address.rootId);
         const append = (row: StoredRow) => { if (!thread.rows.some(existing => existing.id === row.id)) { thread.rows.push(row); newRows.push(row); } };
         const sorted = [...comments.values()].sort((a, b) => (a.created_at ?? "").localeCompare(b.created_at ?? "") || a.id.localeCompare(b.id));
         // A parent's reply can share its timestamp; order ancestors before their descendants.
@@ -226,9 +233,13 @@ export class ThreadSynchronizer {
             append({ ...source, id: `multica:comment:${comment.id}`, role: "event", category: "system", text });
           } else {
             const own = comment.author_type === "member" && comment.author_id === connection.userId;
+            const outgoing = own ? Object.values(issue.deliveries).find(record => record.rootId === address.rootId && record.commentId === comment.id) : undefined;
+            // Unknown receipts cannot be identified by body alone. Keep a
+            // potentially matching echo unprojected until receipt recovery.
+            if (own && !outgoing && Object.values(issue.deliveries).some(record => record.rootId === address.rootId && record.claimedAt && (record.status === "received" || record.status === "pending_verification") && record.body === comment.content)) continue;
             const name = comment.author_type === "member" ? members.find(member => member.user_id === comment.author_id)?.name ?? `成员 ${comment.author_id}`
               : agents.find(agent => agent.id === comment.author_id)?.name ?? `Agent ${comment.author_id}`;
-            append({ ...source, id: `multica:comment:${comment.id}`, role: own ? "user" : "assistant", text: own ? text : `${name}: \n\n${text}` });
+            append({ ...source, id: `multica:comment:${comment.id}`, role: own ? "user" : "assistant", text: own ? text : `${name}: \n\n${text}`, ...(outgoing ? { clientMessageId: outgoing.clientMessageId } : {}) });
           }
           thread.observed[comment.id] = { fingerprint, deleted, revision: comment.revision, updatedAt: comment.updated_at };
         }
