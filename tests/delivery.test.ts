@@ -34,6 +34,7 @@ async function fixture(active = false, idempotent = false) {
   const receipts = new Map<string, ReturnType<typeof comment>>();
   const lookups: string[] = [];
   const deletedReceipts = new Set<string>();
+  let lookupFailure: number | undefined;
   let clock = new Date("2026-11-24T10:00:00Z");
   let beforeLookup: ((key: string) => Promise<void>) | undefined;
   let identity = "me";
@@ -63,7 +64,8 @@ async function fixture(active = false, idempotent = false) {
     else if (url.pathname === "/api/issues/issue/comments/idempotent" && idempotent) {
       const key = request.headers["idempotency-key"] as string; lookups.push(key); await beforeLookup?.(key);
       const receipt = receipts.get(key);
-      if (deletedReceipts.has(key)) { response.statusCode = 409; body = { error: "the comment created with this Idempotency-Key has been deleted" }; }
+      if (lookupFailure) { response.statusCode = lookupFailure; body = {}; }
+      else if (deletedReceipts.has(key)) { response.statusCode = 409; body = { error: "the comment created with this Idempotency-Key has been deleted" }; }
       else if (receipt) { response.setHeader("Idempotent-Replayed", "true"); body = receipt; }
       else { response.statusCode = 404; body = { error: "no comment has been posted with this Idempotency-Key" }; }
     }
@@ -114,7 +116,7 @@ async function fixture(active = false, idempotent = false) {
     const agent = agents.find(agent => agent.labels["multica.discussion"] === rootId)!;
     await (await connect()).send({ type: "session.prompt", sessionId: agent.id, prompt: { clientMessageId, delivery, input: { type: "message", content: [{ type: "text", text }] } } });
   };
-  return { ...started, home, paseo, agents, events, canonical, comments, runs, posts, lookups, receipts, deletedReceipts, connect, send, start, advance: (milliseconds: number) => { clock = new Date(clock.getTime() + milliseconds); }, beforeLookup: (handler: typeof beforeLookup) => { beforeLookup = handler; }, identity: (id: string) => { identity = id; }, beforeMe: (handler?: () => Promise<void>) => { beforeMe = handler; }, post: (handler: typeof post) => { post = handler; } };
+  return { ...started, home, paseo, agents, events, canonical, comments, runs, posts, lookups, receipts, deletedReceipts, connect, send, start, lookupFailure: (status?: number) => { lookupFailure = status; }, advance: (milliseconds: number) => { clock = new Date(clock.getTime() + milliseconds); }, beforeLookup: (handler: typeof beforeLookup) => { beforeLookup = handler; }, identity: (id: string) => { identity = id; }, beforeMe: (handler?: () => Promise<void>) => { beforeMe = handler; }, post: (handler: typeof post) => { post = handler; } };
 }
 
 it("main discussion saves an ordinary text comment, preserves its identity and offers the new Thread", async () => {
@@ -418,5 +420,57 @@ it("a deleted original comment stops automatic recovery and an altered body cann
   await f.send("root", "Changed body under same client identity", "deleted-input");
   expect(f.events).toContainEqual(expect.objectContaining({ type: "session.prompt_result", clientMessageId: "deleted-input", result: expect.objectContaining({ type: "failed", error: expect.objectContaining({ message: expect.stringContaining("不能改变正文") }) }) }));
   await f.server.rpc(syncBootstrap, {}, f.paseo);
+  expect(f.posts).toHaveLength(1);
+});
+
+
+it("a CLI credential change during receipt lookup cannot authorize an old recovery POST", async () => {
+  const f = await fixture(false, true);
+  await f.send("root", "Positive receipt proof", "identity-proof");
+  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[0]?.status).toBe("saved");
+  f.post(async () => ({ status: 503 }));
+  await f.send("root", "Original identity only", "identity-recovery");
+  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[1]?.status).toBe("pending_verification");
+  const original = (await f.server.rpc(deliveryList, {}, f.paseo)).records[1];
+  f.beforeLookup(async key => {
+    if (key !== original.idempotencyKey) return;
+    const path = join(f.home, ".multica/config.json");
+    const config = JSON.parse(await readFile(path, "utf8"));
+    await writeFile(path, JSON.stringify({ ...config, token: "replacement-cli-credential" }));
+  });
+  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  expect(f.posts).toHaveLength(2);
+  expect((await f.server.rpc(deliveryList, {}, f.paseo)).records[1]).toMatchObject({ body: original.body, idempotencyKey: original.idempotencyKey, status: "pending_verification" });
+});
+
+
+it("an unavailable receipt lookup halts automatic retries and explicit verification can later recover the same original", async () => {
+  const f = await fixture(false, true);
+  f.post(async body => { const saved = comment("receipt-after-outage", "root", body.content); f.comments.push(saved); return { body: saved, disconnect: true }; });
+  await f.send("root", "Keep the original through outage", "lookup-outage");
+  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[0]?.status).toBe("pending_verification");
+  const original = (await f.server.rpc(deliveryList, {}, f.paseo)).records[0];
+  f.lookupFailure(503);
+  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  f.lookupFailure();
+  const boundary = f.lookups.length;
+  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  expect(f.lookups).toHaveLength(boundary);
+  expect(f.posts).toHaveLength(1);
+  expect(await f.server.rpc(deliveryVerify, { connectionKey: original.connectionKey, issueId: original.issueId, rootId: original.rootId, clientMessageId: original.clientMessageId }, f.paseo)).toMatchObject({ status: "saved" });
+  expect((await f.server.rpc(deliveryList, {}, f.paseo)).records[0]).toMatchObject({ ...original, status: "saved", commentId: "receipt-after-outage", message: expect.any(String) });
+  expect(f.posts).toHaveLength(1);
+});
+
+it("a replay whose remotely edited body differs cannot bind to or replace the immutable original input", async () => {
+  const f = await fixture(false, true);
+  f.post(async body => { const saved = comment("edited-remote-original", "root", body.content); f.comments.push(saved); return { body: saved, disconnect: true }; });
+  await f.send("root", "Keep exactly this original body", "edited-receipt");
+  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[0]?.status).toBe("pending_verification");
+  const original = (await f.server.rpc(deliveryList, {}, f.paseo)).records[0];
+  // The real service fingerprints only target/type; a later edit is not our original payload.
+  f.receipts.get(original.idempotencyKey)!.content = "A later remote edit";
+  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  expect((await f.server.rpc(deliveryList, {}, f.paseo)).records[0]).toMatchObject({ body: "Keep exactly this original body", status: "pending_verification" });
   expect(f.posts).toHaveLength(1);
 });

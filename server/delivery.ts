@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { ProviderPrompt, ProviderTimelineItem } from "@getpaseo/plugin/server/provider";
-import type { AuthenticatedConnection } from "./connection.js";
+import { remoteFetch, type AuthenticatedConnection } from "./connection.js";
 import type { DeliveryRecord } from "./delivery-state.js";
 import type { RunAddress } from "./runs.js";
 import { StateStore } from "./state.js";
@@ -45,7 +45,7 @@ export class CommentDelivery {
   private publish(record: DeliveryRecord, includeOriginal = false) { for (const listener of this.listeners.get(addressKey(record)) ?? []) listener.deliver(record, includeOriginal); }
   presentation(record: DeliveryRecord): DeliveryRecord {
     return record.status === "received" && record.claimedAt && !this.posts.has(record.idempotencyKey)
-      ? { ...record, status: "pending_verification", message: "上次投递中断，保存结果待核实；不会自动重发。" } : record;
+      ? { ...record, status: "pending_verification", message: "上次投递中断，保存结果待核实；将先查询原回执。" } : record;
   }
   async recover(host: NativeHost) {
     for (const [id, listeners] of this.listeners) {
@@ -110,16 +110,18 @@ export class CommentDelivery {
       if (connection.connectionKey !== record.connectionKey || (record.remoteWorkspaceId && record.remoteWorkspaceId !== workspace.id)) throw new Error("请连接原 Multica 身份与工作区。");
       if (!this.validKey(record)) throw new Error("原请求 key 无效。");
       const query = new URLSearchParams({ type: "comment", ...(record.rootId === "main" ? {} : { parent_id: record.rootId }) });
-      const response = await fetch(`${connection.apiUrl}/api/issues/${encodeURIComponent(record.issueId)}/comments/idempotent?${query}`, {
+      const response = await remoteFetch(connection, `/api/issues/${encodeURIComponent(record.issueId)}/comments/idempotent?${query}`, {
         headers: { Authorization: `Bearer ${connection.token}`, "X-Workspace-Slug": workspace.slug, "Idempotency-Key": record.idempotencyKey },
         redirect: "error", signal: AbortSignal.timeout(10_000),
       });
       if (response.ok && response.headers.get("Idempotent-Replayed") === "true") {
         const comment = receiptSchema.parse(await response.json());
+        await connection.assertCurrent?.();
         if (this.matches(record, connection, comment)) return { kind: "saved", comment };
       }
       if (response.status === 404) {
         const body = await response.json() as { error?: string };
+        await connection.assertCurrent?.();
         if (body.error === "no comment has been posted with this Idempotency-Key") return { kind: "absent" };
       }
       await response.body?.cancel();
@@ -127,8 +129,7 @@ export class CommentDelivery {
     } catch { return { kind: "unknown", message: "回执无法确定；已停止自动重试，请核实原评论。" }; }
   }
   private async halt(record: DeliveryRecord, message: string) {
-    await this.store.update(state => { state.connections[record.connectionKey].issues[record.issueId].deliveries[deliveryKey(record.rootId, record.clientMessageId)].recoveryHalted = true; });
-    await this.finish(record, "pending_verification", message);
+    await this.finish(record, "pending_verification", message, undefined, true);
   }
   private track(record: DeliveryRecord, action: () => Promise<void>) {
     const existing = this.posts.get(record.idempotencyKey);
@@ -179,11 +180,13 @@ export class CommentDelivery {
       const workspace = workspaces.find(workspace => workspace.id === issue.remoteWorkspaceId);
       if (!workspace || (record.remoteWorkspaceId && record.remoteWorkspaceId !== workspace.id)) throw new Error("原 Multica 工作区不可用；不会更改原投递目标。");
       if (!this.validKey(record)) throw new Error("原请求 key 超过服务的 255 字节限制或无效。");
+      if (!this.withinRetention(record)) { await this.halt(record, "已达到 7 天回执保证期限或原始时间无法核实；需要用户决定重新发送。"); return; }
+      await connection.assertCurrent?.();
       let claimed = false;
       await this.stops.guardDelivery(record, record.stopEpoch, state => {
         const current = state.connections[record.connectionKey].issues[record.issueId].deliveries[deliveryKey(record.rootId, record.clientMessageId)];
-        if (retry ? current.status === "saved" || current.recoveryHalted || current.retryCount > 0 : current.status !== "received" || current.claimedAt) return;
-        if (retry && !this.withinRetention(current)) throw new Error("已达到 7 天回执保证期限；需要用户核实。");
+        if (retry ? !["received", "pending_verification"].includes(current.status) || current.recoveryHalted || current.retryCount > 0 : current.status !== "received" || current.claimedAt) return;
+        if (!this.withinRetention(current)) throw new Error("已达到 7 天回执保证期限；需要用户核实。");
         if (retry) current.retryCount += 1;
         current.claimedAt ??= this.now().toISOString(); claimed = true;
       });
@@ -192,28 +195,30 @@ export class CommentDelivery {
       sent = true;
       const response = await fetch(`${connection.apiUrl}/api/issues/${encodeURIComponent(record.issueId)}/comments`, {
         method: "POST", headers: { Authorization: `Bearer ${connection.token}`, "Content-Type": "application/json", "X-Workspace-Slug": workspace.slug, "Idempotency-Key": record.idempotencyKey },
-        body: JSON.stringify({ content: record.body, type: "comment", ...(record.rootId === "main" ? {} : { parent_id: record.rootId }) }), redirect: "error", signal: AbortSignal.timeout(10_000),
+        body: JSON.stringify({ content: record.body, type: "comment", ...(record.rootId === "main" ? {} : { parent_id: record.rootId }) }), redirect: "error", signal: AbortSignal.any([AbortSignal.timeout(10_000), ...(connection.signal ? [connection.signal] : [])]),
       });
+      await connection.assertCurrent?.();
       if (!response.ok) {
         await response.body?.cancel();
         // A server error can follow a committed transaction; it is not proof of absence.
-        await this.finish(record, retry || response.status >= 500 || [408, 409, 422].includes(response.status) ? "pending_verification" : "failed", `评论未确认保存（HTTP ${response.status}）；原输入已保留，不会自动重发。`); return;
+        await this.finish(record, retry || response.status >= 500 || [408, 409, 422].includes(response.status) ? "pending_verification" : "failed", `评论未确认保存（HTTP ${response.status}）；原输入已保留，将先核实回执。`); return;
       }
       const comment = receiptSchema.parse(await response.json());
+      await connection.assertCurrent?.();
       if (!this.matches(record, connection, comment)) throw new Error("评论回执与原输入不匹配。");
       await this.finish(record, "saved", "评论已保存；是否开始执行以独立 Run 状态为准。", comment);
     } catch (error) {
       const status = sent || retry ? "pending_verification" : "failed";
-      const message = sent ? "响应丢失或回执无法核实；原输入已保留，不会自动重发。" : error instanceof Error ? error.message : "投递失败；原输入已保留。";
+      const message = sent ? "响应丢失或回执无法核实；原输入已保留，仅在已核实的去重保证内恢复。" : error instanceof Error ? error.message : "投递失败；原输入已保留。";
       try { if (retry && !sent) await this.halt(record, message); else await this.finish(record, status, message); }
-      catch { this.publish({ ...record, status, message: "无法持久保存投递结果；请保留原生输入并核实。不会自动重发。" }); }
+      catch { this.publish({ ...record, status, message: "无法持久保存投递结果；请保留原生输入并核实，不会盲目重发。" }); }
     }
   }
-  private async finish(record: DeliveryRecord, status: DeliveryRecord["status"], message: string, comment?: z.infer<typeof receiptSchema>) {
+  private async finish(record: DeliveryRecord, status: DeliveryRecord["status"], message: string, comment?: z.infer<typeof receiptSchema>, recoveryHalted = false) {
     let current!: DeliveryRecord;
     await this.store.update(state => {
       current = state.connections[record.connectionKey].issues[record.issueId].deliveries[deliveryKey(record.rootId, record.clientMessageId)];
-      Object.assign(current, { status, message, ...(comment ? { commentId: comment.id, threadRootId: record.rootId === "main" ? comment.id : record.rootId,
+      Object.assign(current, { status, message, ...(recoveryHalted ? { recoveryHalted: true } : {}), ...(comment ? { commentId: comment.id, threadRootId: record.rootId === "main" ? comment.id : record.rootId,
         receipt: { authorId: comment.author_id, parentId: comment.parent_id ?? null, createdAt: comment.created_at, updatedAt: comment.updated_at, triggerOutcomes: comment.trigger_outcomes } } : {}) });
     });
     this.publish(current);
