@@ -7,7 +7,7 @@
 
 ## 安装与连接
 
-在 Paseo daemon 所在主机安装此目录，例如 `paseo plugin install /absolute/path/to/paseo-multica-provider`。插件 ID 为 `multica`；支持范围为 Paseo `>=0.15.3 <0.16.0`，开发 SDK 固定为 `0.15.4`。安装命令会执行 manifest 中的依赖安装步骤。
+在 Paseo daemon 所在主机安装此目录，例如 `paseo plugin install /absolute/path/to/paseo-multica-provider`。插件 ID 为 `multica`；宿主要求为 Paseo `>=0.15.3`，不设置最高版本。当前实际验收使用 Paseo `0.15.3`，开发 SDK 固定为 `0.15.4`。安装命令会执行 manifest 中的依赖安装步骤。
 
 打开 Paseo 侧栏的 **Multica** 或设置中的 **Multica**。Profile 留空表示 CLI 默认 profile；填写名称选择 `~/.multica/profiles/<name>/config.json`。daemon 只读使用其运行用户的 CLI 配置，每次状态读取重新验证 `/api/me`，管理页每 10 秒刷新。通过 `multica setup` 与 `multica login` 管理登录；命名 profile 使用 `multica --profile '<name>' login`。
 
