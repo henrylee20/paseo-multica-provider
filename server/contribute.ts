@@ -1,11 +1,12 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { PluginServerContribution } from "@getpaseo/plugin/server";
-import { multicaSettings, connectionStatus, syncBootstrap, workspaceList, workspaceEnable, type ConnectionStatus } from "../shared/contracts.js";
+import { multicaSettings, connectionStatus, syncBootstrap, workspaceList, workspaceEnable, workspaceRule, workspaceCatalog, taskRuleSchema, type ConnectionStatus } from "../shared/contracts.js";
 import { createConnectionResolver, type AuthenticatedConnection, type ConnectionDependencies } from "./connection.js";
 import { StateStore } from "./state.js";
 import { SidebarSynchronizer } from "./sync.js";
 import { connectNativeHost, type NativeHost } from "./native-host.js";
+import { workspaceCatalogs } from "./catalogs.js";
 import { createMulticaProvider } from "./provider.js";
 import { readTaskDescription } from "../shared/description.js";
 import { descriptionRevision, descriptionSlice } from "./task-description.js";
@@ -60,12 +61,22 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       const context = await connection();
       const workspaces = await synchronizer.workspaces(context);
       const rules = (await store.read()).connections[context.connectionKey]?.rules;
-      return { workspaces: workspaces.map(workspace => ({ id: workspace.id, name: workspace.name, enabled: rules?.[workspace.id]?.enabled ?? false })) };
+      return { workspaces: workspaces.map(workspace => ({ id: workspace.id, name: workspace.name, enabled: rules?.[workspace.id]?.enabled ?? false, rule: taskRuleSchema.parse(rules?.[workspace.id] ?? {}) })) };
     });
     server.handle(workspaceEnable, async (input, context) => {
       try { await synchronizer.enable(context.paseo, input.workspaceId, input.enabled); return { status: "ready" as const }; }
       catch { return { status: "unavailable" as const, message: "工作区规则保存或同步失败，请检查连接后重试。" }; }
     });
-    return () => { synchronizer.close(); };
+    server.handle(workspaceCatalog, async input => {
+      const authenticated = await connection();
+      const workspace = (await synchronizer.workspaces(authenticated)).find(item => item.id === input.workspaceId);
+      if (!workspace) throw new Error("Multica workspace unavailable");
+      return workspaceCatalogs(authenticated, workspace);
+    });
+    server.handle(workspaceRule, async (input, context) => {
+      try { await synchronizer.rule(context.paseo, input.workspaceId, input.rule); return { status: "ready" as const }; }
+      catch { return { status: "unavailable" as const, message: "筛选规则保存或同步失败，请检查连接后重试。" }; }
+    });
+    return () => synchronizer.close();
   };
 }

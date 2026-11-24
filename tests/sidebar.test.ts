@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { createRequire } from "node:module";
 import { mkdtemp, mkdir, writeFile, rm, stat, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,6 +18,15 @@ const management = defineRpc({ name: "workspace.list", input: z.object({}), outp
 const enable = defineRpc({ name: "workspace.enable", input: z.object({ workspaceId: z.string(), enabled: z.boolean() }), output: z.object({ status: z.string() }) });
 const readDescription = defineRpc({ name: "description.read", input: z.object({ connectionKey: z.string(), issueId: z.string(), revision: z.string(), offset: z.number() }),
   output: z.object({ text: z.string(), nextOffset: z.number().nullable() }) });
+const ruleRpc = defineRpc({ name: "workspace.rule", input: z.object({ workspaceId: z.string(), rule: z.object({
+  statusCategories: z.array(z.string()), statuses: z.array(z.string()), assignees: z.array(z.object({ type: z.enum(["member", "agent", "squad"]), id: z.string() })),
+  projectIds: z.array(z.string()), labelIds: z.array(z.string()),
+}) }), output: z.object({ status: z.string() }) });
+const catalogRpc = defineRpc({ name: "workspace.catalog", input: z.object({ workspaceId: z.string() }), output: z.object({
+  assignees: z.array(z.object({ type: z.string(), id: z.string(), name: z.string() })),
+  statuses: z.array(z.object({ key: z.string(), name: z.string(), category: z.string() })),
+  projects: z.array(z.object({ id: z.string(), name: z.string() })), labels: z.array(z.object({ id: z.string(), name: z.string() })),
+}) });
 const cleanup: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const dispose of cleanup.splice(0).reverse()) await dispose(); });
 
@@ -25,19 +35,54 @@ async function fixture(syncIntervalMs = 15_000, homePrefix = "multica-sidebar-")
   cleanup.push(() => rm(home, { recursive: true, force: true }));
   const requests: string[] = [];
   const issues = [
-    { id: "issue-one", workspace_id: "remote-workspace", identifier: "PRD-1", title: "实现登录", description: "用户可以使用现有 CLI 登录。", status: "custom-ready", status_category: "unstarted", updated_at: "2026-11-24T12:00:00Z" },
-    { id: "issue-two", workspace_id: "remote-workspace", identifier: "PRD-2", title: "修复同步", description: "保留任务身份。", status: "custom-review", status_category: "started", updated_at: "2026-11-24T12:00:00Z" },
+    { id: "issue-one", workspace_id: "remote-workspace", identifier: "PRD-1", title: "实现登录", description: "用户可以使用现有 CLI 登录。", assignee_type: "member", assignee_id: "user-42", project_id: "project-a", labels: [{ id: "red" }], status: "custom-ready", status_category: "unstarted", updated_at: "2026-11-24T12:00:00Z" },
+    { id: "issue-two", workspace_id: "remote-workspace", identifier: "PRD-2", title: "修复同步", description: "保留任务身份。", assignee_type: "agent", assignee_id: "agent-owned", project_id: "project-a", labels: [{ id: "blue" }], status: "custom-review", status_category: "started", updated_at: "2026-11-24T12:00:00Z" },
   ];
+  const scopes: Array<{ path: string; slug?: string }> = [];
+  const workspaces = [{ id: "remote-workspace", name: "产品开发", slug: "product" }];
+  const remote = { disconnect: false, issueStatus: 200, invalidIssuePage: false, nextPageFails: false };
   const http = createServer((request, response) => {
     requests.push(request.url!);
+    scopes.push({ path: request.url!, slug: request.headers["x-workspace-slug"] as string | undefined });
     response.setHeader("Content-Type", "application/json");
     const url = new URL(request.url!, "http://localhost");
+    if (url.pathname === "/api/issues") {
+      if (remote.disconnect) { response.destroy(); return; }
+      response.statusCode = remote.nextPageFails && Number(url.searchParams.get("offset")) > 0 ? 503 : remote.issueStatus;
+      const values = (key: string) => url.searchParams.get(key)?.split(",").filter(Boolean) ?? [];
+      const found = issues.filter(issue => (!values("status_categories").length || values("status_categories").includes(issue.status_category)) &&
+        (!values("statuses").length || values("statuses").includes(issue.status)) &&
+        (!values("assignee_filters").length || values("assignee_filters").includes(`${issue.assignee_type}:${issue.assignee_id}`)) &&
+        (!values("project_ids").length || values("project_ids").includes(issue.project_id)) &&
+        (!values("label_ids").length || issue.labels.some(label => values("label_ids").includes(label.id))));
+      response.end(JSON.stringify(remote.invalidIssuePage ? { issues: [] } : { issues: found.slice(Number(url.searchParams.get("offset")), Number(url.searchParams.get("offset")) + 1), total: found.length }));
+      return;
+    }
     response.end(JSON.stringify(url.pathname === "/api/me" ? { id: "user-42", name: "Lin" }
-      : url.pathname === "/api/issues" ? { issues: issues.slice(Number(url.searchParams.get("offset")), Number(url.searchParams.get("offset")) + 1), total: issues.length }
-      : [{ id: "remote-workspace", name: "产品开发", slug: "product" }]));
+      : url.pathname.endsWith("/members") ? [{ id: "membership-row", user_id: "user-42", name: "Lin", email: "lin@example.test" }]
+      : url.pathname === "/api/agents" ? [{ id: "agent-owned", name: "Builder", owner_id: "user-42" }]
+      : url.pathname === "/api/squads" ? [{ id: "squad-owned", name: "Team", leader_id: "agent-owned" }]
+      : url.pathname === "/api/projects" ? { projects: [{ id: "project-a", title: "客户端" }], total: 1 }
+      : url.pathname === "/api/labels" ? { labels: [{ id: "red", name: "Red" }, { id: "blue", name: "Blue" }], total: 2 }
+      : url.pathname === "/api/issue-statuses" ? { statuses: [{ key: "custom-ready", name: "待接手", category: "unstarted" }, { key: "custom-review", name: "待审核", category: "started" }], categories: [], total: 2 }
+      : workspaces));
   });
   await new Promise<void>(resolve => http.listen(0, "127.0.0.1", resolve));
   cleanup.push(() => new Promise<void>(resolve => { http.close(() => resolve()); http.closeAllConnections(); }));
+  type Socket = { send(data: string): void; close(): void; on(type: "message", callback: (data: { toString(): string }) => void): void };
+  const { WebSocketServer } = createRequire(import.meta.url)("ws") as { WebSocketServer: new (options: { server: typeof http }) => {
+    on(type: "connection", callback: (socket: Socket, request: { url?: string }) => void): void;
+    clients: Set<Socket>; close(): void;
+  } };
+  const websocket = new WebSocketServer({ server: http });
+  const websocketRequests: Array<{ url: string; auth?: unknown }> = [];
+  websocket.on("connection", (socket, request) => {
+    const entry = { url: request.url! } as { url: string; auth?: unknown };
+    websocketRequests.push(entry);
+    socket.on("message", data => { entry.auth = JSON.parse(data.toString()); socket.send(JSON.stringify({ type: "auth_ack", payload: {} })); });
+  });
+  cleanup.push(() => { for (const socket of websocket.clients) socket.close(); websocket.close(); });
+  const signal = (type: string, payload = {}) => { for (const socket of websocket.clients) socket.send(JSON.stringify({ type, payload })); };
   const address = http.address() as { port: number };
   await mkdir(join(home, ".multica"));
   await writeFile(join(home, ".multica", "config.json"), JSON.stringify({ server_url: `http://127.0.0.1:${address.port}`, token: "private-token" }));
@@ -87,7 +132,7 @@ async function fixture(syncIntervalMs = 15_000, homePrefix = "multica-sidebar-")
   }
   const { server, dispose } = start();
   const paseo = { hosts: { list: async () => ({ self: { serverId: "owning-daemon" } }) } } as unknown as PaseoApi;
-  return { server, requests, paseo, native, home, issues, start, dispose, host };
+  return { server, requests, paseo, native, home, issues, start, dispose, host, remote, websocket, websocketRequests, signal, scopes, workspaces };
 }
 
 it("client bootstrap leaves the native sidebar empty until a workspace rule is explicitly enabled", async () => {
@@ -95,6 +140,7 @@ it("client bootstrap leaves the native sidebar empty until a workspace rule is e
   expect(await f.server.rpc(bootstrap, {}, f.paseo)).toMatchObject({ status: "ready" });
   expect(await f.server.rpc(management, {}, f.paseo)).toEqual({ workspaces: [{ id: "remote-workspace", name: "产品开发", enabled: false }] });
   expect(f.requests.some(path => path.startsWith("/api/issues"))).toBe(false);
+  expect(f.websocketRequests).toEqual([]);
 });
 
 it("turning a workspace rule off and back on archives and restores the same native records", async () => {
@@ -136,7 +182,7 @@ it("repeated bootstrap, title edits, token rotation and normal restart preserve 
   const config = JSON.parse(await readFile(configPath, "utf8"));
   await writeFile(configPath, JSON.stringify({ ...config, token: "rotated-private-token" }));
   await Promise.all([f.server.rpc(bootstrap, {}, f.paseo), f.server.rpc(bootstrap, {}, f.paseo)]);
-  f.dispose();
+  await f.dispose();
   const restarted = f.start();
   expect(await restarted.server.rpc(bootstrap, {}, f.paseo)).toMatchObject({ status: "ready" });
   expect(await restarted.server.rpc(management, {}, f.paseo)).toMatchObject({ workspaces: [{ id: "remote-workspace", enabled: true }] });
@@ -163,7 +209,7 @@ it("new placeholder directories fit the host's flattened agent storage path and 
   const projects = structuredClone(f.native.projects);
   const workspaces = structuredClone(f.native.workspaces);
   const agents = structuredClone(f.native.agents);
-  f.dispose();
+  await f.dispose();
   const restarted = f.start();
   expect(await restarted.server.rpc(bootstrap, {}, f.paseo)).toMatchObject({ status: "ready" });
   expect(f.native.projects).toEqual(projects);
@@ -174,7 +220,7 @@ it("new placeholder directories fit the host's flattened agent storage path and 
 it("restart preserves existing placeholder directories and the imported history bound to them", async () => {
   const f = await fixture();
   await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
-  f.dispose();
+  await f.dispose();
   const statePath = join(f.home, "multica-provider", "state.json");
   const persisted = JSON.parse(await readFile(statePath, "utf8")) as LocalState;
   const connectionKey = f.native.agents[0].labels["multica.connection"];
@@ -216,7 +262,7 @@ it("a lost native workspace creation response is reconciled before retrying afte
   expect(await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo)).toMatchObject({ status: "unavailable" });
   expect(f.native.workspaces).toHaveLength(1);
   f.host.createWorkspace = create;
-  f.dispose();
+  await f.dispose();
   const restarted = f.start();
   expect(await restarted.server.rpc(bootstrap, {}, f.paseo)).toMatchObject({ status: "ready" });
   expect(f.native.workspaces).toHaveLength(2);
@@ -230,7 +276,7 @@ it("a lost native import response is reconciled through stable labels without im
   expect(await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo)).toMatchObject({ status: "unavailable" });
   expect(f.native.agents).toHaveLength(1);
   f.host.importAgent = importAgent;
-  f.dispose();
+  await f.dispose();
   const restarted = f.start();
   expect(await restarted.server.rpc(bootstrap, {}, f.paseo)).toMatchObject({ status: "ready" });
   expect(f.native.workspaces).toHaveLength(2);
@@ -267,7 +313,7 @@ it("enabling the default rule pages custom-category issues into a native project
     await expect(stat(join(item.cwd, ".git"))).rejects.toMatchObject({ code: "ENOENT" });
   }
   const pages = f.requests.filter(path => path.startsWith("/api/issues?")).map(path => new URL(path, "http://localhost"));
-  expect(pages.map(url => url.searchParams.get("offset"))).toEqual(["0", "1"]);
+  expect(pages.slice(0, 2).map(url => url.searchParams.get("offset"))).toEqual(["0", "1"]);
   expect(pages.every(url => url.searchParams.get("status_categories") === "unstarted,started" && !url.searchParams.has("open_only") && !url.searchParams.has("statuses"))).toBe(true);
 });
 
@@ -346,4 +392,128 @@ it("a large task description stays within the plugin row limit and can be read c
   f.issues[0].description = "任务描述已更新";
   await f.server.rpc(bootstrap, {}, f.paseo);
   await expect(f.server.rpc(readDescription, { ...data, offset: 0 }, f.paseo)).rejects.toThrow();
+});
+
+it("typed multi-value filters intersect fields and keep directly assigned members distinct from owned agents", async () => {
+  const f = await fixture();
+  const catalogs = await f.server.rpc(catalogRpc, { workspaceId: "remote-workspace" }, f.paseo);
+  expect(catalogs.assignees).toEqual([
+    { type: "member", id: "user-42", name: "Lin" }, { type: "agent", id: "agent-owned", name: "Builder" }, { type: "squad", id: "squad-owned", name: "Team" },
+  ]);
+  expect(catalogs.projects).toEqual([{ id: "project-a", name: "客户端" }]);
+  const catalogPaths = ["/api/workspaces/remote-workspace/members", "/api/agents?workspace_id=remote-workspace&include_archived=true", "/api/squads", "/api/projects?include_archived=true", "/api/labels?resource_type=issue", "/api/issue-statuses?include_archived=true"];
+  expect(f.scopes.filter(item => catalogPaths.includes(item.path))).toHaveLength(6);
+  expect(f.scopes.filter(item => catalogPaths.includes(item.path)).every(item => item.slug === "product")).toBe(true);
+  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const rule: z.input<typeof ruleRpc.input>["rule"] = { statusCategories: ["unstarted", "started"], statuses: ["custom-ready", "custom-review"],
+    assignees: [{ type: "member" as const, id: "user-42" }, { type: "squad" as const, id: "squad-owned" }], projectIds: ["project-a"], labelIds: ["red", "blue"] };
+  expect(await f.server.rpc(ruleRpc, { workspaceId: "remote-workspace", rule }, f.paseo)).toEqual({ status: "ready" });
+  expect(f.native.workspaces.map(item => !!item.archived)).toEqual([false, true]);
+  const query = new URL(f.requests.filter(path => path.startsWith("/api/issues?")).at(-1)!, "http://localhost").searchParams;
+  expect(Object.fromEntries(query)).toEqual({ limit: "100", offset: "0", status_categories: "unstarted,started", statuses: "custom-ready,custom-review", assignee_filters: "member:user-42,squad:squad-owned", project_ids: "project-a", label_ids: "red,blue" });
+  rule.assignees = [{ type: "agent", id: "agent-owned" }];
+  await f.server.rpc(ruleRpc, { workspaceId: "remote-workspace", rule }, f.paseo);
+  expect(f.native.workspaces.map(item => !!item.archived)).toEqual([true, false]);
+  const managementRules = defineRpc({ name: "workspace.list", input: z.object({}), output: z.object({ workspaces: z.array(z.object({ id: z.string(), rule: ruleRpc.input.shape.rule })) }) });
+  expect((await f.server.rpc(managementRules, {}, f.paseo)).workspaces[0].rule).toEqual(rule);
+  await f.dispose();
+  const restart = f.start();
+  await restart.server.rpc(bootstrap, {}, f.paseo);
+  expect(f.native.workspaces).toHaveLength(2);
+  expect(f.native.workspaces.map(item => !!item.archived)).toEqual([true, false]);
+});
+
+
+it("workspace events discover new matching issues and restore every automatically archived tab on reentry", async () => {
+  const f = await fixture(60_000);
+  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await expect.poll(() => f.websocketRequests[0], { timeout: 2_000 }).toEqual({ url: "/ws?workspace_slug=product", auth: { type: "auth", payload: { token: "private-token" } } });
+  const first = f.native.workspaces[0];
+  const main = f.native.agents[0];
+  f.native.agents.push({ ...main, id: "thread-tab", labels: { ...main.labels, "multica.discussion": "thread-a" } });
+  f.native.agents.push({ ...main, id: "previously-hidden", archivedAt: "manual-hidden" });
+  f.issues.push({ ...f.issues[1], id: "issue-new", identifier: "PRD-3", title: "新匹配" });
+  f.signal("issue:created", { issue: f.issues.at(-1) });
+  await expect.poll(() => f.native.workspaces.length, { timeout: 2_000 }).toBe(3);
+  f.issues[0].status_category = "done";
+  f.issues[0].status = "done";
+  f.signal("issue_status:changed", { issue_id: "issue-one" });
+  await expect.poll(() => first.archived, { timeout: 2_000 }).toBe(true);
+  const state = JSON.parse(await readFile(join(f.home, "multica-provider", "state.json"), "utf8"));
+  expect(Object.values(state.connections).map((value) => (value as { issues: Record<string, { archiveReason: string }> }).issues["issue-one"].archiveReason)).toEqual(["filter_exit"]);
+  f.issues[0].status_category = "started";
+  f.signal("issue:updated", { issue: f.issues[0] });
+  await expect.poll(() => first.archived, { timeout: 2_000 }).toBe(false);
+  expect(f.native.agents.find(item => item.id === main.id)?.archivedAt).toBeNull();
+  expect(f.native.agents.find(item => item.id === "thread-tab")?.archivedAt).toBeNull();
+  expect(f.native.agents.find(item => item.id === "previously-hidden")?.archivedAt).toBeTruthy();
+  expect(f.native.workspaces.filter(item => item.id === first.id)).toHaveLength(1);
+  expect(f.native.agents.filter(item => item.id === main.id)).toHaveLength(1);
+  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: false }, f.paseo);
+  await expect.poll(() => f.websocket.clients.size, { timeout: 2_000 }).toBe(0);
+});
+
+
+it("failed or incomplete snapshots retain cached native workspaces and only an authoritative empty result archives them", async () => {
+  const f = await fixture(60_000);
+  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const identities = f.native.workspaces.map(item => item.id);
+  for (const failure of ["authentication", "network", "transport", "schema", "pagination"]) {
+    f.remote.issueStatus = failure === "authentication" ? 401 : failure === "network" ? 503 : 200;
+    f.remote.disconnect = failure === "transport";
+    f.remote.invalidIssuePage = failure === "schema";
+    f.remote.nextPageFails = failure === "pagination";
+    expect(await f.server.rpc(bootstrap, {}, f.paseo)).toEqual({ status: "unavailable" });
+    expect(f.native.workspaces.every(item => !item.archived)).toBe(true);
+    expect(f.native.workspaces.map(item => item.id)).toEqual(identities);
+  }
+  f.remote.nextPageFails = false;
+  for (const issue of f.issues) issue.status_category = "closed";
+  expect(await f.server.rpc(bootstrap, {}, f.paseo)).toEqual({ status: "ready" });
+  expect(f.native.workspaces.every(item => item.archived)).toBe(true);
+  for (const workspace of f.native.workspaces) expect((await stat(workspace.cwd)).isDirectory()).toBe(true);
+  expect(f.native.workspaces.map(item => item.id)).toEqual(identities);
+});
+
+it("reconnecting an enabled workspace resnapshots missed changes without subscribing to disabled workspaces", async () => {
+  const f = await fixture(60_000);
+  f.workspaces.push({ id: "disabled-workspace", name: "未启用", slug: "disabled" });
+  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await expect.poll(() => f.websocketRequests.length, { timeout: 2_000 }).toBe(1);
+  for (const socket of f.websocket.clients) socket.close();
+  f.issues[0].status_category = "done";
+  await expect.poll(() => f.websocketRequests.length, { timeout: 3_000 }).toBe(2);
+  await expect.poll(() => f.native.workspaces[0].archived, { timeout: 2_000 }).toBe(true);
+  expect(f.websocketRequests.every(request => request.url === "/ws?workspace_slug=product")).toBe(true);
+});
+
+
+it("explicit exact terminal and custom statuses are selectable without default category exclusions", async () => {
+  const f = await fixture(60_000);
+  f.issues[1].status = "custom-complete";
+  f.issues[1].status_category = "done";
+  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  expect(f.native.workspaces.map(item => item.title)).toEqual(["PRD-1 实现登录"]);
+  await f.server.rpc(ruleRpc, { workspaceId: "remote-workspace", rule: { statusCategories: [], statuses: ["done", "custom-complete"], assignees: [], projectIds: [], labelIds: [] } }, f.paseo);
+  expect(f.native.workspaces.map(item => [item.title, !!item.archived])).toEqual([["PRD-1 实现登录", true], ["PRD-2 修复同步", false]]);
+  const query = new URL(f.requests.filter(path => path.startsWith("/api/issues?")).at(-1)!, "http://localhost").searchParams;
+  expect(query.has("status_categories")).toBe(false);
+  expect(query.get("statuses")).toBe("done,custom-complete");
+});
+
+
+it("a lost automatic archive response survives restart and restores the tabs captured before archive", async () => {
+  const f = await fixture(60_000);
+  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const archive = f.host.archiveWorkspace.bind(f.host);
+  f.host.archiveWorkspace = async (...args) => { await archive(...args); throw new Error("archive acknowledgement lost"); };
+  expect(await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: false }, f.paseo)).toEqual({ status: "unavailable" });
+  expect(f.native.workspaces[0].archived).toBe(true);
+  await f.dispose();
+  f.host.archiveWorkspace = archive;
+  const restarted = f.start();
+  expect(await restarted.server.rpc(bootstrap, {}, f.paseo)).toEqual({ status: "ready" });
+  await restarted.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  expect(f.native.workspaces.every(item => !item.archived)).toBe(true);
+  expect(f.native.agents.every(item => !item.archivedAt)).toBe(true);
 });

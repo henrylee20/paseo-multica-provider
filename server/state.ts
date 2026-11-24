@@ -1,15 +1,16 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
+import { taskRuleSchema } from "../shared/contracts.js";
 
 const projectSchema = z.object({ cwd: z.string(), name: z.string(), projectId: z.string().optional() });
 const issueSchema = z.object({
   remoteWorkspaceId: z.string(), workspaceId: z.string(), cwd: z.string(), title: z.string(),
   description: z.string(), updatedAt: z.string().optional(), workspaceCreated: z.boolean().default(false), mainAgentId: z.string().optional(),
-  archiveReason: z.literal("rule_disabled").optional(), ruleArchivedAgentIds: z.array(z.string()).default([]),
+  archiveReason: z.enum(["rule_disabled", "filter_exit"]).optional(), ruleArchivedAgentIds: z.array(z.string()).default([]), archivePending: z.boolean().default(false),
 });
 const connectionSchema = z.object({
-  rules: z.record(z.string(), z.object({ enabled: z.boolean(), statusCategories: z.array(z.string()) })),
+  rules: z.record(z.string(), taskRuleSchema.extend({ enabled: z.boolean() })),
   projects: z.record(z.string(), projectSchema), issues: z.record(z.string(), issueSchema),
 });
 const stateSchema = z.object({ version: z.literal(1), connections: z.record(z.string(), connectionSchema) });
