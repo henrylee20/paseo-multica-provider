@@ -142,6 +142,7 @@ export class ThreadSynchronizer {
       });
       const issue = (await this.store.read()).connections[connection.connectionKey].issues[issueId];
       const mapping = issue.threads[root.id];
+      if (issue.manualHidden.workspace || issue.manualHidden.discussions.includes(root.id)) continue;
       let agentId = mapping.agentId;
       if (!agentId) {
         const labels = { "multica.connection": connection.connectionKey, "multica.issue": issueId, "multica.discussion": root.id };

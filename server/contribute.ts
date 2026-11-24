@@ -14,6 +14,8 @@ import { readTaskDescription } from "../shared/description.js";
 import { descriptionRevision, descriptionSlice } from "./task-description.js";
 import { projectionHistory, ThreadSynchronizer } from "./threads.js";
 import { threadOpen, commentEventDetail, threadResolve } from "../shared/threads.js";
+import { ManualHiding } from "./hiding.js";
+import { hiddenList, hiddenRestore } from "../shared/hiding.js";
 
 export interface ServerDependencies extends ConnectionDependencies {
   stateDirectory: string;
@@ -44,6 +46,10 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     const owningHome = environment.PASEO_HOME ?? "";
     const store = new StateStore(dependencies.stateDirectory ?? join(owningHome || join(dependencies.homeDirectory ?? homedir(), ".paseo"), "multica-provider"));
     const threads = new ThreadSynchronizer(store, connection);
+    const hiding = new ManualHiding(store);
+    server.addHook("agent.archive.after", async ({ agent }) => { await hiding.archivedAgent(agent); });
+    server.addHook("workspace.archive.after", async ({ workspace }) => { await hiding.archivedWorkspace(workspace.id); });
+    server.handle(hiddenList, async () => hiding.list());
     const runs = new RunSynchronizer(store);
     server.registerProvider(createMulticaProvider(store, threads, runs));
     server.handle(readTaskDescription, async input => {
@@ -78,6 +84,10 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
         await runs.discover(connection, workspace, issueId);
       },
       connectHost: () => (dependencies.connectHost ?? connectNativeHost)(owningHome), intervalMs: dependencies.syncIntervalMs ?? 15_000 });
+    server.handle(hiddenRestore, async (input, context) => {
+      try { await synchronizer.withNativeHost(context.paseo, host => hiding.restore(input, host)); return { status: "ready" as const }; }
+      catch (error) { return { status: "unavailable" as const, message: error instanceof Error ? error.message : "隐藏对象恢复失败，请重试。" }; }
+    });
     server.handle(syncBootstrap, async (_, context) => {
       try { await synchronizer.bootstrap(context.paseo); return { status: "ready" as const }; }
       catch { return { status: "unavailable" as const, message: "Multica 同步暂不可用，请检查 CLI 连接和 daemon。" }; }

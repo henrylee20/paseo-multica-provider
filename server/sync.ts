@@ -9,6 +9,7 @@ import { WorkspaceEvents, type WorkspaceEvent } from "./workspace-events.js";
 import type { AuthenticatedConnection } from "./connection.js";
 import type { NativeHost } from "./native-host.js";
 import { StateStore, connectionState } from "./state.js";
+import { hiddenAgent } from "./hiding.js";
 
 export const workspaceSchema = z.object({ id: z.string().min(1), name: z.string(), slug: z.string().min(1) });
 const issueSchema = z.object({ id: z.string().min(1), workspace_id: z.string(), identifier: z.string().optional(), title: z.string(),
@@ -82,6 +83,16 @@ export class SidebarSynchronizer {
       }
     });
   }
+  withNativeHost(paseo: PaseoApi, operation: (host: NativeHost) => Promise<void>): Promise<void> {
+    return this.serialize(async () => {
+      const serverId = (await paseo.hosts.list()).self.serverId;
+      if (this.expectedServerId && this.expectedServerId !== serverId) throw new Error("Bootstrap daemon identity changed");
+      this.expectedServerId = serverId;
+      if (!this.host) this.host = await this.options.connectHost();
+      if ((await this.host.listHosts()).self.serverId !== serverId) throw new Error("Native host is not the owning daemon");
+      await operation(this.host);
+    });
+  }
   enable(paseo: PaseoApi, workspaceId: string, enabled: boolean): Promise<void> {
     return this.serialize(async () => {
       const connection = await this.options.connection();
@@ -105,7 +116,7 @@ export class SidebarSynchronizer {
   }
   private async archive(connectionKey: string, issueId: string, reason: "rule_disabled" | "filter_exit") {
     const issue = (await this.options.store.read()).connections[connectionKey].issues[issueId];
-    if (!issue.workspaceCreated || (issue.archiveReason && !issue.archivePending)) return;
+    if (!issue.workspaceCreated || issue.manualHidden.workspace || (issue.archiveReason && !issue.archivePending)) return;
     if (!issue.archiveReason) {
       const restoreAgents: string[] = [];
       let cursor: string | undefined;
@@ -188,14 +199,17 @@ export class SidebarSynchronizer {
             workspaceCreated: local.issues[issue.id]?.workspaceCreated ?? false,
             commentSourceTaskIds: local.issues[issue.id]?.commentSourceTaskIds ?? {},
             runs: local.issues[issue.id]?.runs ?? {}, commentCreatedAt: local.issues[issue.id]?.commentCreatedAt ?? {},
+            manualHidden: local.issues[issue.id]?.manualHidden ?? { workspace: false, discussions: [] },
             threads: local.issues[issue.id]?.threads ?? {}, commentRoots: local.issues[issue.id]?.commentRoots ?? {}, unresolvedCommentIds: local.issues[issue.id]?.unresolvedCommentIds ?? [],
             systemRootIds: local.issues[issue.id]?.systemRootIds ?? [], mainHistory: local.issues[issue.id]?.mainHistory ?? { title: "主讨论", historyLoaded: false, rows: [], observed: {} },
             ruleArchivedAgentIds: local.issues[issue.id]?.ruleArchivedAgentIds ?? [], archivePending: local.issues[issue.id]?.archivePending ?? false, cwd, title, description: issue.description ?? "", updatedAt: issue.updated_at };
         });
         const mapping = (await this.options.store.read()).connections[connection.connectionKey].issues[issue.id];
+        if (mapping.manualHidden.workspace) continue;
         if (mapping.archiveReason) {
           await this.host.restoreWorkspace(mapping.workspaceId);
           for (const agentId of mapping.ruleArchivedAgentIds) {
+            if (hiddenAgent(mapping, agentId)) continue;
             const existing = await this.host.fetchAgent(agentId);
             // refreshAgent interrupts a live agent; use it only for archived records.
             if (existing?.agent.archivedAt) await this.host.refreshAgent(agentId);
@@ -218,7 +232,7 @@ export class SidebarSynchronizer {
         }
         await this.host.setWorkspaceTitle(mapping.workspaceId, title);
         let mainAgentId = mapping.mainAgentId;
-        if (!mainAgentId) {
+        if (!mainAgentId && !mapping.manualHidden.discussions.includes("main")) {
           const labels = issueLabels(connection.connectionKey, issue.id);
           let cursor: string | undefined;
           do {
@@ -234,7 +248,7 @@ export class SidebarSynchronizer {
           }
           await this.options.store.update(state => { state.connections[connection.connectionKey].issues[issue.id].mainAgentId = mainAgentId; });
         }
-        await this.host.updateAgent(mainAgentId, { name: "主讨论" });
+        if (mainAgentId && !mapping.manualHidden.discussions.includes("main")) await this.host.updateAgent(mainAgentId, { name: "主讨论" });
         await this.options.onIssue?.(connection, workspace, issue.id, this.host);
       }
     }
