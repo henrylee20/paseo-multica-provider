@@ -10,6 +10,7 @@ import type { ProviderConnection, ProviderEvent, ProviderTimelineItem } from "@g
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 import { hiddenList } from "../shared/hiding.js";
+import { runObserve } from "../shared/runs.js";
 import { workspaceEnable, syncBootstrap } from "../shared/contracts.js";
 import { createServerContribution } from "../server/contribute.js";
 
@@ -212,10 +213,23 @@ it("reads actual terminal race outcomes and keeps task status separate from clea
 
 it("reports partial failure natively and retains per-run retry after tab closure, restart and offline listing", async () => {
   const f = await fixture([run("ok", "running"), run("unresolved", "queued"), run("still-active", "deferred")]);
-  f.cancel(async id => id === "unresolved" ? { status: 503, body: {} } : { body: { ...f.runs.find(run => run.id === id), status: id === "ok" ? "cancelled" : "running" } });
+  let release: () => void = () => {};
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  f.cancel(async id => {
+    if (id === "ok") await blocked;
+    return id === "unresolved" ? { status: 503, body: {} } : { body: { ...f.runs.find(run => run.id === id), status: id === "ok" ? "cancelled" : "running" } };
+  });
   const thread = f.native.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
-  await (await f.connect()).send({ type: "session.interrupt", requestId: "close-running", sessionId: thread.id });
+  const original = f.providerEvents.find(event => event.type === "session.turn" && event.sessionId === thread.id);
+  const interrupt = (await f.connect()).send({ type: "session.interrupt", requestId: "close-running", sessionId: thread.id });
+  await expect.poll(() => f.requests.some(request => request.url.endsWith("/ok/cancel"))).toBe(true);
+  f.runs.push(run("later", "running"));
+  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  release(); await interrupt;
   expect(f.providerEvents).toContainEqual(expect.objectContaining({ type: "request.failed", requestId: "close-running", error: expect.objectContaining({ code: "stop_incomplete" }) }));
+  expect(f.providerEvents.filter(event => event.type === "session.turn" && event.sessionId === thread.id)).toEqual([original]);
+  expect(f.requests.filter(request => request.method === "POST").map(request => request.url)).toEqual(["ok", "unresolved", "still-active"].map(id => `/api/issues/issue/tasks/${id}/cancel`));
+  expect(f.runs.find(run => run.id === "later")?.status).toBe("running");
   await f.archiveAgent(thread.id);
   await f.dispose();
   const restarted = f.start();
@@ -238,7 +252,7 @@ it("reports partial failure natively and retains per-run retry after tab closure
   expect((await restarted.server.rpc(stopList, {}, f.paseo)).records.filter(record => record.retryable).map(record => record.runId)).toEqual(["still-active"]);
 });
 
-it("fixes the interrupt snapshot before network waits and excludes newly discovered runs", async () => {
+it("settles the interrupted native turn and keeps later runs active without expanding cancellation", async () => {
   const f = await fixture([run("first", "running"), run("second", "queued")]);
   let release: () => void = () => {};
   const blocked = new Promise<void>(resolve => { release = resolve; });
@@ -249,15 +263,53 @@ it("fixes the interrupt snapshot before network waits and excludes newly discove
     return { body: record };
   });
   const thread = f.native.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
+  const turns = () => f.providerEvents.filter((event): event is Extract<ProviderEvent, { type: "session.turn" }> => event.type === "session.turn" && event.sessionId === thread.id);
+  const original = turns()[0];
+  expect(original).toMatchObject({ state: "started" });
   const interrupt = (await f.connect()).send({ type: "session.interrupt", requestId: "fixed", sessionId: thread.id });
   await expect.poll(() => f.requests.some(request => request.url.endsWith("/first/cancel"))).toBe(true);
   f.runs.push(run("later", "running"));
   await f.server.rpc(syncBootstrap, {}, f.paseo);
+  expect(turns()).toEqual([original]);
   release(); await interrupt;
   expect(f.requests.filter(request => request.method === "POST").map(request => request.url)).toEqual(["/api/issues/issue/tasks/first/cancel", "/api/issues/issue/tasks/second/cancel"]);
   expect((await f.server.rpc(stopList, {}, f.paseo)).records.map(record => record.runId)).toEqual(["first", "second"]);
   expect(f.runs.find(run => run.id === "later")?.status).toBe("running");
-  expect(f.providerEvents.filter(event => event.type === "session.turn" && event.sessionId === thread.id && event.state === "completed")).toEqual([]);
+  // The native host captured the original turn's settlement before interrupt.
+  // Its terminal event must precede acknowledgement; later activity needs a new ID.
+  expect(turns()).toEqual([original, { ...original, state: "completed" }, expect.objectContaining({ state: "started" })]);
+  const later = turns()[2];
+  expect(later.turnId).not.toBe(original.turnId);
+  expect(f.providerEvents.indexOf(later)).toBeLessThan(f.providerEvents.findIndex(event => event.type === "request.completed" && event.requestId === "fixed"));
+  const record = (await f.server.rpc(stopList, {}, f.paseo)).records[0];
+  await f.server.rpc(runObserve, record, f.paseo);
+  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  expect(turns()).toEqual([original, { ...original, state: "completed" }, later]);
+  f.runs.find(run => run.id === "later")!.status = "completed";
+  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  expect(turns()).toEqual([original, { ...original, state: "completed" }, later, { ...later, state: "completed" }]);
+});
+
+it("does not settle a later native turn when the interrupted turn ended before the cancel receipt", async () => {
+  const f = await fixture([run("first", "running")]);
+  let release: () => void = () => {};
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  f.cancel(async id => { await blocked; return { body: { ...f.runs.find(run => run.id === id), status: "cancelled" } }; });
+  const thread = f.native.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
+  const turns = () => f.providerEvents.filter((event): event is Extract<ProviderEvent, { type: "session.turn" }> => event.type === "session.turn" && event.sessionId === thread.id);
+  const original = turns()[0];
+  const interrupt = (await f.connect()).send({ type: "session.interrupt", requestId: "completed-race", sessionId: thread.id });
+  await expect.poll(() => f.requests.some(request => request.url.endsWith("/first/cancel"))).toBe(true);
+  f.runs[0].status = "completed";
+  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  f.runs.push(run("later", "running"));
+  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  const later = turns()[2];
+  expect(later).toMatchObject({ state: "started" });
+  expect(later.turnId).not.toBe(original.turnId);
+  release(); await interrupt;
+  expect(f.providerEvents).toContainEqual({ type: "request.completed", requestId: "completed-race" });
+  expect(turns()).toEqual([original, { ...original, state: "completed" }, later]);
 });
 
 it("never cancels on whole-workspace archive, replay, session lifecycle or connection cleanup", async () => {
