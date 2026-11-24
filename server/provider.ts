@@ -33,6 +33,7 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
       const subscriptions = new Map<string, () => void>();
       const deliverySubscriptions = new Map<string, () => void>();
       const activeTurns = new Map<string, string>();
+      const interruptSettlements = new Map<string, (turnId: string) => void>();
       let closed = false;
       const emit = (event: ProviderEvent) => { if (!closed) for (const listener of listeners) listener(event); };
       const emittedRows = new Map<string, Set<string>>();
@@ -118,7 +119,9 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
             deliverySubscriptions.set(input.sessionId, deliveries.subscribe(address, projectDelivery, input.history !== "replay"));
             const projected = new Map<string, string>();
             let activeTurnId: string | undefined;
+            let currentRuns: typeof issue.runs = {};
             const projectRuns = (owned: typeof issue.runs, activity = true) => {
+              currentRuns = owned;
               for (const [runId, run] of Object.entries(owned)) {
                 const row = runSummary(address, runId, run);
                 const fingerprint = JSON.stringify(row);
@@ -139,6 +142,15 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
             const owned = Object.fromEntries(Object.entries(issue.runs).filter(([, run]) => run.ownerRootId === address.rootId));
             if (input.history === "replay") projectRuns(owned, false);
             else for (const [runId, run] of Object.entries(owned)) projected.set(runId, JSON.stringify(runSummary(address, runId, run)));
+            interruptSettlements.set(input.sessionId, turnId => {
+              if (activeTurnId !== turnId) return;
+              // Stop settles the turn captured by the host, even if later Runs
+              // remain active outside its fixed cancellation snapshot.
+              emit({ type: "session.turn", sessionId: input.sessionId, turnId, state: "completed" });
+              activeTurnId = undefined;
+              activeTurns.delete(input.sessionId);
+              projectRuns(currentRuns);
+            });
             runSubscriptions.set(input.sessionId, runs.subscribe(address, owned => projectRuns(owned)));
             emit({ type: "session.ready", requestId: input.requestId, sessionId: input.sessionId });
             return;
@@ -149,6 +161,7 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
             descriptionSubscriptions.get(input.sessionId)?.(); descriptionSubscriptions.delete(input.sessionId);
             addresses.delete(input.sessionId);
             activeTurns.delete(input.sessionId);
+            interruptSettlements.delete(input.sessionId);
             deliverySubscriptions.get(input.sessionId)?.(); deliverySubscriptions.delete(input.sessionId);
             runSubscriptions.get(input.sessionId)?.(); runSubscriptions.delete(input.sessionId);
             subscriptions.get(input.sessionId)?.(); subscriptions.delete(input.sessionId);
@@ -157,10 +170,12 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
             return;
           }
           if (input.type === "session.interrupt") {
+            const interruptedTurnId = activeTurns.get(input.sessionId);
             try {
               const address = addresses.get(input.sessionId);
               if (!address) throw new Error("Discussion unavailable");
               await stops.interrupt(address);
+              if (interruptedTurnId) interruptSettlements.get(input.sessionId)?.(interruptedTurnId);
               emit({ type: "request.completed", requestId: input.requestId });
             } catch (error) {
               emit({ type: "request.failed", requestId: input.requestId, error: { code: "stop_incomplete", message: error instanceof Error ? error.message : "停止失败，请在管理页重试。" } });
@@ -200,7 +215,7 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
           }
           if ("requestId" in input) emit({ type: "request.failed", requestId: input.requestId, error: { code: "unsupported", message: "此操作尚未支持。" } });
         },
-        async close() { emittedRows.clear(); for (const unsubscribe of deliverySubscriptions.values()) unsubscribe(); deliverySubscriptions.clear(); activeTurns.clear(); for (const unsubscribe of descriptionSubscriptions.values()) unsubscribe(); descriptionSubscriptions.clear(); for (const unsubscribe of runSubscriptions.values()) unsubscribe(); runSubscriptions.clear(); for (const unsubscribe of subscriptions.values()) unsubscribe(); subscriptions.clear(); sessions.clear(); addresses.clear(); listeners.clear(); closed = true; },
+        async close() { emittedRows.clear(); for (const unsubscribe of deliverySubscriptions.values()) unsubscribe(); deliverySubscriptions.clear(); activeTurns.clear(); interruptSettlements.clear(); for (const unsubscribe of descriptionSubscriptions.values()) unsubscribe(); descriptionSubscriptions.clear(); for (const unsubscribe of runSubscriptions.values()) unsubscribe(); runSubscriptions.clear(); for (const unsubscribe of subscriptions.values()) unsubscribe(); subscriptions.clear(); sessions.clear(); addresses.clear(); listeners.clear(); closed = true; },
       };
     },
   };
