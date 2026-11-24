@@ -1,5 +1,5 @@
 {
   "id": "multica",
-  "requirements": { "paseo": ">=0.15.3 <0.16.0" },
+  "requirements": { "paseo": ">=0.15.3" },
   "build": [["npm", "ci", "--omit=dev", "--ignore-scripts"]]
 }

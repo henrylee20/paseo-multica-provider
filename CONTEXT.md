@@ -1,5 +1,9 @@
 # Issue #1 实现上下文
 
+## 宿主版本约定
+
+用户明确要求：没有强烈的实际不兼容证据时，不设置 Paseo 最高版本。manifest 仅声明 `>=0.15.3`；当前实测宿主为 `0.15.3`，开发 SDK 固定为 `0.15.4`，这些验证版本不构成安装上限。
+
 ## 规格与决定
 
 实现目标是 [Issue #1](https://github.com/henrylee20/paseo-multica-provider/issues/1) 的完整规格；已发布正文的仓库副本是 [docs/github-spec.md](docs/github-spec.md)。确认用户可见行为时读取该规格；查对象名称时读取 [GLOSSARY.md](GLOSSARY.md)。
