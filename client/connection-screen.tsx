@@ -6,6 +6,7 @@ import { connectionStatus, multicaSettings, workspaceList, workspaceEnable, type
 
 import { WorkspaceRuleEditor } from "./workspace-rule.js";
 import { HiddenObjects } from "./hidden-objects.js";
+import { StopResults } from "./stop-results.js";
 
 const labels: Record<ConnectionStatus["status"], string> = {
   ready: "已连接", missing_config: "未配置 CLI", unreadable_config: "配置无法读取", invalid_config: "配置无效",
@@ -120,5 +121,6 @@ export function ConnectionScreen({ host, theme }: PluginSurfaceProps) {
       <Text style={muted}>每项任务使用独立的非 Git 占位目录，主讨论中可读任务描述。原生文件与终端打开的是占位目录。</Text>
     </SettingsSection>
     <HiddenObjects theme={theme} refreshKey={`${host.id}:${configuredProfile}:${attempt}`} />
+    <StopResults theme={theme} refreshKey={`${host.id}:${configuredProfile}:${attempt}`} />
   </View>;
 }
