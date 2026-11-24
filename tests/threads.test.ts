@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { createRequire } from "node:module";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,6 +19,10 @@ const comment = (id: string, parent_id: string | null, content: string, author_i
   id, parent_id, content, author_id, author_type, issue_id: "issue", type: "comment", created_at: stamp, updated_at: stamp, attachments: [],
 });
 type Comment = ReturnType<typeof comment>;
+function conversationRows(rows: ProviderTimelineItem[] | undefined) {
+  return rows?.filter(row => row.type !== "plugin" || !row.data || typeof row.data !== "object" || Array.isArray(row.data) || row.data.category !== "source");
+}
+
 
 async function fixture() {
   const home = await mkdtemp(join(tmpdir(), "multica-threads-"));
@@ -68,6 +73,21 @@ async function fixture() {
   });
   await new Promise<void>(resolve => http.listen(0, "127.0.0.1", resolve));
   cleanup.push(() => new Promise<void>(resolve => { http.close(() => resolve()); http.closeAllConnections(); }));
+  type Socket = { send(data: string): void; close(): void; on(type: "message", callback: (data: { toString(): string }) => void): void };
+  const { WebSocketServer } = createRequire(import.meta.url)("ws") as { WebSocketServer: new (options: { server: typeof http }) => {
+    on(type: "connection", callback: (socket: Socket) => void): void; clients: Set<Socket>; close(): void;
+  } };
+  const websocket = new WebSocketServer({ server: http });
+  const authenticated = new Set<Socket>();
+  websocket.on("connection", socket => socket.on("message", data => {
+    if (JSON.parse(data.toString()).type === "auth") authenticated.add(socket);
+  }));
+  cleanup.push(() => { for (const socket of websocket.clients) socket.close(); websocket.close(); });
+  const signal = (type: string, payload = {}) => { for (const socket of authenticated) socket.send(JSON.stringify({ type, payload })); };
+  const eventsReady = async () => {
+    await expect.poll(() => authenticated.size, { timeout: 2000 }).toBeGreaterThan(0);
+    signal("auth_ack");
+  };
   await mkdir(join(home, ".multica"));
   await writeFile(join(home, ".multica", "config.json"), JSON.stringify({ server_url: `http://127.0.0.1:${(http.address() as { port: number }).port}`, token: "synthetic-token" }));
   const native = { agents: [] as Array<{ id: string; workspaceId: string; cwd: string; labels: Record<string, string>; handle: string; name?: string; archivedAt?: string }> };
@@ -112,7 +132,7 @@ async function fixture() {
   cleanup.push(async () => { await provider?.close(); });
   const paseo = { hosts: { list: async () => ({ self: { serverId: "owning-daemon" } }) } } as unknown as PaseoApi;
   await server!.rpc(workspaceEnable, { workspaceId: "remote-workspace", enabled: true }, paseo);
-  return { ...started, native, timelines, comments, requests, paseo, home, start, connect, discoveryPages: (pages: Comment[][]) => { discoveryPages = pages; }, truncated: (value: boolean) => { truncated = value; }, paginate: () => { paginate = true; }, failHistory: (value: boolean) => { failHistory = value; } };
+  return { ...started, native, timelines, comments, requests, paseo, home, start, connect, eventsReady, signal, discoveryPages: (pages: Comment[][]) => { discoveryPages = pages; }, truncated: (value: boolean) => { truncated = value; }, paginate: () => { paginate = true; }, failHistory: (value: boolean) => { failHistory = value; } };
 }
 
 it("discovers one stable native tab for a root and recursive replies without loading full background history", async () => {
@@ -121,7 +141,7 @@ it("discovers one stable native tab for a root and recursive replies without loa
   expect(f.native.agents[1].cwd).toBe(f.native.agents[0].cwd);
   expect(f.native.agents[1].handle).not.toBe(f.native.agents[0].handle);
   expect(f.requests.some(request => request.url.includes("thread="))).toBe(false);
-  expect(f.timelines.get(f.native.agents[1].id)).toEqual([expect.objectContaining({ type: "plugin", kind: "thread" })]);
+  expect(conversationRows(f.timelines.get(f.native.agents[1].id))).toEqual([expect.objectContaining({ type: "plugin", kind: "thread" })]);
   await f.server.rpc(syncBootstrap, {}, f.paseo);
   expect(f.native.agents).toHaveLength(2);
   expect(f.requests.every(request => request.method === "GET")).toBe(true);
@@ -135,16 +155,16 @@ it("opening a native Thread imports recursive descendants with connected-member 
   const thread = f.native.agents[1];
   const address = JSON.parse(thread.handle.slice(7)).data;
   expect(await f.server.rpc(threadOpen, address, f.paseo)).toEqual({ status: "ready" });
-  expect(f.timelines.get(thread.id)).toMatchObject([
+  expect(conversationRows(f.timelines.get(thread.id))).toMatchObject([
     { type: "plugin", kind: "thread" },
     { type: "user_message", text: "**Root**" },
     { type: "assistant_message", text: expect.stringContaining("River: \n\nChild") },
     { type: "assistant_message", text: "Lin Agent: \n\nGrandchild" },
     { type: "plugin", kind: "comment-event", data: { category: "system", text: "Task is in progress", sourceCreatedAt: stamp } },
   ]);
-  expect(f.timelines.get(thread.id)?.[2]).toMatchObject({ text: expect.stringContaining("[spec.pdf](http://127.0.0.1:") });
+  expect(conversationRows(f.timelines.get(thread.id))?.[2]).toMatchObject({ text: expect.stringContaining("[spec.pdf](http://127.0.0.1:") });
   await f.server.rpc(threadOpen, address, f.paseo);
-  expect(f.timelines.get(thread.id)).toHaveLength(5);
+  expect(conversationRows(f.timelines.get(thread.id))).toHaveLength(5);
   expect(f.requests.filter(request => request.url.includes("/comments?") && request.url.includes("thread=")).every(request => request.slug === "product")).toBe(true);
 });
 
@@ -156,8 +176,8 @@ it("loads every page beyond the default 2000 comment cap and deduplicates the re
   const thread = f.native.agents[1];
   const address = JSON.parse(thread.handle.slice(7)).data;
   expect(await f.server.rpc(threadOpen, address, f.paseo)).toEqual({ status: "ready" });
-  expect(f.timelines.get(thread.id)).toHaveLength(2207);
-  expect(f.timelines.get(thread.id)?.at(-1)).toMatchObject({ type: "user_message", text: "Reply 2204" });
+  expect(conversationRows(f.timelines.get(thread.id))).toHaveLength(2207);
+  expect(conversationRows(f.timelines.get(thread.id))?.at(-1)).toMatchObject({ type: "user_message", text: "Reply 2204" });
   const reads = f.requests.filter(request => request.url.includes("thread=root"));
   expect(reads).toHaveLength(23);
   expect(reads.slice(1).every(request => new URL(request.url, "http://fixture").searchParams.has("before") && new URL(request.url, "http://fixture").searchParams.has("before_id"))).toBe(true);
@@ -170,29 +190,29 @@ it("preserves the first obtainable snapshot and appends stable edit and deletion
   const address = JSON.parse(thread.handle.slice(7)).data;
   f.comments[0].content = "Edited before first reading";
   await f.server.rpc(threadOpen, address, f.paseo);
-  const original = f.timelines.get(thread.id)?.[1];
+  const original = conversationRows(f.timelines.get(thread.id))?.[1];
   expect(original).toMatchObject({ type: "user_message", text: "Edited before first reading" });
   f.comments[0].content = "Correction after reading";
   f.comments[0].updated_at = "2026-11-24T11:00:00Z";
   await Promise.all([f.server.rpc(threadOpen, address, f.paseo), f.server.rpc(threadOpen, address, f.paseo)]);
-  expect(f.timelines.get(thread.id)?.filter(row => row.type === "user_message")).toEqual([original]);
-  expect(f.timelines.get(thread.id)?.at(-1)).toMatchObject({ type: "plugin", data: { category: "correction", text: "Correction after reading", sourceUpdatedAt: "2026-11-24T11:00:00Z" } });
+  expect(conversationRows(f.timelines.get(thread.id))?.filter(row => row.type === "user_message")).toEqual([original]);
+  expect(conversationRows(f.timelines.get(thread.id))?.at(-1)).toMatchObject({ type: "plugin", data: { category: "correction", text: "Correction after reading", sourceUpdatedAt: "2026-11-24T11:00:00Z" } });
   f.comments.splice(2, 1);
   f.failHistory(true);
   expect(await f.server.rpc(threadOpen, address, f.paseo)).toMatchObject({ status: "cached" });
-  expect(f.timelines.get(thread.id)?.some(row => row.type === "plugin" && row.data && typeof row.data === "object" && !Array.isArray(row.data) && row.data.category === "deletion")).toBe(false);
+  expect(conversationRows(f.timelines.get(thread.id))?.some(row => row.type === "plugin" && row.data && typeof row.data === "object" && !Array.isArray(row.data) && row.data.category === "deletion")).toBe(false);
   f.failHistory(false);
   await f.server.rpc(threadOpen, address, f.paseo);
   await f.server.rpc(threadOpen, address, f.paseo);
-  expect(f.timelines.get(thread.id)).toHaveLength(6);
-  expect(f.timelines.get(thread.id)?.at(-1)).toMatchObject({ type: "plugin", data: { category: "deletion", commentId: "grandchild" } });
+  expect(conversationRows(f.timelines.get(thread.id))).toHaveLength(6);
+  expect(conversationRows(f.timelines.get(thread.id))?.at(-1)).toMatchObject({ type: "plugin", data: { category: "deletion", commentId: "grandchild" } });
   const restarted = f.start();
   const connection = await restarted.server.providers.get("multica")!.connect({ versions: [1], capabilities: ["session.persistence"] });
   const replay: ProviderEvent[] = [];
   connection.onEvent(event => replay.push(event));
   await connection.send({ type: "session.open", requestId: "restore", sessionId: "restored", history: "replay", persistence: JSON.parse(thread.handle.slice(7)),
     config: { cwd: thread.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
-  expect(replay.filter(event => event.type === "timeline.item").map(event => event.item)).toEqual(f.timelines.get(thread.id));
+  expect(conversationRows(replay.filter(event => event.type === "timeline.item").map(event => event.item))).toEqual(conversationRows(f.timelines.get(thread.id)));
   await connection.send({ type: "session.close", requestId: "close", sessionId: "restored" });
   await connection.close();
   expect(f.requests.every(request => request.method === "GET")).toBe(true);
@@ -207,8 +227,8 @@ it("keeps issue-level system changes in the main discussion without creating dis
   const main = f.native.agents[0];
   const { connectionKey, issueId } = JSON.parse(main.handle.slice(7)).data;
   expect(await f.server.rpc(threadOpen, { connectionKey, issueId, rootId: "main" }, f.paseo)).toEqual({ status: "ready" });
-  expect(f.timelines.get(main.id)?.at(-1)).toMatchObject({ type: "plugin", kind: "comment-event", data: { category: "system", text: "Issue completed" } });
-  expect(f.timelines.get(main.id)?.some(row => row.type === "user_message" || row.type === "assistant_message")).toBe(false);
+  expect(conversationRows(f.timelines.get(main.id))?.at(-1)).toMatchObject({ type: "plugin", kind: "comment-event", data: { category: "system", text: "Issue completed" } });
+  expect(conversationRows(f.timelines.get(main.id))?.some(row => row.type === "user_message" || row.type === "assistant_message")).toBe(false);
 });
 
 it("retains cached messages when a cursorless response explicitly reports truncation", async () => {
@@ -219,7 +239,7 @@ it("retains cached messages when a cursorless response explicitly reports trunca
   f.comments.splice(2, 1);
   f.truncated(true);
   expect(await f.server.rpc(threadOpen, address, f.paseo)).toMatchObject({ status: "cached" });
-  expect(f.timelines.get(thread.id)).toHaveLength(4);
+  expect(conversationRows(f.timelines.get(thread.id))).toHaveLength(4);
 });
 
 
@@ -246,13 +266,13 @@ it("opens a deleted root tombstone without inventing its previous native message
   const address = JSON.parse(thread.handle.slice(7)).data;
   f.comments[0] = { ...f.comments[0], content: "", deleted_at: "2026-11-24T11:00:00Z" } as Comment;
   expect(await f.server.rpc(threadOpen, address, f.paseo)).toEqual({ status: "ready" });
-  expect(f.timelines.get(thread.id)?.filter(row => row.type === "user_message")).toEqual([]);
-  expect(f.timelines.get(thread.id)).toMatchObject([
+  expect(conversationRows(f.timelines.get(thread.id))?.filter(row => row.type === "user_message")).toEqual([]);
+  expect(conversationRows(f.timelines.get(thread.id))).toMatchObject([
     { type: "plugin", kind: "thread" }, { type: "plugin", data: { category: "deletion", commentId: "root" } },
     { type: "assistant_message", text: expect.stringContaining("Child") }, { type: "assistant_message", text: expect.stringContaining("Grandchild") },
   ]);
   await f.server.rpc(threadOpen, address, f.paseo);
-  expect(f.timelines.get(thread.id)).toHaveLength(4);
+  expect(conversationRows(f.timelines.get(thread.id))).toHaveLength(4);
 });
 
 it("keeps large correction records bounded in native rows with their full content available on demand", async () => {
@@ -262,8 +282,35 @@ it("keeps large correction records bounded in native rows with their full conten
   await f.server.rpc(threadOpen, address, f.paseo);
   f.comments[0].content = "修正内容".repeat(24000);
   await f.server.rpc(threadOpen, address, f.paseo);
-  const row = f.timelines.get(thread.id)?.at(-1);
+  const row = conversationRows(f.timelines.get(thread.id))?.at(-1);
   expect(Buffer.byteLength(JSON.stringify(row))).toBeLessThan(64 * 1024);
   expect(row).toMatchObject({ type: "plugin", data: { category: "correction", truncated: true } });
   expect(await f.server.rpc(commentEventDetail, { ...address, recordId: row!.id }, f.paseo)).toEqual({ text: f.comments[0].content });
+});
+
+
+it("exposes each original comment's source date separately from the native ingestion clock", async () => {
+  const f = await fixture();
+  const thread = f.native.agents[1];
+  const address = JSON.parse(thread.handle.slice(7)).data;
+  await f.server.rpc(threadOpen, address, f.paseo);
+  expect(f.timelines.get(thread.id)).toContainEqual(expect.objectContaining({ type: "plugin", kind: "comment-event", data: expect.objectContaining({ category: "source", commentId: "root", sourceCreatedAt: stamp, sourceUpdatedAt: stamp }) }));
+});
+
+
+it("duplicate authenticated comment events append one correction and discover new tabs without opening their history", async () => {
+  const f = await fixture();
+  const thread = f.native.agents[1];
+  const address = JSON.parse(thread.handle.slice(7)).data;
+  await f.server.rpc(threadOpen, address, f.paseo);
+  await f.eventsReady();
+  f.comments[0].content = "Updated by WebSocket invalidation";
+  for (let index = 0; index < 3; index++) f.signal("comment:updated", { comment: f.comments[0] });
+  await expect.poll(() => conversationRows(f.timelines.get(thread.id))?.filter(row => row.type === "plugin" && row.data && typeof row.data === "object" && !Array.isArray(row.data) && row.data.category === "correction").length, { timeout: 3000 }).toBe(1);
+  f.comments.push(comment("new-thread", null, "New background discussion"));
+  f.signal("comment:created", { comment: f.comments.at(-1) });
+  await expect.poll(() => f.native.agents.length, { timeout: 3000 }).toBe(3);
+  expect(f.native.agents[2].labels["multica.discussion"]).toBe("new-thread");
+  expect(f.requests.some(request => request.url.includes("thread=new-thread"))).toBe(false);
+  expect(f.requests.every(request => request.method === "GET")).toBe(true);
 });

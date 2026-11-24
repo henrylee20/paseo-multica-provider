@@ -13,7 +13,7 @@ type Address = z.infer<typeof threadAddress>;
 const attachmentSchema = z.object({ id: z.string().optional(), filename: z.string().optional(), file_name: z.string().optional(), name: z.string().optional(), url: z.string().optional(), download_url: z.string().optional() });
 const commentSchema = z.object({
   id: z.string(), issue_id: z.string(), parent_id: z.string().nullish(), content: z.string(),
-  author_id: z.string().default(""), author_type: z.string().default("system"), type: z.string().default("system"),
+  author_id: z.string(), author_type: z.enum(["member", "agent", "system"]), type: z.enum(["comment", "status_change", "progress_update", "system"]),
   created_at: z.string().optional(), updated_at: z.string().optional(), revision: z.number().optional(),
   deleted_at: z.string().nullish(), attachments: z.array(attachmentSchema).nullish(), content_truncated: z.boolean().optional(),
 });

@@ -8,7 +8,7 @@ export const threadOpen = defineRpc({ name: "thread.open", input: threadAddress,
 }) });
 
 export const commentEventSchema = threadAddress.extend({
-  recordId: z.string(), commentId: z.string(), category: z.enum(["system", "correction", "deletion"]),
+  recordId: z.string(), commentId: z.string(), category: z.enum(["system", "correction", "deletion", "source"]),
   text: z.string(), truncated: z.boolean(), sourceCreatedAt: z.string().optional(), sourceUpdatedAt: z.string().optional(),
 });
 export const commentEventDetail = defineRpc({ name: "thread.event", input: threadAddress.extend({ recordId: z.string() }), output: z.object({ text: z.string() }) });

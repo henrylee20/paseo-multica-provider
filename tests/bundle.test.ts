@@ -86,5 +86,9 @@ it("the native thread renderer lazily opens history and comment events render as
   expect(JSON.stringify(event)).toContain("评论更正");
   expect(JSON.stringify(event)).toContain("Updated text");
   expect(JSON.stringify(event)).toContain("2026-11-24T12:00:00Z");
+  const source = renderers[1].Component({ item: { data: renderers[1].schema.parse({ ...address, recordId: "original", commentId: "root", category: "source", text: "First observed snapshot", sourceCreatedAt: "2020-01-01T00:00:00Z", sourceUpdatedAt: "2026-11-24T12:00:00Z", truncated: false }) }, theme });
+  expect(JSON.stringify(source)).toContain("评论来源");
+  expect(JSON.stringify(source)).toContain("2020-01-01T00:00:00Z");
+  expect(JSON.stringify(source)).toContain("2026-11-24T12:00:00Z");
   dispose();
 });

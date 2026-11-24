@@ -22,7 +22,7 @@ export function ThreadSummary({ item, theme }: PluginTimelineItemProps<z.infer<t
   </View>;
 }
 
-const labels = { system: "系统事件", correction: "评论更正", deletion: "评论删除" };
+const labels = { system: "系统事件", correction: "评论更正", deletion: "评论删除", source: "评论来源" };
 export function CommentEvent({ item, theme }: PluginTimelineItemProps<z.infer<typeof commentEventSchema>>) {
   const detail = useRpc(commentEventDetail);
   const [fullText, setFullText] = useState<string | null>(null);
@@ -30,7 +30,8 @@ export function CommentEvent({ item, theme }: PluginTimelineItemProps<z.infer<ty
   const data = item.data;
   return <View style={{ gap: 6 }}>
     <Text style={{ color: theme.colors.foregroundMuted }}>{labels[data.category]} · {data.commentId}</Text>
-    {data.sourceUpdatedAt || data.sourceCreatedAt ? <Text style={{ color: theme.colors.foregroundMuted }}>{data.sourceUpdatedAt ?? data.sourceCreatedAt}</Text> : null}
+    {data.sourceCreatedAt ? <Text style={{ color: theme.colors.foregroundMuted }}>发言时间：{data.sourceCreatedAt}</Text> : null}
+    {data.sourceUpdatedAt && data.sourceUpdatedAt !== data.sourceCreatedAt ? <Text style={{ color: theme.colors.foregroundMuted }}>来源更新时间：{data.sourceUpdatedAt}</Text> : null}
     <Text selectable style={{ color: theme.colors.foreground }}>{fullText ?? data.text}</Text>
     {data.truncated && fullText === null ? <Pressable accessibilityRole="button" onPress={() => {
       void detail({ connectionKey: data.connectionKey, issueId: data.issueId, rootId: data.rootId, recordId: data.recordId })
