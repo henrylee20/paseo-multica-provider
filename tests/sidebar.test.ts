@@ -653,3 +653,13 @@ it("coalesces multiple reconnecting clients and periodic opportunities into one 
     await restarted.dispose();
   } finally { vi.useRealTimers(); }
 });
+
+it("keeps cached tasks and reports incomplete recovery when an enabled workspace is absent from the accessible snapshot", async () => {
+  const f = await fixture();
+  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const ids = f.native.agents.map(agent => agent.id);
+  f.workspaces.splice(0);
+  expect(await f.server.rpc(bootstrap, {}, f.paseo)).toMatchObject({ status: "unavailable" });
+  expect(f.native.agents.map(agent => agent.id)).toEqual(ids);
+  expect(f.native.workspaces.every(workspace => !workspace.archived)).toBe(true);
+});
