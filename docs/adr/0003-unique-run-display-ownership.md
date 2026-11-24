@@ -10,6 +10,8 @@ Multica 的一个 Run 可能处理多个 Thread 的评论，但 Paseo 只在一�
 
 同一原生会话中的所有归属 Run 共同决定一个活动 turn：queued、dispatched、running、waiting_local_directory、deferred 均保持活动，全部终结后才完成聚合 turn。每次从空闲进入活动都生成新 UUID，不能重复使用已经完成的 turn ID。Paseo 0.15.3 实测复用已完成 ID 会使后续完成事件被忽略，造成原生状态停留在运行中。
 
+原生 Stop 成功是另一个聚合边界：操作开始时捕获原生 turn，固定取消集合全部确认终结后先完成该 turn；后来发现且仍活动的 Run 留在同一 tab，以全新 UUID 立即开始后续 turn，不扩大远端取消集合。如果原 turn 在等待回执时已自然结束，则不结束随后已经开始的新 turn。部分取消失败仍报告失败，并保留未结束 Run 的原生活动，不为失败回执主动切换 turn。
+
 原生导入在 provider `session.open` 后才注册活动观察；0.15.3 实测在 `session.ready` 前发送 started 不会使导入记录变为运行中。因此缓存重放只输出执行摘要，在导入返回后的同步中发布活动；实际摘要 renderer 挂载后通过只读 `run.observe` 再次发布缓存活动，后续后台快照也会核对。这里不通过虚构 prompt、refresh 活动 agent 或远端写入来启动展示。
 
 #8 将完整执行消息缓存放在独立 `runDetails` 映射，不向摘要行或普通 assistant 历史写入日志。`run.open` 只由展开的执行段请求，远端读取前核对当前 CLI `/api/me` 身份，任务 ID 与 Issue ID 也必须匹配已固定的展示归属。缓存按任务与序号去重，保持源顺序；增量游标只越过连续已读序号，缺口保留后续可补读的机会，不使用最大已见序号。旧连接的已读缓存依靠宿主鉴权读取，无需当前 CLI 身份仍在线。
