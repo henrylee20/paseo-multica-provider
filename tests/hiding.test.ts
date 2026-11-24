@@ -54,7 +54,7 @@ async function fixture() {
   await writeFile(join(home, ".multica", "config.json"), JSON.stringify({ server_url: `http://127.0.0.1:${(http.address() as { port: number }).port}`, token: "synthetic" }));
   const paseo = { hosts: { list: async () => ({ self: { serverId: "owner" } }) } } as unknown as PaseoApi;
   type Agent = { id: string; workspaceId: string; cwd: string; labels: Record<string, string>; handle: string; archivedAt: string | null; name?: string };
-  const native = { agents: [] as Agent[], workspaces: [] as Array<{ id: string; cwd: string; archivedAt: string | null }>, effects: [] as string[] };
+  const native = { agents: [] as Agent[], workspaces: [] as Array<{ id: string; cwd: string; archivedAt: string | null }>, effects: [] as string[], workspacePageSize: 100 };
   let server: FakeServer;
   let provider: ProviderConnection;
   const providerEvents: ProviderEvent[] = [];
@@ -77,7 +77,15 @@ async function fixture() {
   const host = {
     listHosts: async () => ({ self: { serverId: "owner" } }),
     addProject: async () => ({ project: { projectId: "project", projectKind: "non_git" } }), renameProject: async () => {},
-    fetchWorkspaces: async () => ({ entries: native.workspaces, pageInfo: { hasMore: false } }),
+    // The real directory lists only active workspaces, omits archivedAt, and
+    // accepts idPrefix without filtering on it. Callers must match exact IDs.
+    fetchWorkspaces: async (input?: { page?: { limit: number; cursor?: string } }) => {
+      const active = native.workspaces.filter(workspace => !workspace.archivedAt);
+      const offset = Number(input?.page?.cursor ?? 0);
+      const end = offset + Math.min(input?.page?.limit ?? 200, native.workspacePageSize);
+      const hasMore = end < active.length;
+      return { entries: active.slice(offset, end).map(({ id, cwd }) => ({ id, cwd })), pageInfo: { hasMore, nextCursor: hasMore ? String(end) : null } };
+    },
     createWorkspace: async (input: { workspaceId: string; source: { path: string } }) => {
       const workspace = { id: input.workspaceId, cwd: input.source.path, archivedAt: null }; native.workspaces.push(workspace); return { workspace };
     }, setWorkspaceTitle: async () => {},
@@ -89,7 +97,11 @@ async function fixture() {
     },
     updateAgent: async (id: string, update: { name: string }) => Object.assign(native.agents.find(agent => agent.id === id)!, update),
     archiveWorkspace,
-    restoreWorkspace: async (id: string) => { native.effects.push(`restore:${id}`); native.workspaces.find(workspace => workspace.id === id)!.archivedAt = null; },
+    restoreWorkspace: async (id: string) => {
+      const workspace = native.workspaces.find(workspace => workspace.id === id)!;
+      if (!workspace.archivedAt) throw new Error("This workspace is not archived, but it is unavailable from the host.");
+      native.effects.push(`restore:${id}`); workspace.archivedAt = null;
+    },
     fetchAgent: async (id: string) => ({ agent: native.agents.find(agent => agent.id === id) }),
     refreshAgent: async (id: string) => {
       const agent = native.agents.find(agent => agent.id === id)!;
@@ -153,11 +165,34 @@ it("keeps an archived workspace hidden and restores only explicitly selected ori
   expect(f.native.agents.map(agent => ({ id: agent.id, cwd: agent.cwd, handle: agent.handle }))).toEqual(original);
   expect((await f.server.rpc(hiddenList, {}, f.paseo)).objects).toEqual([expect.objectContaining({ kind: "main" })]);
   expect(await f.server.rpc(hiddenRestore, { connectionKey: selected.connectionKey, issueId: selected.issueId, rootId: selected.rootId }, f.paseo)).toEqual({ status: "ready" });
-  expect(f.native.effects).toEqual([`restore:${workspace.id}`, `refresh:${selected.agentId}`, `restore:${workspace.id}`]);
+  expect(f.native.effects).toEqual([`restore:${workspace.id}`, `refresh:${selected.agentId}`]);
   await f.server.rpc(syncBootstrap, {}, f.paseo);
   expect(f.native.agents).toHaveLength(3);
   expect(f.native.agents[0].archivedAt).toBeTruthy();
   expect(f.requests.every(request => request.startsWith("GET "))).toBe(true);
+});
+
+it("restores a manually hidden Thread in its active workspace after filter reentry", async () => {
+  const f = await fixture();
+  const original = f.native.agents.map(agent => ({ id: agent.id, cwd: agent.cwd, handle: agent.handle }));
+  const thread = f.native.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
+  await f.archiveAgent(thread);
+  f.remote.matching = false; await f.server.rpc(syncBootstrap, {}, f.paseo);
+  f.remote.matching = true; await f.server.rpc(syncBootstrap, {}, f.paseo);
+  expect(f.native.workspaces[0].archivedAt).toBeNull();
+  expect(f.native.agents.find(agent => agent.labels["multica.discussion"] === "main")!.archivedAt).toBeNull();
+  const hidden = (await f.server.rpc(hiddenList, {}, f.paseo)).objects[0];
+  // The SDK ignores idPrefix; the original active workspace is on a later page.
+  f.native.workspaces.unshift({ id: `${hidden.workspaceId}-similar`, cwd: hidden.cwd, archivedAt: null });
+  f.native.workspacePageSize = 1;
+  f.native.effects.length = 0;
+  const requestsBeforeRestore = f.requests.length;
+  expect(await f.server.rpc(hiddenRestore, { connectionKey: hidden.connectionKey, issueId: hidden.issueId, rootId: hidden.rootId }, f.paseo)).toEqual({ status: "ready" });
+  expect(thread.archivedAt).toBeNull();
+  expect((await f.server.rpc(hiddenList, {}, f.paseo)).objects).toEqual([]);
+  expect(f.native.agents.map(agent => ({ id: agent.id, cwd: agent.cwd, handle: agent.handle }))).toEqual(original);
+  expect(f.native.effects).toEqual([`refresh:${thread.id}`]);
+  expect(f.requests).toHaveLength(requestsBeforeRestore);
 });
 
 it("keeps main-discussion hiding independent from session resource close and preserves replayed history", async () => {
@@ -190,11 +225,34 @@ it("restores a workspace alone without refreshing its hidden tabs", async () => 
   const f = await fixture();
   await f.archiveWorkspace(f.native.workspaces[0].id);
   const workspace = (await f.server.rpc(hiddenList, {}, f.paseo)).objects.find(object => object.kind === "workspace")!;
+  f.native.workspaces.push({ id: `${workspace.workspaceId}-similar`, cwd: workspace.cwd, archivedAt: null });
   f.native.effects.length = 0;
   await f.server.rpc(hiddenRestore, { connectionKey: workspace.connectionKey, issueId: workspace.issueId }, f.paseo);
   expect(f.native.effects).toEqual([`restore:${workspace.workspaceId}`]);
   expect(f.native.agents.every(agent => agent.archivedAt)).toBe(true);
   expect((await f.server.rpc(hiddenList, {}, f.paseo)).objects.map(object => object.kind).sort()).toEqual(["main", "thread"]);
+});
+
+it("retries a lost workspace restore acknowledgement without restoring the already active workspace again", async () => {
+  const f = await fixture();
+  const original = f.native.agents.map(agent => ({ id: agent.id, cwd: agent.cwd, handle: agent.handle }));
+  await f.archiveWorkspace(f.native.workspaces[0].id);
+  const hidden = (await f.server.rpc(hiddenList, {}, f.paseo)).objects.find(object => object.kind === "thread")!;
+  const target = { connectionKey: hidden.connectionKey, issueId: hidden.issueId, rootId: hidden.rootId };
+  const restore = f.host.restoreWorkspace.bind(f.host);
+  f.host.restoreWorkspace = async id => { await restore(id); throw new Error("workspace restore acknowledgement lost"); };
+  f.native.effects.length = 0;
+  const requestsBeforeRestore = f.requests.length;
+  expect(await f.server.rpc(hiddenRestore, target, f.paseo)).toMatchObject({ status: "unavailable" });
+  expect(f.native.workspaces[0].archivedAt).toBeNull();
+  expect(f.native.agents.every(agent => agent.archivedAt)).toBe(true);
+  expect((await f.server.rpc(hiddenList, {}, f.paseo)).objects).toHaveLength(3);
+  await f.dispose(); const restarted = await f.start();
+  expect(await restarted.server.rpc(hiddenRestore, target, f.paseo)).toEqual({ status: "ready" });
+  expect(f.native.effects).toEqual([`restore:${hidden.workspaceId}`, `refresh:${hidden.agentId}`]);
+  expect((await restarted.server.rpc(hiddenList, {}, f.paseo)).objects).toEqual([expect.objectContaining({ kind: "main" })]);
+  expect(f.native.agents.map(agent => ({ id: agent.id, cwd: agent.cwd, handle: agent.handle }))).toEqual(original);
+  expect(f.requests).toHaveLength(requestsBeforeRestore);
 });
 
 it("retains hide intent after a lost restore acknowledgement and retries without refreshing the now live agent", async () => {

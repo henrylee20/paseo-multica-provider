@@ -87,7 +87,7 @@ async function fixture(syncIntervalMs = 15_000, homePrefix = "multica-sidebar-")
   const address = http.address() as { port: number };
   await mkdir(join(home, ".multica"));
   await writeFile(join(home, ".multica", "config.json"), JSON.stringify({ server_url: `http://127.0.0.1:${address.port}`, token: "private-token" }));
-  const native = { projects: [] as Array<{ projectId: string; cwd: string; name: string }>, workspaces: [] as Array<{ id: string; projectId: string; cwd: string; title: string; archived?: boolean }>, agents: [] as Array<{ id: string; workspaceId: string; cwd: string; labels: Record<string, string>; name?: string; handle: string; archivedAt?: string | null }> };
+  const native = { projects: [] as Array<{ projectId: string; cwd: string; name: string }>, workspaces: [] as Array<{ id: string; projectId: string; cwd: string; title: string; archived?: boolean }>, agents: [] as Array<{ id: string; workspaceId: string; cwd: string; labels: Record<string, string>; name?: string; handle: string; archivedAt?: string | null }>, workspacePageSize: 100 };
   const host = {
     listHosts: async () => ({ self: { serverId: "owning-daemon" } }),
     addProject: async (cwd: string) => {
@@ -96,7 +96,14 @@ async function fixture(syncIntervalMs = 15_000, homePrefix = "multica-sidebar-")
       return { project, error: null };
     },
     renameProject: async (id: string, name: string) => { native.projects.find(item => item.projectId === id)!.name = name; },
-    fetchWorkspaces: async () => ({ entries: native.workspaces, pageInfo: { hasMore: false, nextCursor: null } }),
+    // Match the native active directory: no archived field and idPrefix ignored.
+    fetchWorkspaces: async (input?: { page?: { limit: number; cursor?: string } }) => {
+      const active = native.workspaces.filter(workspace => !workspace.archived);
+      const offset = Number(input?.page?.cursor ?? 0);
+      const end = offset + Math.min(input?.page?.limit ?? 200, native.workspacePageSize);
+      const hasMore = end < active.length;
+      return { entries: active.slice(offset, end).map(({ archived: _archived, ...workspace }) => workspace), pageInfo: { hasMore, nextCursor: hasMore ? String(end) : null } };
+    },
     createWorkspace: async (input: { source: { path: string; projectId: string }; workspaceId: string; title: string }) => {
       if (!input.source.projectId) throw new Error("Explicit parent project required");
       const workspace = { id: input.workspaceId, projectId: input.source.projectId, cwd: input.source.path, title: input.title };
@@ -115,7 +122,11 @@ async function fixture(syncIntervalMs = 15_000, homePrefix = "multica-sidebar-")
       for (const agent of native.agents.filter(item => item.workspaceId === id)) agent.archivedAt = "2026-11-24T12:00:00Z";
       return { error: null };
     },
-    restoreWorkspace: async (id: string) => { native.workspaces.find(item => item.id === id)!.archived = false; },
+    restoreWorkspace: async (id: string) => {
+      const workspace = native.workspaces.find(item => item.id === id)!;
+      if (!workspace.archived) throw new Error("This workspace is not archived, but it is unavailable from the host.");
+      workspace.archived = false;
+    },
     fetchAgent: async (id: string) => ({ agent: native.agents.find(item => item.id === id) }),
     refreshAgent: async (id: string) => {
       const agent = native.agents.find(item => item.id === id)!;
@@ -256,18 +267,24 @@ it("restart preserves existing placeholder directories and the imported history 
   await provider.close();
 });
 
-it("a lost native workspace creation response is reconciled before retrying after restart", async () => {
+it("a lost native workspace creation response is reconciled on a later directory page after restart", async () => {
   const f = await fixture();
   const create = f.host.createWorkspace.bind(f.host);
   f.host.createWorkspace = async (...args) => { await create(...args); throw new Error("response lost"); };
   expect(await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo)).toMatchObject({ status: "unavailable" });
   expect(f.native.workspaces).toHaveLength(1);
+  const original = { ...f.native.workspaces[0] };
+  f.native.workspaces.unshift({ ...original, id: `${original.id}-similar` });
+  f.native.workspacePageSize = 1;
   f.host.createWorkspace = create;
   await f.dispose();
   const restarted = f.start();
   expect(await restarted.server.rpc(bootstrap, {}, f.paseo)).toMatchObject({ status: "ready" });
-  expect(f.native.workspaces).toHaveLength(2);
+  expect(f.native.workspaces).toHaveLength(3);
+  expect(f.native.workspaces.filter(workspace => workspace.id === original.id)).toEqual([original]);
   expect(f.native.agents).toHaveLength(2);
+  expect(f.native.agents[0].workspaceId).toBe(original.id);
+  expect(f.native.agents[0].cwd).toBe(original.cwd);
 });
 
 it("a lost native import response is reconciled through stable labels without importing the active handle again", async () => {
@@ -526,4 +543,24 @@ it("a lost automatic archive response survives restart and restores the tabs cap
   await restarted.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   expect(f.native.workspaces.every(item => !item.archived)).toBe(true);
   expect(f.native.agents.every(item => !item.archivedAt)).toBe(true);
+});
+
+it("retries a lost automatic workspace restore acknowledgement after restart without refreshing active tabs", async () => {
+  const f = await fixture(60_000);
+  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const original = f.native.agents.map(agent => ({ id: agent.id, cwd: agent.cwd, handle: agent.handle }));
+  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: false }, f.paseo);
+  const restore = f.host.restoreWorkspace.bind(f.host);
+  f.host.restoreWorkspace = async id => { await restore(id); throw new Error("workspace restore acknowledgement lost"); };
+  expect(await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo)).toEqual({ status: "unavailable" });
+  expect(f.native.workspaces[0].archived).toBe(false);
+  expect(f.native.agents[0].archivedAt).toBeTruthy();
+  await f.dispose();
+  f.host.restoreWorkspace = restore;
+  const restarted = f.start();
+  expect(await restarted.server.rpc(bootstrap, {}, f.paseo)).toEqual({ status: "ready" });
+  expect(f.native.workspaces.every(item => !item.archived)).toBe(true);
+  expect(f.native.agents.every(item => !item.archivedAt)).toBe(true);
+  expect(f.native.agents.map(agent => ({ id: agent.id, cwd: agent.cwd, handle: agent.handle }))).toEqual(original);
+  expect(await restarted.server.rpc(bootstrap, {}, f.paseo)).toEqual({ status: "ready" });
 });
