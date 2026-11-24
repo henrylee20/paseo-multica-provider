@@ -36,7 +36,7 @@ it("the host-compiled client entry offers a Multica management screen and sideba
     entries.push({ kind, ...entry });
     return () => { entries.splice(entries.findIndex(value => value.kind === kind && value.id === entry.id), 1); };
   };
-  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: add("settings"), addScreen: add("screen"), addSidebarHeaderItem: add("sidebar") });
+  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: add("settings"), addScreen: add("screen"), addSidebarHeaderItem: add("sidebar"), addTimelineRenderer: () => () => {} });
   expect(entries.map(({ kind, id }) => ({ kind, id }))).toEqual([
     { kind: "settings", id: "multica" }, { kind: "screen", id: "management" }, { kind: "sidebar", id: "multica" },
   ]);
@@ -51,7 +51,7 @@ it("client contribution bootstraps without opening management and retries after 
   try {
     const calls: string[] = [];
     const dispose = setup({ rpc: async (contract: { name: string }) => { calls.push(contract.name); if (calls.length === 1) throw new Error("disconnected"); return { status: "ready" }; },
-      addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {} });
+      addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: () => () => {} });
     await Promise.resolve();
     expect(calls).toEqual(["sync.bootstrap"]);
     await vi.advanceTimersByTimeAsync(10_000);
@@ -60,4 +60,31 @@ it("client contribution bootstraps without opening management and retries after 
     await vi.advanceTimersByTimeAsync(20_000);
     expect(calls).toHaveLength(2);
   } finally { vi.useRealTimers(); }
+});
+
+
+it("the native thread renderer lazily opens history and comment events render as independent records", async () => {
+  const effects: Array<() => unknown> = [];
+  const calls: Array<{ name: string; input: unknown }> = [];
+  const renderers: Array<{ kind: string; schema: zod.ZodType; Component: (props: any) => any }> = [];
+  const setup = await bundledContribution("../index.client.tsx", {
+    "@getpaseo/plugin/client": { useRpc: (contract: { name: string }) => async (input: unknown) => { calls.push({ name: contract.name, input }); return { status: "ready" }; } },
+    "@getpaseo/plugin/client/ui": {}, "react-native": { Text: "Text", View: "View", Pressable: "Pressable" },
+    react: { useEffect: (effect: () => unknown) => effects.push(effect), useState: (initial: unknown) => [initial, () => {}] },
+  });
+  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {},
+    addTimelineRenderer: (renderer: any) => { renderers.push(renderer); return () => {}; } });
+  expect(renderers.map(renderer => renderer.kind)).toEqual(["thread", "comment-event"]);
+  expect(calls).toEqual([]);
+  const address = { connectionKey: "connection", issueId: "issue", rootId: "root" };
+  const theme = { colors: { foreground: "black", foregroundMuted: "gray" } };
+  renderers[0].Component({ item: { data: renderers[0].schema.parse({ ...address, title: "Thread" }) }, theme });
+  for (const effect of effects.splice(0)) effect();
+  await Promise.resolve();
+  expect(calls).toEqual([{ name: "thread.open", input: address }]);
+  const event = renderers[1].Component({ item: { data: renderers[1].schema.parse({ ...address, recordId: "correction", commentId: "root", category: "correction", text: "Updated text", sourceUpdatedAt: "2026-11-24T12:00:00Z", truncated: false }) }, theme });
+  expect(JSON.stringify(event)).toContain("评论更正");
+  expect(JSON.stringify(event)).toContain("Updated text");
+  expect(JSON.stringify(event)).toContain("2026-11-24T12:00:00Z");
+  dispose();
 });

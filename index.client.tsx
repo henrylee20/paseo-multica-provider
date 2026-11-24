@@ -2,6 +2,8 @@ import type { PluginClientContext, PluginSidebarItemProps } from "@getpaseo/plug
 import { SidebarRow } from "@getpaseo/plugin/client/ui";
 import { ConnectionScreen } from "./client/connection-screen.js";
 import { syncBootstrap } from "./shared/contracts.js";
+import { CommentEvent, ThreadSummary } from "./client/thread-events.js";
+import { commentEventSchema, threadSummarySchema } from "./shared/threads.js";
 
 function MulticaItem({ currentScreen, openScreen }: PluginSidebarItemProps) {
   return <SidebarRow icon="MessagesSquare" active={currentScreen?.screenId === "management"}
@@ -23,5 +25,7 @@ export default function contribute(client: PluginClientContext) {
   const removeSettings = client.addSettingsScreen({ id: "multica", title: "Multica", icon: "MessagesSquare", Component: ConnectionScreen });
   const removeScreen = client.addScreen({ id: "management", title: "Multica", Component: ConnectionScreen });
   const removeItem = client.addSidebarHeaderItem({ id: "multica", title: "Multica", Component: MulticaItem });
-  return () => { disposed = true; clearInterval(timer); removeItem(); removeScreen(); removeSettings(); };
+  const removeThread = client.addTimelineRenderer({ kind: "thread", version: 1, schema: threadSummarySchema, Component: ThreadSummary });
+  const removeEvent = client.addTimelineRenderer({ kind: "comment-event", version: 1, schema: commentEventSchema, Component: CommentEvent });
+  return () => { disposed = true; clearInterval(timer); removeEvent(); removeThread(); removeItem(); removeScreen(); removeSettings(); };
 }

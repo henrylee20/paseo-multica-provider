@@ -30,6 +30,7 @@ async function fixture(syncIntervalMs = 15_000) {
     response.setHeader("Content-Type", "application/json");
     const url = new URL(request.url!, "http://localhost");
     response.end(JSON.stringify(url.pathname === "/api/me" ? { id: "user-42", name: "Lin" }
+      : url.pathname.endsWith("/comments") ? []
       : url.pathname === "/api/issues" ? { issues: issues.slice(Number(url.searchParams.get("offset")), Number(url.searchParams.get("offset")) + 1), total: issues.length }
       : [{ id: "remote-workspace", name: "产品开发", slug: "product" }]));
   });

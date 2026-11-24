@@ -1,12 +1,18 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
+import { threadSchema } from "./thread-state.js";
 
 const projectSchema = z.object({ cwd: z.string(), name: z.string(), projectId: z.string().optional() });
 const issueSchema = z.object({
   remoteWorkspaceId: z.string(), workspaceId: z.string(), cwd: z.string(), title: z.string(),
   description: z.string(), updatedAt: z.string().optional(), workspaceCreated: z.boolean().default(false), mainAgentId: z.string().optional(),
   archiveReason: z.literal("rule_disabled").optional(), ruleArchivedAgentIds: z.array(z.string()).default([]),
+  threads: z.record(z.string(), threadSchema).default({}),
+  commentRoots: z.record(z.string(), z.string()).default({}),
+  unresolvedCommentIds: z.array(z.string()).default([]),
+  systemRootIds: z.array(z.string()).default([]),
+  mainHistory: threadSchema.default({ title: "主讨论", historyLoaded: false, rows: [], observed: {} }),
 });
 const connectionSchema = z.object({
   rules: z.record(z.string(), z.object({ enabled: z.boolean(), statusCategories: z.array(z.string()) })),
