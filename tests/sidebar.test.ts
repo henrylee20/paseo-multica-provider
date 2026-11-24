@@ -9,6 +9,7 @@ import type { ProviderEvent } from "@getpaseo/plugin/server/provider";
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 import { createServerContribution } from "../server/contribute.js";
+import type { LocalState } from "../server/state.js";
 import { FakeServer } from "./support/fake-server.js";
 
 const bootstrap = defineRpc({ name: "sync.bootstrap", input: z.object({}), output: z.object({ status: z.string() }) });
@@ -17,8 +18,8 @@ const enable = defineRpc({ name: "workspace.enable", input: z.object({ workspace
 const cleanup: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const dispose of cleanup.splice(0).reverse()) await dispose(); });
 
-async function fixture(syncIntervalMs = 15_000) {
-  const home = await mkdtemp(join(tmpdir(), "multica-sidebar-"));
+async function fixture(syncIntervalMs = 15_000, homePrefix = "multica-sidebar-") {
+  const home = await mkdtemp(join(tmpdir(), homePrefix));
   cleanup.push(() => rm(home, { recursive: true, force: true }));
   const requests: string[] = [];
   const issues = [
@@ -142,6 +143,69 @@ it("repeated bootstrap, title edits, token rotation and normal restart preserve 
   expect(f.native.agents.map(item => item.id)).toEqual(agentIds);
   expect(f.native.workspaces[0].title).toBe("PRD-1 登录标题已修改");
   expect(await readFile(join(f.home, "multica-provider", "state.json"), "utf8")).not.toContain("private-token");
+});
+
+it("new placeholder directories fit the host's flattened agent storage path and stay stable across restart", async () => {
+  const f = await fixture(15_000, "multica-sidebar-runtime-daemon-");
+  const importAgent = f.host.importAgent.bind(f.host);
+  f.host.importAgent = async input => {
+    if (!input.cwd) throw new Error("Explicit cwd required");
+    // Paseo 0.15.3 AgentStorage uses the absolute Unix cwd, without its root,
+    // with separators replaced by hyphens as one filesystem component.
+    const storageComponent = input.cwd.slice(1).replaceAll("/", "-");
+    expect(Buffer.byteLength(storageComponent)).toBeLessThanOrEqual(255);
+    await mkdir(join(f.home, "agents", storageComponent), { recursive: true });
+    return importAgent(input);
+  };
+  expect(await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo)).toMatchObject({ status: "ready" });
+  expect(f.native.agents).toHaveLength(2);
+  const projects = structuredClone(f.native.projects);
+  const workspaces = structuredClone(f.native.workspaces);
+  const agents = structuredClone(f.native.agents);
+  f.dispose();
+  const restarted = f.start();
+  expect(await restarted.server.rpc(bootstrap, {}, f.paseo)).toMatchObject({ status: "ready" });
+  expect(f.native.projects).toEqual(projects);
+  expect(f.native.workspaces).toEqual(workspaces);
+  expect(f.native.agents).toEqual(agents);
+});
+
+it("restart preserves existing placeholder directories and the imported history bound to them", async () => {
+  const f = await fixture();
+  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  f.dispose();
+  const statePath = join(f.home, "multica-provider", "state.json");
+  const persisted = JSON.parse(await readFile(statePath, "utf8")) as LocalState;
+  const connectionKey = f.native.agents[0].labels["multica.connection"];
+  const legacyProject = join(f.home, "multica-provider", "placeholders", "a".repeat(64), "b".repeat(64));
+  // Seed the persisted/native boundary as an installation using the older
+  // full-length directory format, with already imported agent history.
+  persisted.connections[connectionKey].projects["remote-workspace"].cwd = legacyProject;
+  f.native.projects[0].cwd = legacyProject;
+  for (const [index, issue] of f.issues.entries()) {
+    const cwd = join(legacyProject, (index === 0 ? "c" : "d").repeat(64));
+    persisted.connections[connectionKey].issues[issue.id].cwd = cwd;
+    f.native.workspaces[index].cwd = cwd;
+    f.native.agents[index].cwd = cwd;
+    await mkdir(cwd, { recursive: true });
+  }
+  await writeFile(statePath, JSON.stringify(persisted));
+  const projects = structuredClone(f.native.projects);
+  const workspaces = structuredClone(f.native.workspaces);
+  const agents = structuredClone(f.native.agents);
+  const restarted = f.start();
+  expect(await restarted.server.rpc(bootstrap, {}, f.paseo)).toMatchObject({ status: "ready" });
+  expect(f.native.projects).toEqual(projects);
+  expect(f.native.workspaces).toEqual(workspaces);
+  expect(f.native.agents).toEqual(agents);
+  const provider = await restarted.server.providers.get("multica")!.connect({ versions: [1], capabilities: ["session.persistence"] });
+  const events: ProviderEvent[] = [];
+  provider.onEvent(event => events.push(event));
+  await provider.send({ type: "session.open", requestId: "legacy-open", sessionId: "legacy-main", history: "replay",
+    persistence: JSON.parse(agents[0].handle.slice("plugin:".length)),
+    config: { cwd: agents[0].cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
+  expect(events.at(-1)).toEqual({ type: "session.ready", requestId: "legacy-open", sessionId: "legacy-main" });
+  await provider.close();
 });
 
 it("a lost native workspace creation response is reconciled before retrying after restart", async () => {
