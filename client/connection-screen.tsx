@@ -9,6 +9,7 @@ import { WorkspaceRuleEditor } from "./workspace-rule.js";
 import { HiddenObjects } from "./hidden-objects.js";
 import { StopResults } from "./stop-results.js";
 import { DeliveryManagement } from "./delivery-status.js";
+import { ConnectionHistory } from "./connection-history.js";
 
 const labels: Record<ConnectionStatus["status"], string> = {
   ready: "已连接", missing_config: "未配置 CLI", unreadable_config: "配置无法读取", invalid_config: "配置无效",
@@ -21,7 +22,7 @@ export function ConnectionScreen({ host, theme, navigation }: PluginSurfaceProps
   const readStatus = useRpc(connectionStatus);
   const listWorkspaces = useRpc(workspaceList);
   const enableWorkspace = useRpc(workspaceEnable);
-  const [workspaces, setWorkspaces] = useState<Array<{ id: string; name: string; enabled: boolean; rule: TaskRule }>>([]);
+  const [workspaces, setWorkspaces] = useState<Array<{ connectionKey: string; id: string; name: string; enabled: boolean; rule: TaskRule }>>([]);
   const [editingWorkspace, setEditingWorkspace] = useState<string | null>(null);
   const [workspaceFailure, setWorkspaceFailure] = useState<string | null>(null);
   const [savingWorkspace, setSavingWorkspace] = useState<string | null>(null);
@@ -44,7 +45,7 @@ export function ConnectionScreen({ host, theme, navigation }: PluginSurfaceProps
         if (next.status === "ready") {
           try {
             const result = await listWorkspaces({});
-            if (active) { setWorkspaces(result.workspaces); setWorkspaceFailure(null); }
+            if (active) { setWorkspaces(result.connectionKey === next.connectionKey ? result.workspaces.map(workspace => ({ ...workspace, connectionKey: result.connectionKey })) : []); setWorkspaceFailure(null); }
           } catch { if (active) setWorkspaceFailure("无法读取 Multica 工作区，请检查连接后刷新。"); }
         } else if (active) setWorkspaces([]);
       } catch {
@@ -64,10 +65,10 @@ export function ConnectionScreen({ host, theme, navigation }: PluginSurfaceProps
     if (await settings.save(parsed.data, settings.revision)) setAttempt(value => value + 1);
   }
 
-  async function toggleWorkspace(workspace: { id: string; enabled: boolean }) {
+  async function toggleWorkspace(workspace: { id: string; enabled: boolean; connectionKey: string }) {
     setSavingWorkspace(workspace.id);
     try {
-      const result = await enableWorkspace({ workspaceId: workspace.id, enabled: !workspace.enabled });
+      const result = await enableWorkspace({ connectionKey: workspace.connectionKey, workspaceId: workspace.id, enabled: !workspace.enabled });
       if (result.status !== "ready") { setWorkspaceFailure(result.message ?? "同步暂不可用，请重试。"); return; }
       setWorkspaceFailure(null);
       setAttempt(value => value + 1);
@@ -108,16 +109,17 @@ export function ConnectionScreen({ host, theme, navigation }: PluginSurfaceProps
       </> : !failure ? <Text style={muted}>正在验证 CLI 连接…</Text> : null}
       <Text style={muted}>连接凭据仅在 daemon 内使用。</Text>
     </SettingsSection>
+    <ConnectionHistory theme={theme} currentKey={status?.connectionKey} />
     <SettingsSection title="工作区与筛选规则">
       <Text style={muted}>显式启用后导入“未开始”和“进行中”状态类别的任务；初始不限制具体状态、负责人、Multica 项目和标签，可配置组合条件。未启用的工作区不会导入。</Text>
       {workspaceFailure ? <Text accessibilityRole="alert" style={{ color: theme.colors.statusDanger }}>{workspaceFailure}</Text> : null}
-      {workspaces.map(workspace => <SettingsCard key={workspace.id}>
+      {workspaces.filter(workspace => workspace.connectionKey === status?.connectionKey).map(workspace => <SettingsCard key={`${workspace.connectionKey}:${workspace.id}`}>
         <SettingsAction label={workspace.name} hint={workspace.enabled ? "已启用：按已保存的筛选规则同步" : "尚未启用"}
           actionLabel={workspace.enabled ? "停用规则" : "启用规则"} disabled={savingWorkspace !== null}
           onPress={() => { void toggleWorkspace(workspace); }} />
         <SettingsAction label="负责人、状态、标签与 Multica 项目" actionLabel={editingWorkspace === workspace.id ? "收起筛选条件" : "配置筛选条件"}
           onPress={() => setEditingWorkspace(value => value === workspace.id ? null : workspace.id)} />
-        {editingWorkspace === workspace.id ? <WorkspaceRuleEditor key={`${status?.connectionKey}:${workspace.id}`} workspaceId={workspace.id} initialRule={workspace.rule} theme={theme}
+        {editingWorkspace === workspace.id ? <WorkspaceRuleEditor key={`${status?.connectionKey}:${workspace.id}`} connectionKey={workspace.connectionKey} workspaceId={workspace.id} initialRule={workspace.rule} theme={theme}
           onSaved={() => { setEditingWorkspace(null); setAttempt(value => value + 1); }} /> : null}
       </SettingsCard>)}
       {status?.status === "ready" && !workspaces.length && !workspaceFailure ? <Text style={muted}>当前没有可用的 Multica 工作区。</Text> : null}

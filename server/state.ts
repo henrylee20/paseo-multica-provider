@@ -6,7 +6,7 @@ import { runMessageSchema } from "../shared/runs.js";
 import { stopRecordSchema } from "./stop-state.js";
 import { threadSchema } from "./thread-state.js";
 import { deliveryRecordSchema } from "./delivery-state.js";
-import { taskRuleSchema } from "../shared/contracts.js";
+import { connectionIdentitySchema, taskRuleSchema } from "../shared/contracts.js";
 
 const projectSchema = z.object({ cwd: z.string(), name: z.string(), projectId: z.string().optional() });
 const issueSchema = z.object({
@@ -28,6 +28,7 @@ const issueSchema = z.object({
   mainHistory: threadSchema.default({ title: "主讨论", historyLoaded: false, rows: [], observed: {} }),
 });
 const connectionSchema = z.object({
+  identity: connectionIdentitySchema.optional(),
   rules: z.record(z.string(), taskRuleSchema.extend({ enabled: z.boolean() })),
   projects: z.record(z.string(), projectSchema), issues: z.record(z.string(), issueSchema),
 });

@@ -66,6 +66,7 @@ it("client contribution bootstraps without opening management and retries after 
 
 function renderedText(node: unknown): string {
   if (typeof node === "string") return node;
+  if (typeof node === "number") return String(node);
   if (Array.isArray(node)) return node.map(renderedText).join("");
   if (!isValidElement<{ children?: unknown }>(node)) return "";
   return renderedText(typeof node.type === "function" ? (node.type as (props: unknown) => unknown)(node.props) : node.props.children);
@@ -332,6 +333,7 @@ it("management lists shared hidden objects and offers separate workspace and sel
       useRpc: (contract: { name: string }) => {
         if (!rpcs.has(contract.name)) rpcs.set(contract.name, async input => {
           calls.push({ name: contract.name, input });
+          if (contract.name === "connection.history") return { connections: [{ connectionKey: "old-connection", apiUrl: "https://original.example.test", user: { id: "original-user", name: "Original account", email: "" }, profiles: ["office"], projectCount: 1, issueCount: 2, hiddenCount: 1, pendingDeliveryCount: 1, stopWarningCount: 1 }] };
           if (contract.name === "stop.list") return { records: [{ connectionKey: "old-connection", issueId: "issue", rootId: "root", runId: "failed-run", title: "Closed Task", status: "running", cleanup: "unknown", retryable: true, message: "cancel failed" },
             { connectionKey: "old-connection", issueId: "issue", rootId: "root", runId: "cancelled-run", title: "Stopped Task", status: "cancelled", cleanup: "pending", retryable: false }] };
           if (contract.name === "stop.retry") return { status: "ready" };
@@ -360,6 +362,10 @@ it("management lists shared hidden objects and offers separate workspace and sel
     for (const effect of effects.splice(0)) { const cleanup = effect(); if (typeof cleanup === "function") cleanups.push(cleanup as () => void); }
     await vi.waitFor(() => { expect(render()).toContain("人工隐藏"); expect(render()).toContain("Task · Root"); });
     expect(render()).toContain("原生停止结果");
+    expect(render()).toContain("历史连接");
+    expect(render()).toContain("Original account");
+    expect(render()).toContain("https://original.example.test");
+    expect(render()).toContain("待核实输入 1");
     expect(render()).toContain("cancel failed");
     expect(render()).toContain("进程清理尚待确认");
     expect(render()).toContain("评论已保存");
