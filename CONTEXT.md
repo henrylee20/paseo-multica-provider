@@ -66,6 +66,8 @@
 
 管理页独立列出所有连接的本地停止记录；部分失败使原生停止返回失败，并持续提供单 Run 重试，tab 随后关闭、CLI 离线和正常重启仍可看到。重试不恢复 workspace 或讨论，不改变人工隐藏。整 workspace 归档、规则退出、单纯 session.archive／unarchive／close、连接关闭和贡献清理均不发起远端取消；清理等待已接受的停止请求。`StopCoordinator.epoch`／`guardDelivery` 为 #10／#11 提供持久停止栅栏，旧待投递必须在发送或重试领取前检查同一讨论的 epoch。真实宿主及真实服务验证仍由母工单负责。
 
+真实 0.15.3 验收发现：Stop 固定集合终结时，若同 tab 后来又有新 Run，继续保留原聚合 turn 会触发宿主两秒后的强制取消，导致后来 Run 仍在远端运行而原生永久空闲。provider 现捕获操作开始时的 turn；停止成功后先完成仍匹配的原 turn，再以全新 UUID 展示剩余活动 Run，最后确认请求。若原 turn 已自然结束则不动后续 turn；部分失败保留失败及活动。公开贡献／provider／RPC 回归覆盖延迟取消中发现新 Run、固定集合不扩张、后续 observe／bootstrap 及终态、部分失败持续活动和原 turn 提前自然结束竞态。真实宿主重复验收由母工单独立执行，宿主版本约定不变。
+
 2026-11-24 #10 加入文本普通评论投递。原生输入先持久保存 clientMessageId、随机稳定 Idempotency-Key、不变正文、连接／Issue／讨论目标、时间、宿主原 delivery 选择及停止 epoch，再报告插件已接收。主讨论每次 POST 顶层评论；真实 Thread 的 parent_id 始终是根评论。管理页提供按当前目录真实 agent ID 生成的 canonical mention 引用，同名身份逐项列出，不按裸 @名字推断路由。普通发送始终只有 content/type/parent_id，不向 Multica 添加 steering 指令，也不创建 Issue。
 
 运行中在等待持久化前捕获当前唯一聚合 turn UUID，以该缓存 ID 回答宿主 steer admission；远端 POST 在 admission 后独立进行。接收、保存、失败、待核实使用稳定 comment-delivery 插件行，保存评论不生成虚构 Run。网络／回执丢失及 5xx 保留待核实，确定拒绝与发送前错误保留失败；没有自动重发。存储写入失败时运行中仍使用匹配的缓存 turn 防止宿主 failed fallback 意外取消，同时追加明确“未能持久接收、未发送远端评论”的原生错误；全局磁盘故障下不承诺任何一侧记录一定可持久化。此特殊路径不伪造保存回执。
