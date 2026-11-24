@@ -2,6 +2,8 @@ import { build } from "paseo-esbuild";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { runInThisContext } from "node:vm";
+import { isValidElement } from "react";
+import type { PluginTimelineRendererContribution } from "@getpaseo/plugin/client";
 import * as pluginRuntime from "@getpaseo/plugin";
 import * as zod from "zod";
 import { expect, it, vi } from "vitest";
@@ -36,7 +38,7 @@ it("the host-compiled client entry offers a Multica management screen and sideba
     entries.push({ kind, ...entry });
     return () => { entries.splice(entries.findIndex(value => value.kind === kind && value.id === entry.id), 1); };
   };
-  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: add("settings"), addScreen: add("screen"), addSidebarHeaderItem: add("sidebar") });
+  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: add("settings"), addScreen: add("screen"), addSidebarHeaderItem: add("sidebar"), addTimelineRenderer: () => () => {} });
   expect(entries.map(({ kind, id }) => ({ kind, id }))).toEqual([
     { kind: "settings", id: "multica" }, { kind: "screen", id: "management" }, { kind: "sidebar", id: "multica" },
   ]);
@@ -51,7 +53,7 @@ it("client contribution bootstraps without opening management and retries after 
   try {
     const calls: string[] = [];
     const dispose = setup({ rpc: async (contract: { name: string }) => { calls.push(contract.name); if (calls.length === 1) throw new Error("disconnected"); return { status: "ready" }; },
-      addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {} });
+      addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: () => () => {} });
     await Promise.resolve();
     expect(calls).toEqual(["sync.bootstrap"]);
     await vi.advanceTimersByTimeAsync(10_000);
@@ -60,4 +62,77 @@ it("client contribution bootstraps without opening management and retries after 
     await vi.advanceTimersByTimeAsync(20_000);
     expect(calls).toHaveLength(2);
   } finally { vi.useRealTimers(); }
+});
+
+function renderedText(node: unknown): string {
+  if (typeof node === "string") return node;
+  if (Array.isArray(node)) return node.map(renderedText).join("");
+  if (!isValidElement<{ children?: unknown }>(node)) return "";
+  return renderedText(typeof node.type === "function" ? (node.type as (props: unknown) => unknown)(node.props) : node.props.children);
+}
+
+it("the client renders the task description as visible Markdown and removes its renderer on disposal", async () => {
+  const renderers: PluginTimelineRendererContribution[] = [];
+  const setup = await bundledContribution("../index.client.tsx", {
+    "react": { useState: (value: unknown) => [value, () => {}] },
+    "@getpaseo/plugin/client": { useRpc: () => async () => ({}) },
+    "@getpaseo/plugin/client/ui": { Markdown: ({ children }: { children: string }) => children },
+    "react-native": { View: "View", Text: "Text" },
+  });
+  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {},
+    addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: PluginTimelineRendererContribution) => {
+      renderers.push(renderer); return () => { renderers.splice(renderers.indexOf(renderer), 1); };
+    } });
+  try {
+    const renderer = renderers.find(value => value.kind === "task-description" && value.version === 1);
+    expect(renderer, "main discussion description needs a registered visible renderer").toBeDefined();
+    const data = renderer!.schema.parse({ connectionKey: "connection", issueId: "issue", revision: "revision", preview: "## 登录目标\n\n使用现有 **CLI** 登录。", truncated: false });
+    const Component = renderer!.Component as (props: unknown) => unknown;
+    expect(renderedText(Component({ item: { type: "plugin", kind: "task-description", version: 1, data },
+      theme: { colors: { foreground: "black", foregroundMuted: "gray" } } }))).toBe("任务描述## 登录目标\n\n使用现有 **CLI** 登录。");
+  } finally { dispose(); }
+  expect(renderers).toEqual([]);
+});
+
+it("a reader can explicitly load every page of a long description from its visible preview", async () => {
+  const renderers: PluginTimelineRendererContribution[] = [];
+  const calls: Array<{ name: string; input: unknown }> = [];
+  const actions: Array<{ onPress(): void }> = [];
+  const state: unknown[] = [];
+  let cursor = 0;
+  const setup = await bundledContribution("../index.client.tsx", {
+    react: { useState: (initial: unknown) => {
+      const index = cursor++;
+      if (!(index in state)) state[index] = initial;
+      return [state[index], (value: unknown) => { state[index] = value; }];
+    } },
+    "@getpaseo/plugin/client": { useRpc: (contract: { name: string }) => async (input: { offset: number }) => {
+      calls.push({ name: contract.name, input });
+      return input.offset === 0 ? { text: "## 完整目标\n\n", nextOffset: 10 } : { text: "最后一段。", nextOffset: null };
+    } },
+    "@getpaseo/plugin/client/ui": { Markdown: ({ children }: { children: string }) => children,
+      SettingsAction: (props: { onPress(): void; actionLabel: string }) => { actions.push(props); return props.actionLabel; } },
+    "react-native": { View: "View", Text: "Text" },
+  });
+  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {},
+    addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: PluginTimelineRendererContribution) => { renderers.push(renderer); return () => {}; } });
+  try {
+    const renderer = renderers.find(value => value.kind === "task-description")!;
+    const data = renderer.schema.parse({ connectionKey: "connection", issueId: "issue", revision: "revision", preview: "目标预览", truncated: true });
+    const Component = renderer.Component as (props: unknown) => unknown;
+    const render = () => {
+      cursor = 0; actions.length = 0;
+      return renderedText(Component({ item: { type: "plugin", kind: "task-description", version: 1, data },
+        theme: { colors: { foregroundMuted: "gray", statusDanger: "red" } } }));
+    };
+    expect(render()).toContain("目标预览");
+    expect(calls).toEqual([]);
+    expect(actions, "long descriptions need an explicit full-text action").toHaveLength(1);
+    actions[0].onPress();
+    await vi.waitFor(() => { expect(render()).toBe("任务描述## 完整目标\n\n最后一段。"); });
+    expect(calls).toEqual([
+      { name: "description.read", input: { connectionKey: "connection", issueId: "issue", revision: "revision", offset: 0 } },
+      { name: "description.read", input: { connectionKey: "connection", issueId: "issue", revision: "revision", offset: 10 } },
+    ]);
+  } finally { dispose(); }
 });

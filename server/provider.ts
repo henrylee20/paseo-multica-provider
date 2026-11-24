@@ -2,11 +2,13 @@ import { z } from "zod";
 import type { ProviderEvent, ProviderRegistration } from "@getpaseo/plugin/server/provider";
 import { StateStore } from "./state.js";
 import { mainPersistence, providerId } from "./sync.js";
+import { taskDescriptionKind, taskDescriptionVersion } from "../shared/description.js";
+import { taskDescriptionData } from "./task-description.js";
 
 const persistenceSchema = z.object({ version: z.literal(1), data: z.object({
   connectionKey: z.string(), issueId: z.string(), discussion: z.literal("main"),
 }) });
-const supported = ["session.persistence", "session.list"];
+const supported = ["session.persistence", "session.list", "timeline.plugin"];
 
 /** A Multica discussion projection, never a local code execution engine. */
 export function createMulticaProvider(store: StateStore): ProviderRegistration {
@@ -49,7 +51,9 @@ export function createMulticaProvider(store: StateStore): ProviderRegistration {
             emit({ type: "session.opened", requestId: input.requestId, sessionId: input.sessionId, capabilities,
               restoration: "core", persistence: parsed.data, cwd: issue.cwd, title: issue.title, description: issue.description });
             if (input.history === "replay") emit({ type: "timeline.item", sessionId: input.sessionId, item: {
-              type: "notification", level: "info", id: `multica:description:${parsed.data.data.issueId}`, message: `任务描述\n\n${issue.description || "（此任务暂无描述）"}`,
+              type: "plugin", pluginId: providerId, kind: taskDescriptionKind, version: taskDescriptionVersion,
+              id: `multica:description:${parsed.data.data.issueId}`,
+              data: taskDescriptionData(parsed.data.data.connectionKey, parsed.data.data.issueId, issue.description),
             } });
             emit({ type: "session.ready", requestId: input.requestId, sessionId: input.sessionId });
             return;

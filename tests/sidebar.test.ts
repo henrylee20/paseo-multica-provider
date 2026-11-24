@@ -15,6 +15,8 @@ import { FakeServer } from "./support/fake-server.js";
 const bootstrap = defineRpc({ name: "sync.bootstrap", input: z.object({}), output: z.object({ status: z.string() }) });
 const management = defineRpc({ name: "workspace.list", input: z.object({}), output: z.object({ workspaces: z.array(z.object({ id: z.string(), name: z.string(), enabled: z.boolean() })) }) });
 const enable = defineRpc({ name: "workspace.enable", input: z.object({ workspaceId: z.string(), enabled: z.boolean() }), output: z.object({ status: z.string() }) });
+const readDescription = defineRpc({ name: "description.read", input: z.object({ connectionKey: z.string(), issueId: z.string(), revision: z.string(), offset: z.number() }),
+  output: z.object({ text: z.string(), nextOffset: z.number().nullable() }) });
 const cleanup: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const dispose of cleanup.splice(0).reverse()) await dispose(); });
 
@@ -269,12 +271,12 @@ it("enabling the default rule pages custom-category issues into a native project
   expect(pages.every(url => url.searchParams.get("status_categories") === "unstarted,started" && !url.searchParams.has("open_only") && !url.searchParams.has("statuses"))).toBe(true);
 });
 
-it("the imported provider main discussion replays the task description and closes without creating remote comments", async () => {
+it("the main discussion replays a stable task description row without participant messages or remote comments", async () => {
   const f = await fixture();
   await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   const registration = f.server.providers.get("multica");
   expect(registration).toBeDefined();
-  const connection = await registration!.connect({ versions: [1], capabilities: ["session.persistence", "session.list"] });
+  const connection = await registration!.connect({ versions: [1], capabilities: ["session.persistence", "session.list", "timeline.plugin"] });
   const events: ProviderEvent[] = [];
   connection.onEvent(event => events.push(event));
   const agent = f.native.agents[0];
@@ -282,11 +284,66 @@ it("the imported provider main discussion replays the task description and close
     persistence: JSON.parse(agent.handle.slice("plugin:".length)),
     config: { cwd: agent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
   expect(events).toContainEqual(expect.objectContaining({ type: "session.opened", description: "用户可以使用现有 CLI 登录。", title: "PRD-1 实现登录" }));
-  expect(events).toContainEqual(expect.objectContaining({ type: "timeline.item", item: expect.objectContaining({ type: "notification", level: "info", message: "任务描述\n\n用户可以使用现有 CLI 登录。" }) }));
+  expect(connection.capabilities).toContain("timeline.plugin");
+  expect(events).toContainEqual(expect.objectContaining({ type: "timeline.item", item: expect.objectContaining({
+    type: "plugin", pluginId: "multica", kind: "task-description", version: 1, id: "multica:description:issue-one",
+    data: expect.objectContaining({ preview: "用户可以使用现有 CLI 登录。", truncated: false }),
+  }) }));
   expect(events.some(event => event.type === "timeline.item" && (event.item.type === "assistant_message" || event.item.type === "user_message"))).toBe(false);
   expect(events.at(-1)).toEqual({ type: "session.ready", requestId: "open", sessionId: "main" });
   const beforeClose = f.requests.length;
   await connection.send({ type: "session.close", requestId: "close", sessionId: "main" });
+  const firstRow = events.find(event => event.type === "timeline.item");
+  events.length = 0;
+  await connection.send({ type: "session.open", requestId: "reopen", sessionId: "restored-main", history: "replay",
+    persistence: JSON.parse(agent.handle.slice("plugin:".length)),
+    config: { cwd: agent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
+  expect(events.find(event => event.type === "timeline.item")).toEqual({ ...firstRow, sessionId: "restored-main" });
+  await connection.send({ type: "session.close", requestId: "close-restored", sessionId: "restored-main" });
+  events.length = 0;
+  await connection.send({ type: "session.open", requestId: "skip", sessionId: "existing-history", history: "skip",
+    persistence: JSON.parse(agent.handle.slice("plugin:".length)),
+    config: { cwd: agent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
+  expect(events.some(event => event.type === "timeline.item")).toBe(false);
   await connection.close();
   expect(f.requests).toHaveLength(beforeClose);
+});
+
+it("a large task description stays within the plugin row limit and can be read completely through authorized pages", async () => {
+  const f = await fixture();
+  const description = `${"中文😀\n\\\"".repeat(15_000)}最终段落，不能截断。`;
+  f.issues[0].description = description;
+  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const provider = await f.server.providers.get("multica")!.connect({ versions: [1], capabilities: ["session.persistence", "timeline.plugin"] });
+  const events: ProviderEvent[] = [];
+  provider.onEvent(event => events.push(event));
+  const agent = f.native.agents[0];
+  await provider.send({ type: "session.open", requestId: "large", sessionId: "large-main", history: "replay",
+    persistence: JSON.parse(agent.handle.slice("plugin:".length)),
+    config: { cwd: agent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
+  await provider.close();
+  const row = events.find(event => event.type === "timeline.item" && event.item.type === "plugin");
+  expect(row?.type).toBe("timeline.item");
+  if (row?.type !== "timeline.item" || row.item.type !== "plugin") throw new Error("Task description row missing");
+  expect(Buffer.byteLength(JSON.stringify(row.item))).toBeLessThan(64 * 1024);
+  expect(row.item.data).toMatchObject({ truncated: true });
+  const data = z.object({ connectionKey: z.string(), issueId: z.string(), revision: z.string(), preview: z.string() }).parse(row.item.data);
+  expect(data.preview.length).toBeLessThan(description.length);
+  let offset: number | null = 0;
+  let full = "";
+  let pages = 0;
+  while (offset !== null) {
+    const page: { text: string; nextOffset: number | null } = await f.server.rpc(readDescription,
+      { connectionKey: data.connectionKey, issueId: data.issueId, revision: data.revision, offset }, f.paseo);
+    expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThan(64 * 1024);
+    full += page.text;
+    offset = page.nextOffset;
+    pages++;
+  }
+  expect(pages).toBeGreaterThan(1);
+  expect(full).toBe(description);
+  await expect(f.server.rpc(readDescription, { ...data, connectionKey: "another-user", offset: 0 }, f.paseo)).rejects.toThrow();
+  f.issues[0].description = "任务描述已更新";
+  await f.server.rpc(bootstrap, {}, f.paseo);
+  await expect(f.server.rpc(readDescription, { ...data, offset: 0 }, f.paseo)).rejects.toThrow();
 });

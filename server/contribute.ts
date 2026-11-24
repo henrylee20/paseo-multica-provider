@@ -7,6 +7,8 @@ import { StateStore } from "./state.js";
 import { SidebarSynchronizer } from "./sync.js";
 import { connectNativeHost, type NativeHost } from "./native-host.js";
 import { createMulticaProvider } from "./provider.js";
+import { readTaskDescription } from "../shared/description.js";
+import { descriptionRevision, descriptionSlice } from "./task-description.js";
 
 export interface ServerDependencies extends ConnectionDependencies {
   stateDirectory: string;
@@ -37,6 +39,17 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     const owningHome = environment.PASEO_HOME ?? "";
     const store = new StateStore(dependencies.stateDirectory ?? join(owningHome || join(dependencies.homeDirectory ?? homedir(), ".paseo"), "multica-provider"));
     server.registerProvider(createMulticaProvider(store));
+    server.handle(readTaskDescription, async input => {
+      const current = await connection();
+      if (input.connectionKey !== current.connectionKey) throw new Error("Task description belongs to another connection");
+      const issue = (await store.read()).connections[current.connectionKey]?.issues[input.issueId];
+      if (!issue || descriptionRevision(issue.description) !== input.revision || input.offset > issue.description.length) {
+        throw new Error("Task description changed or is unavailable; reopen the discussion");
+      }
+      const text = descriptionSlice(issue.description, input.offset, 8192);
+      const nextOffset = input.offset + text.length;
+      return { text, nextOffset: nextOffset < issue.description.length ? nextOffset : null };
+    });
     const synchronizer = new SidebarSynchronizer({ store, connection,
       connectHost: () => (dependencies.connectHost ?? connectNativeHost)(owningHome), intervalMs: dependencies.syncIntervalMs ?? 15_000 });
     server.handle(syncBootstrap, async (_, context) => {
