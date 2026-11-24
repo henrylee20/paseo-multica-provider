@@ -9,6 +9,23 @@ export type NativeHost = Pick<DaemonClient, "listHosts" | "addProject" | "rename
   "createWorkspace" | "setWorkspaceTitle" | "fetchAgents" | "importAgent" | "updateAgent" | "close" |
   "archiveWorkspace" | "restoreWorkspace" | "fetchAgent" | "archiveAgent" | "refreshAgent" | "fetchAgentTimeline">;
 
+/** Directory filters are hints; prove the complete stable identity locally.
+ * An incomplete/cyclic directory is never evidence that import is needed. */
+export async function findNativeDiscussion(host: NativeHost, expected: { workspaceId: string; provider: string; labels: Record<string, string> }) {
+  let cursor: string | undefined;
+  const cursors = new Set<string>();
+  for (;;) {
+    const page = await host.fetchAgents({ filter: { labels: expected.labels, includeArchived: true }, page: { limit: 100, cursor } });
+    const match = page.entries.find(({ agent }) => agent.workspaceId === expected.workspaceId && agent.provider === expected.provider &&
+      Object.entries(expected.labels).every(([key, value]) => agent.labels[key] === value));
+    if (match) return match.agent;
+    if (!page.pageInfo.hasMore) return undefined;
+    const next = page.pageInfo.nextCursor;
+    if (!next || cursors.has(next)) throw new Error("Incomplete native discussion pagination");
+    cursors.add(next); cursor = next;
+  }
+}
+
 /** The native directory contains active workspaces, without an archivedAt field.
  * idPrefix is accepted but ignored by the host, so check exact IDs across pages. */
 export async function findActiveWorkspace(host: NativeHost, workspaceId: string) {

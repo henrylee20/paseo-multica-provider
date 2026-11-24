@@ -73,7 +73,7 @@ export function ConnectionScreen({ host, theme, navigation }: PluginSurfaceProps
       if (result.status !== "ready") { setWorkspaceFailure(result.message ?? "同步暂不可用，请重试。"); return; }
       setWorkspaceFailure(null);
       setAttempt(value => value + 1);
-    } catch { setWorkspaceFailure("工作区规则保存或同步失败，请重试。"); }
+    } catch { setWorkspaceFailure("Multica 工作区规则保存或同步失败，请重试。"); }
     finally { setSavingWorkspace(null); }
   }
 
@@ -112,8 +112,8 @@ export function ConnectionScreen({ host, theme, navigation }: PluginSurfaceProps
     </SettingsSection>
     <ConnectionHistory theme={theme} currentKey={status?.connectionKey} />
     <ReadonlyHistory theme={theme} />
-    <SettingsSection title="工作区与筛选规则">
-      <Text style={muted}>显式启用后导入“未开始”和“进行中”状态类别的任务；初始不限制具体状态、负责人、Multica 项目和标签，可配置组合条件。未启用的工作区不会导入。</Text>
+    <SettingsSection title="Multica 工作区与筛选规则">
+      <Text style={muted}>显式启用后导入“未开始”和“进行中”状态类别的任务；初始不限制具体状态、负责人、Multica 项目和标签，可配置组合条件。未启用的 Multica 工作区不会导入。</Text>
       {workspaceFailure ? <Text accessibilityRole="alert" style={{ color: theme.colors.statusDanger }}>{workspaceFailure}</Text> : null}
       {workspaces.filter(workspace => workspace.connectionKey === status?.connectionKey).map(workspace => <SettingsCard key={`${workspace.connectionKey}:${workspace.id}`}>
         <SettingsAction label={workspace.name} hint={workspace.enabled ? "已启用：按已保存的筛选规则同步" : "尚未启用"}

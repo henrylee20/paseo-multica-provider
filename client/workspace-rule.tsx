@@ -42,9 +42,9 @@ export function WorkspaceRuleEditor({ workspaceId, connectionKey, initialRule, t
   }
   return <View style={{ gap: 16 }}>
     <Text style={{ color: theme.colors.foregroundMuted }}>字段之间同时满足；同字段可选多项，命中任一即可。标签也是任一命中；不选表示不限。选择具体状态会先清除类别限制；之后仍可组合类别。</Text>
-    <Text style={{ color: theme.colors.foregroundMuted }}>直接分配给成员与分配给 Agent / Squad 分别选择。Multica 项目只限制任务范围，任务仍归入此工作区对应的 Paseo 项目。</Text>
+    <Text style={{ color: theme.colors.foregroundMuted }}>直接分配给成员与分配给 Agent / Squad 分别选择。Multica 项目只限制任务范围，任务仍归入此 Multica 工作区对应的 Paseo 项目。</Text>
     {failure ? <Text accessibilityRole="alert" style={{ color: theme.colors.statusDanger }}>{failure}</Text> : null}
-    {!catalog ? <SettingsAction label="读取工作区筛选目录" actionLabel="重试" onPress={() => setAttempt(value => value + 1)} /> : <>
+    {!catalog ? <SettingsAction label="读取 Multica 工作区筛选目录" actionLabel="重试" onPress={() => setAttempt(value => value + 1)} /> : <>
       <Choices title="状态类别" choices={categories} values={rule.statusCategories} disabled={saving} onChange={statusCategories => setRule({ ...rule, statusCategories: statusCategories as TaskRule["statusCategories"] })} />
       <Choices title="具体状态" choices={catalog.statuses.map(item => ({ id: item.key, name: `${item.name} · ${item.category}` }))} values={rule.statuses} disabled={saving} onChange={statuses => setRule({ ...rule, statuses, statusCategories: [] })} />
       <Choices title="负责人" choices={catalog.assignees.map(item => ({ id: `${item.type}:${item.id}`, name: `${actorName[item.type]} · ${item.name}` }))} values={rule.assignees.map(item => `${item.type}:${item.id}`)} disabled={saving}

@@ -36,11 +36,11 @@ export function HiddenObjects({ theme, refreshKey }: { theme: PluginSurfaceProps
     finally { setSaving(false); }
   }
   return <SettingsSection title="人工隐藏">
-    <Text style={{ color: theme.colors.foregroundMuted }}>关闭讨论 tab 或归档 Paseo 工作区后持续隐藏，同一 daemon 的客户端共享此选择。恢复工作区不会恢复其他隐藏讨论；恢复某个讨论会先恢复其原工作区。恢复后仍遵循工作区筛选规则。</Text>
+    <Text style={{ color: theme.colors.foregroundMuted }}>关闭讨论 tab 或归档 Paseo 工作区后持续隐藏，同一 daemon 的客户端共享此选择。恢复 Paseo 工作区不会恢复其他隐藏讨论；恢复某个讨论会先恢复其原 Paseo 工作区。恢复后仍遵循 Multica 工作区筛选规则。</Text>
     {failure ? <Text accessibilityRole="alert" style={{ color: theme.colors.statusDanger }}>{failure}</Text> : null}
     {objects.map(object => <SettingsCard key={JSON.stringify([object.connectionKey, object.issueId, object.kind, object.rootId])}>
       <SettingsAction label={object.title} hint={object.kind === "workspace" ? "保留原目录；讨论 tab 需分别恢复。" : "恢复原身份与已有历史；其他隐藏讨论保持隐藏。"}
-        actionLabel={object.kind === "workspace" ? "仅恢复工作区" : "恢复此讨论"} disabled={saving}
+        actionLabel={object.kind === "workspace" ? "仅恢复 Paseo 工作区" : "恢复此讨论"} disabled={saving}
         onPress={() => { void restoreObject(object); }} />
     </SettingsCard>)}
     {!objects.length && !failure ? <Text style={{ color: theme.colors.foregroundMuted }}>没有人工隐藏的对象。</Text> : null}

@@ -4,6 +4,8 @@ import { useRpc, type PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { Markdown, SettingsAction, SettingsCard, SettingsSection } from "@getpaseo/plugin/client/ui";
 import { cachedIssueSnapshot, issueHistoryList, issueHistoryRead } from "../shared/access.js";
 import type { z } from "zod";
+import { RunMetadataView } from "./run-metadata.js";
+import { collectText } from "./chunked-text.js";
 
 type Summary = z.infer<typeof issueHistoryList.output>["issues"][number];
 type Snapshot = z.infer<typeof cachedIssueSnapshot>;
@@ -16,6 +18,8 @@ export function ReadonlyHistory({ theme }: { theme: PluginSurfaceProps["theme"] 
   const [opened, setOpened] = useState<{ key: string; snapshot: Snapshot } | null>(null);
   const [loading, setLoading] = useState<string | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
+  const [scope] = useState({ active: true });
+  useEffect(() => { scope.active = true; return () => { scope.active = false; }; }, [scope]);
   useEffect(() => {
     let active = true;
     const refresh = async () => {
@@ -29,17 +33,11 @@ export function ReadonlyHistory({ theme }: { theme: PluginSurfaceProps["theme"] 
   async function open(issue: Summary) {
     const id = key(issue); setLoading(id);
     try {
-      let text = "", offset = 0;
-      for (;;) {
-        const page = await read({ connectionKey: issue.connectionKey, issueId: issue.issueId, revision: issue.revision, offset });
-        text += page.text;
-        if (page.nextOffset === null) break;
-        if (page.nextOffset <= offset) throw new Error("Incomplete cache stream");
-        offset = page.nextOffset;
-      }
+      const text = await collectText(offset => read({ connectionKey: issue.connectionKey, issueId: issue.issueId, revision: issue.revision, offset }), () => scope.active);
+      if (text === undefined) return;
       setOpened({ key: id, snapshot: cachedIssueSnapshot.parse(JSON.parse(text)) }); setFailure(null);
-    } catch { setFailure("缓存已变化或读取失败，请重新读取历史。"); }
-    finally { setLoading(null); }
+    } catch { if (scope.active) setFailure("缓存已变化或读取失败，请重新读取历史。"); }
+    finally { if (scope.active) setLoading(null); }
   }
   const muted = { color: theme.colors.foregroundMuted };
   const text = { color: theme.colors.foreground };
@@ -63,6 +61,7 @@ export function ReadonlyHistory({ theme }: { theme: PluginSurfaceProps["theme"] 
         </View>)}
         {opened.snapshot.runs.map(run => <View key={run.id} style={{ gap: 6 }}>
           <Text style={text}>{run.agentName} · Run {run.id} · {run.status} · {run.ownerRootId ?? "归属待定"}</Text>
+          <RunMetadataView metadata={run.metadata} theme={theme} />
           {run.messages?.map(message => <View key={message.seq}>
             <Text style={muted}>#{message.seq} · {message.type} · {message.tool ?? ""}</Text>
             {message.call_id ? <Text style={muted}>调用 ID：{message.call_id}</Text> : null}

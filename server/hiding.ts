@@ -1,7 +1,8 @@
 import type { PluginHookAgent } from "@getpaseo/plugin/server";
 import { StateStore, type IssueMapping } from "./state.js";
-import { ensureWorkspaceActive, type NativeHost } from "./native-host.js";
+import { archiveClosedDiscussion, ensureWorkspaceActive, type NativeHost } from "./native-host.js";
 import { assertWritableIssue } from "./access.js";
+import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
 
 export function discussionAgent(issue: IssueMapping, rootId: string) {
   return rootId === "main" ? issue.mainAgentId : issue.threads[rootId]?.agentId;
@@ -10,10 +11,30 @@ export function hiddenAgent(issue: IssueMapping, agentId: string) {
   return issue.manualHidden.discussions.some(rootId => discussionAgent(issue, rootId) === agentId);
 }
 
+/** Host workspace restore may also revive archived children, including legacy
+ * timestamp matches. Only an explicitly selected discussion may leave hiding. */
+export async function restoreWorkspacePreservingHidden(host: NativeHost, lifecycle: DiscussionLifecycle, issue: IssueMapping,
+  address: { connectionKey: string; issueId: string }, selectedRootId?: string) {
+  const roots = issue.manualHidden.discussions.filter(rootId => rootId !== selectedRootId);
+  const release = await lifecycle.hold(roots.map(rootId => ({ ...address, rootId })));
+  try {
+    await ensureWorkspaceActive(host, issue.workspaceId);
+  } finally {
+    // Restoration may have succeeded despite a lost acknowledgement. Repair
+    // hidden children before releasing the guard even when the request failed.
+    try {
+      for (const rootId of roots) {
+        const agentId = discussionAgent(issue, rootId);
+        if (agentId) await archiveClosedDiscussion(host, agentId, issue);
+      }
+    } finally { release(); }
+  }
+}
+
 /** Native hooks carry no bulk-archive cause. Preserve every explicit tab hide;
  * a workspace restore therefore leaves its discussions available for separate restore. */
 export class ManualHiding {
-  constructor(private readonly store: StateStore) {}
+  constructor(private readonly store: StateStore, private readonly lifecycle: DiscussionLifecycle) {}
   async archivedAgent(agent: PluginHookAgent) {
     if (agent.provider !== "multica") return;
     await this.store.update(state => {
@@ -46,12 +67,10 @@ export class ManualHiding {
     const issue = (await this.store.read()).connections[input.connectionKey]?.issues[input.issueId];
     if (!issue?.workspaceCreated) throw new Error("Mapped workspace unavailable");
     assertWritableIssue(issue);
-    if (issue.archiveReason) throw new Error("任务目前已退出筛选范围；请先启用并调整工作区规则，再恢复隐藏对象。");
+    if (issue.archiveReason) throw new Error("任务目前已退出筛选范围；请先启用并调整 Multica 工作区规则，再恢复隐藏对象。");
     const agentId = input.rootId === undefined ? undefined : discussionAgent(issue, input.rootId);
     if (input.rootId !== undefined && !agentId) throw new Error("Mapped discussion unavailable");
-    // Native workspace restoration does not restore its agents. Keep the original
-    // identities, cwd and history; refresh only a confirmed archived selected agent.
-    await ensureWorkspaceActive(host, issue.workspaceId);
+    await restoreWorkspacePreservingHidden(host, this.lifecycle, issue, input, input.rootId);
     if (agentId) {
       const existing = await host.fetchAgent(agentId);
       if (!existing?.agent || existing.agent.workspaceId !== issue.workspaceId || existing.agent.cwd !== issue.cwd) throw new Error("Mapped native discussion unavailable");

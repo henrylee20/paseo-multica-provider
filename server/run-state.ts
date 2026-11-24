@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { runStatusSchema } from "../shared/runs.js";
+import { runMetadataSchema, runStatusSchema } from "../shared/runs.js";
 
 export const storedRunSchema = z.object({
   agentId: z.string(), agentName: z.string(), status: runStatusSchema,
@@ -9,5 +9,6 @@ export const storedRunSchema = z.object({
   generatedCommentIds: z.array(z.string()).default([]),
   deliveredCommentIds: z.array(z.string()).optional(), supplementCommentIds: z.array(z.string()),
   createdAt: z.string().optional(), startedAt: z.string().optional(), completedAt: z.string().optional(),
+  metadata: runMetadataSchema.optional(),
 });
 export type StoredRun = z.infer<typeof storedRunSchema>;

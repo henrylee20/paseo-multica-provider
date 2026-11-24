@@ -7,9 +7,9 @@ import { taskRuleSchema, type TaskRule, type SyncStatus } from "../shared/contra
 import { issueQuery } from "./filters.js";
 import { WorkspaceEvents, type WorkspaceEvent } from "./workspace-events.js";
 import { remoteFetch, type AuthenticatedConnection } from "./connection.js";
-import { archiveClosedDiscussion, ensureWorkspaceActive, findActiveWorkspace, type NativeHost } from "./native-host.js";
+import { ensureWorkspaceActive, findActiveWorkspace, findNativeDiscussion, type NativeHost } from "./native-host.js";
 import { StateStore, connectionState } from "./state.js";
-import { discussionAgent, hiddenAgent } from "./hiding.js";
+import { hiddenAgent, restoreWorkspacePreservingHidden } from "./hiding.js";
 import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
 
 export const workspaceSchema = z.object({ id: z.string().min(1), name: z.string(), slug: z.string().min(1) });
@@ -312,17 +312,7 @@ export class SidebarSynchronizer {
         const mapping = (await this.options.store.read()).connections[connection.connectionKey].issues[issue.id];
         if (mapping.manualHidden.workspace) continue;
         if (mapping.archiveReason) {
-          const releaseHidden = await this.options.lifecycle.hold(mapping.manualHidden.discussions.map(rootId => ({ connectionKey: connection.connectionKey, issueId: issue.id, rootId })));
-          try {
-            await ensureWorkspaceActive(this.host, mapping.workspaceId);
-            // Some hosts restore archived child records with the workspace,
-            // including legacy timestamp matches. Reapply durable tab hiding
-            // only after its provider resource and native activity are closed.
-            for (const rootId of mapping.manualHidden.discussions) {
-              const agentId = discussionAgent(mapping, rootId);
-              if (agentId) await archiveClosedDiscussion(this.host, agentId, mapping);
-            }
-          } finally { releaseHidden(); }
+          await restoreWorkspacePreservingHidden(this.host, this.options.lifecycle, mapping, { connectionKey: connection.connectionKey, issueId: issue.id });
           for (const agentId of mapping.ruleArchivedAgentIds) {
             if (hiddenAgent(mapping, agentId)) continue;
             const existing = await this.host.fetchAgent(agentId);
@@ -348,14 +338,7 @@ export class SidebarSynchronizer {
         let mainAgentId = mapping.mainAgentId;
         if (!mainAgentId && !mapping.manualHidden.discussions.includes("main")) {
           const labels = issueLabels(connection.connectionKey, issue.id);
-          let cursor: string | undefined;
-          do {
-            const page = await this.host.fetchAgents({ filter: { labels, includeArchived: true }, page: { limit: 100, cursor } });
-            mainAgentId = page.entries.find(entry => entry.agent.workspaceId === mapping.workspaceId && Object.entries(labels).every(([key, value]) => entry.agent.labels[key] === value))?.agent.id;
-            if (mainAgentId || !page.pageInfo.hasMore) break;
-            if (!page.pageInfo.nextCursor || page.pageInfo.nextCursor === cursor) throw new Error("Incomplete native agent pagination");
-            cursor = page.pageInfo.nextCursor;
-          } while (true);
+          mainAgentId = (await findNativeDiscussion(this.host, { workspaceId: mapping.workspaceId, provider: providerId, labels }))?.id;
           if (!mainAgentId) {
             mainAgentId = (await this.host.importAgent({ providerId, providerHandleId: `plugin:${JSON.stringify(mainPersistence(connection.connectionKey, issue.id))}`,
               cwd, workspaceId: mapping.workspaceId, labels })).id;

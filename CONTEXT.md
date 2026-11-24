@@ -109,3 +109,7 @@
 2026-11-25 #16 增加 `npm run build`：输出 `dist/paseo-multica-provider-0.1.0/`、`.tar.gz` 与 SHA-256 校验文件，带 manifest、锁文件、两端源码、文档及开发检查配置，不打包依赖、Git 或运行状态。Paseo 本地目录安装不执行 manifest build，README 因此先运行 `npm ci --omit=dev --ignore-scripts` 并要求保留安装目录；托管 Git 安装才执行 build。类型检查和 Vitest 明确排除 dist，避免生成产物后重复检查／运行测试。使用独立真实 npm-ci 依赖及解压后的全新生产依赖目录验证，未改用户原 node_modules 符号链接。
 
 实际云端仅在用户授权 HENR-2 完成默认 CLI、空规则、project-only 导入、普通评论新 Thread 无 Run、typed mention 回复产生唯一 Run、权威 GET＋同 key 原样 POST 去重与原生 Stop。服务端最终 cancelled、原生 idle，进程清理证据 UNKNOWN。真实自部署、CLI Token／命名 profile 的真实轮换、原生 queue／视觉、丰富真实输出及真实权限撤销仍未验证；不能用 loopback、静态契约或 SDK 测试替代这些结果。独立 0.17.4 daemon 的响应丢失、Stop 栅栏、身份切换和重启证据保持单列。完整可复验说明与证据索引见交付验收记录。
+
+2026-11-25 最终评审修复保留任务快照的错误、失败原因及远端执行路径，完整可选元数据独立于消息缓存；`run.open` 返回 `metadataRevision`，新增有界版本化 `run.metadata.read`，原 `run.read` 继续为消息 JSON 数组。执行段与只读历史原样显示来源字段，REMOTE 路径不作为本地 cwd 或链接；空／不可用消息不再遮蔽任务失败。省略、null、空字符串、长值、版本变化和离线重启有公开边界回归。原生讨论身份查找共用带 provider／完整标签／Paseo 工作区 ID 校验与循环游标检查的适配器；客户端分块正文读取共用前进检查与取消处理，调用者继续决定版本及 JSON 解析。管理界面与 README 区分 Multica 工作区和 Paseo 工作区。
+
+同轮实际 0.17.4 自动重新归档修复在 `3f5b940` 通过精确时间戳、全部可见讨论重开后的回退及活动隐藏缓存投影测试，保留原恢复集合且 0 远端 cancel。后续手动恢复用例确认同一回退会意外重开其他隐藏讨论，本轮将已有保护共用于手动与自动恢复，仅明确选定的讨论解除隐藏；公开 hook／RPC 测试覆盖两类手动恢复和已接受 Stop 的等待。实际手动入口复验由集成任务继续记录。保护结束后的单独显式原生历史查询可能再开 provider，不声称任意查询后始终无本地活动；管理页只读缓存读取无需重开原生讨论。细节见 ADR 0002／0003 及最新验收记录。

@@ -3,6 +3,13 @@ import { threadAddress } from "./threads.js";
 import { z } from "zod";
 
 export const runStatusSchema = z.enum(["queued", "dispatched", "running", "waiting_local_directory", "deferred", "completed", "failed", "cancelled"]);
+// Preserve source values, including explicit null and empty strings. These can
+// be arbitrarily large and belong in paged cached reads, never native rows.
+export const runMetadataSchema = z.object({
+  error: z.string().nullish(), failure_reason: z.string().nullish(),
+  work_dir: z.string().nullish(), relative_work_dir: z.string().nullish(),
+});
+export type RunMetadata = z.infer<typeof runMetadataSchema>;
 export const runSummarySchema = z.object({
   connectionKey: z.string().max(256), issueId: z.string().max(256), rootId: z.string().max(256), runId: z.string().max(256),
   agentId: z.string().max(256), agentName: z.string().max(2000), status: runStatusSchema,
@@ -21,9 +28,10 @@ export const runMessageSchema = z.object({
 export type RunMessage = z.infer<typeof runMessageSchema>;
 export const runAddress = threadAddress.extend({ runId: z.string() });
 export const runOpen = defineRpc({ name: "run.open", input: runAddress, output: z.object({
-  status: z.enum(["ready", "cached", "unavailable"]), revision: z.string().optional(), message: z.string().optional(),
+  status: z.enum(["ready", "cached", "unavailable"]), revision: z.string().optional(), metadataRevision: z.string().optional(), message: z.string().optional(),
 }) });
 // Detailed history is a versioned JSON stream, split below the native row/RPC
 // budget even when one tool result is much larger than a single transport frame.
 export const runRead = defineRpc({ name: "run.read", input: runAddress.extend({ revision: z.string(), offset: z.number().int().nonnegative() }),
   output: z.object({ text: z.string(), nextOffset: z.number().int().nonnegative().nullable() }) });
+export const runMetadataRead = defineRpc({ name: "run.metadata.read", input: runRead.input, output: runRead.output });
