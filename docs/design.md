@@ -61,6 +61,8 @@
 
 这些约束来自公开源码核查，并非用户实例的运行验证。
 
+#12 进一步核对发送层次：公开 provider 的 prompt 只有 `auto | steer`；原生 interrupt 在 host 取消确认后才产生 `auto` prompt。原生 queue 保留在客户端，agent 转为空闲时释放队首，以 SDK `activeTurnBehavior: steer` 避免恰好开始的新 turn 被中断；provider 空闲时收到 `auto`，运行时收到 `steer`。手动“立即发送”复用普通 composer 路径并采用当前发送设置。不得构造不存在的 provider queue 参数，或把 Multica queued Run 当作这份客户端队列。[公开 provider 类型](https://github.com/getpaseo/paseo/blob/1c00b365c9e0b74c1580eba33d905d693125ae21/packages/plugin/src/server/provider.ts#L132)、[composer 队列与发送](https://github.com/getpaseo/paseo/blob/1c00b365c9e0b74c1580eba33d905d693125ae21/packages/app/src/composer/actions.ts#L246)、[队列释放](https://github.com/getpaseo/paseo/blob/1c00b365c9e0b74c1580eba33d905d693125ae21/packages/app/src/runtime/host-runtime.ts#L2563)、[手动立即发送](https://github.com/getpaseo/paseo/blob/1c00b365c9e0b74c1580eba33d905d693125ae21/packages/app/src/composer/index.tsx#L1949)。这些固定源码证据和公开边界回归不能替代目标版本实际 queue 控件验收；已验证的实际 0.15.3 SDK 中断顺序与仍未验证的视觉／queue 操作分别记录。
+
 ## 整体确认与实施验证
 
 Q1–Q27 与补充 S1 均为明确的用户要求；Q13 修订了 Q7 的关闭运行中 tab 行为，S1 将默认鉴权改为复用 CLI，最终内容以修订后的汇总规格为准。

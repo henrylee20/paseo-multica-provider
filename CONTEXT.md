@@ -48,6 +48,10 @@
 
 用户已明确要求 ADR 和本文件随实现提交到集成分支。
 
+2026-11-25 #12 核对原生发送层次并增加公开贡献／provider／RPC 回归。公开 prompt 仅有 `auto | steer`；显式 interrupt 由宿主先调用原生停止，成功后才交给 provider 普通输入，失败不得投递。原生 queue 在客户端持有，tab 的全部未结束 Run 终结后释放队首，以 SDK steer 避免释放瞬间新活动被取消；空闲到 provider 时仍是普通 auto。插件不新增队列、不发送远端强制 steering，也不把 Multica queued Run 当作原生待发输入。依赖 #9／#10 已具备该行为，此切片保留其实现并锁定多 Run、固定取消集合、部分失败、重复同 ID 输入、Thread 目标与释放后新周期竞态；没有为获得测试 RED 改造既有正确实现。原生“立即发送”遵循当前 composer 设置，可能先中断。
+
+母任务在宿主更新前已取得实际 0.15.3 SDK 的普通发送与显式 interrupt 证据；原生 queue 控件和视觉体验仍未验证。工作中 `/opt/Paseo` 原地更新到 0.17.4，而母任务拥有的旧 daemon 暂仍是 0.15.3；不得把更新后 reload 失败当作本插件 SDK 不兼容，亦不得把旧版本验收标记为新版本通过。manifest 继续只声明 `>=0.15.3`，无最高版本。实际运行环境重启与最终验收由母任务负责。
+
 2026-11-24 #6 增加按连接持久化的 workspace／本地主讨论／Thread 人工隐藏。公开 `agent.archive.after` 与 `workspace.archive.after` 捕获原生关闭和归档；自动归档原因先于宿主事件保存，因此不误记成人工选择。新 Thread 发现、评论 WebSocket 失效、规则退出重返、多个客户端引导及正常重启都保留隐藏；普通 session.close 和贡献清理只释放资源。
 
 管理页独立读取所有连接的本地隐藏对象，CLI 离线时仍可列出与恢复缓存历史。恢复操作绑定原 workspace、agent 与 cwd，不 resume 新身份、不重复 import，也不 refresh 活跃 agent。因宿主归档事件没有 bulk cause，workspace 归档关闭的讨论同样分别列出：仅恢复工作区不恢复 tab；恢复某个讨论先恢复原 workspace，再恢复选定且已归档的 agent。失败或回执丢失保留隐藏，重试不会 refresh 已恢复的活跃 tab。具体取舍与原生证据见 ADR 0002。真实宿主/真实 Multica 验收继续由母工单负责。

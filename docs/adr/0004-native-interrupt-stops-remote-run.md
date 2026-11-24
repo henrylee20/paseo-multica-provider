@@ -18,3 +18,15 @@ workspace 归档、空闲资源释放与连接关闭仍仅处理本地展示或�
 每个连接／Issue／讨论的 `stopEpochs` 是 #10／#11 投递工作的持久栅栏。投递应在原生接收时保存 epoch，并在持久领取待发送或重试工作时通过 `StopCoordinator.guardDelivery` 校验；停止推进 epoch 后，旧待投递不能重新触发执行。该接口只提供停止协调，不在 #9 内构造评论投递或自动重试，也不承诺撤回已经发出的远端请求。
 
 公开贡献测试覆盖原生 provider 中断、多 Run 与跨 Thread 归属、并发发现后的固定集合、终态竞态、旧活动快照、部分失败、归档后持久告警及不恢复 tab 的单项重试，以及纯生命周期不取消；编译后的管理页验证停止结果和重试动作。真实 Paseo 0.15.3 原生停止／关闭与目标 Multica 服务验收由母工单单独保留证据，不以模拟宿主测试替代。
+
+## 显式发送模式的宿主边界（#12）
+
+公开 `ProviderPrompt.delivery` 只有 `auto | steer`，不含 `interrupt`、`queue` 或宿主内部的 `expectedTurnId`。因此 provider 无法从单条 prompt 反推出用户点击了哪个控件，也不新增插件队列。默认运行中普通发送仍以 `prompt.steer` 仅确认输入接收，不向 Multica 提交强制 steering。
+
+显式 interrupt 由宿主先运行取消路径，等待原生停止确认，再发送普通 `auto` prompt。取消不被确认时，实际 0.15.3 的替换请求返回 `Cannot replace agent … because its active run cancellation was not acknowledged`，不进入 provider 投递接收。provider 保持逐项真实停止结果及失败活动，不能为让新评论继续发表而伪造成功。母任务在更新宿主前已通过实际 0.15.3 SDK 验证该顺序；这不是原生视觉控件验收。
+
+固定 Paseo 源码的 `queueComposerMessage` 将输入保留在客户端；`HostRuntime.drainQueuedAgentMessage` 在该 agent 活动转为空闲时，只释放队首，并以 SDK `activeTurnBehavior: steer` 发送。全部属于 tab 的 Run 终结才结束聚合 turn；其他 tab 的活动不影响它。若释放时新自主 turn 已开始，host 以 steer 接收，provider 返回此新周期的 UUID。空闲时则是普通 `auto` prompt。`sendQueuedComposerMessageNow` 的手动立即发送使用普通 composer 路径，按当前设置选择 steer 或 interrupt，不能一概称为不中断的队列释放。
+
+上述客户端队列不是 Multica 的 queued Run，也不是插件已持久接收的投递。原生队列释放以接收为界；接收后的远端错误由稳定投递记录报告，不回头把评论已保存或 Run 已触发当作队列成功的定义。Paseo 客户端负责原生队列的存储、编辑和恢复。
+
+`tests/send-modes.test.ts` 从贡献注册入口驱动真实 provider/RPC，观察模拟 Multica 的评论和取消结果：普通接收不取消；显式中断的固定多 Run 集合及其后的单次同 Thread 投递；HTTP 503 与 HTTP 200 仍活动的部分失败；聚合空闲后的队列释放输入；新周期抢先开始后的接收及保存失败。测试明确只验证宿主发出的公开输入序列，不模拟出一个声称真实原生队列的插件实现。目标宿主原生 queue 控件与视觉验收仍未验证，不能据此标记完成。
