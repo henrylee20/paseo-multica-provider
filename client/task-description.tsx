@@ -1,15 +1,32 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRpc, type PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import { Markdown, SettingsAction } from "@getpaseo/plugin/client/ui";
 import { Text, View } from "react-native";
 import type { z } from "zod";
-import { readTaskDescription, taskDescriptionSchema } from "../shared/description.js";
+import { readTaskDescription, observeTaskDescription, taskDescriptionSchema } from "../shared/description.js";
 
 type DescriptionProps = PluginTimelineItemProps<z.output<typeof taskDescriptionSchema>>;
 
 export function TaskDescription(props: DescriptionProps) {
   const { connectionKey, issueId, revision } = props.item.data;
-  return <TaskDescriptionBody key={`${connectionKey}:${issueId}:${revision}`} {...props} />;
+  const observe = useRpc(observeTaskDescription);
+  const [cached, setCached] = useState(props.item.data);
+  useEffect(() => {
+    let active = true;
+    let inFlight = false;
+    setCached(props.item.data);
+    async function update() {
+      if (inFlight) return;
+      inFlight = true;
+      try { const data = await observe({ connectionKey, issueId }); if (active) setCached(data); }
+      catch { /* The already-rendered description remains readable offline. */ }
+      finally { inFlight = false; }
+    }
+    void update();
+    const timer = setInterval(() => { void update(); }, 10_000);
+    return () => { active = false; clearInterval(timer); };
+  }, [observe, connectionKey, issueId, revision]);
+  return <TaskDescriptionBody key={`${connectionKey}:${issueId}:${cached.revision}`} {...props} item={{ ...props.item, data: cached }} />;
 }
 
 function TaskDescriptionBody({ item, theme }: DescriptionProps) {

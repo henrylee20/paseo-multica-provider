@@ -5,7 +5,7 @@ import type { ProviderEvent, ProviderRegistration } from "@getpaseo/plugin/serve
 import { StateStore } from "./state.js";
 import { mainPersistence, providerId } from "./sync.js";
 import { taskDescriptionKind, taskDescriptionVersion } from "../shared/description.js";
-import { taskDescriptionData } from "./task-description.js";
+import { taskDescriptionData, type TaskDescriptions } from "./task-description.js";
 import { projectRow, threadPersistence, type ThreadSynchronizer } from "./threads.js";
 import type { StoredRow } from "./thread-state.js";
 import type { StopCoordinator } from "./stops.js";
@@ -17,7 +17,7 @@ const persistenceSchema = z.object({ version: z.literal(1), data: z.object({
 const supported = ["session.persistence", "session.list", "timeline.plugin", "session.archive", "session.unarchive"];
 
 /** A Multica discussion projection, never a local code execution engine. */
-export function createMulticaProvider(store: StateStore, threads: ThreadSynchronizer, runs: RunSynchronizer, stops: StopCoordinator): ProviderRegistration {
+export function createMulticaProvider(store: StateStore, threads: ThreadSynchronizer, runs: RunSynchronizer, stops: StopCoordinator, descriptions: TaskDescriptions): ProviderRegistration {
   return {
     id: providerId, label: "Multica", description: "Multica 任务讨论（目录仅为本地占位目录）",
     status: async () => ({ available: true }),
@@ -28,12 +28,17 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
       const sessions = new Set<string>();
       const addresses = new Map<string, RunAddress>();
       const runSubscriptions = new Map<string, () => void>();
+      const descriptionSubscriptions = new Map<string, () => void>();
       const subscriptions = new Map<string, () => void>();
       let closed = false;
       const emit = (event: ProviderEvent) => { if (!closed) for (const listener of listeners) listener(event); };
-      const emitRow = (sessionId: string, address: { connectionKey: string; issueId: string; rootId: string }, row: StoredRow) => {
+      const emittedRows = new Map<string, Set<string>>();
+      const emitRow = (sessionId: string, address: { connectionKey: string; issueId: string; rootId: string }, row: StoredRow, includeOriginal = true) => {
+        const emitted = emittedRows.get(sessionId) ?? new Set<string>();
+        if (emitted.has(row.id)) return;
+        emitted.add(row.id); emittedRows.set(sessionId, emitted);
         const timestamp = row.role === "event" ? row.sourceUpdatedAt ?? row.sourceCreatedAt : row.sourceCreatedAt;
-        emit({ type: "timeline.item", sessionId, item: projectRow(address, row), ...(timestamp && Number.isFinite(Date.parse(timestamp)) ? { timestamp } : {}) });
+        if (includeOriginal || row.role === "event") emit({ type: "timeline.item", sessionId, item: projectRow(address, row), ...(timestamp && Number.isFinite(Date.parse(timestamp)) ? { timestamp } : {}) });
         if (row.role !== "event") emit({ type: "timeline.item", sessionId, item: {
           type: "plugin", id: `multica:comment-source:${row.commentId}`, pluginId: "multica", kind: "comment-event", version: 1,
           data: { ...address, recordId: row.id, commentId: row.commentId, category: "source", truncated: false,
@@ -77,17 +82,24 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
                 data: { connectionKey, issueId, rootId, title: issue.threads[rootId].title } } });
               const address = { connectionKey, issueId, rootId };
               if (input.history === "replay") for (const row of issue.threads[rootId].rows) emitRow(input.sessionId, address, row);
-              subscriptions.set(input.sessionId, threads.subscribe(address, row => emitRow(input.sessionId, address, row)));
+              subscriptions.set(input.sessionId, threads.subscribe(address, (row, includeOriginal) => emitRow(input.sessionId, address, row, includeOriginal), input.history !== "replay"));
             } else if (input.history === "replay") emit({ type: "timeline.item", sessionId: input.sessionId, item: {
               type: "plugin", pluginId: providerId, kind: taskDescriptionKind, version: taskDescriptionVersion,
               id: `multica:description:${parsed.data.data.issueId}`,
               data: taskDescriptionData(parsed.data.data.connectionKey, parsed.data.data.issueId, issue.description),
             } });
             if (parsed.data.data.discussion === "main") {
+              let revision = input.history === "replay" ? taskDescriptionData(parsed.data.data.connectionKey, parsed.data.data.issueId, issue.description).revision : undefined;
+              descriptionSubscriptions.set(input.sessionId, descriptions.subscribe(parsed.data.data.connectionKey, parsed.data.data.issueId, data => {
+                if (revision === data.revision) return;
+                revision = data.revision;
+                emit({ type: "timeline.item", sessionId: input.sessionId, item: { type: "plugin", pluginId: providerId, kind: taskDescriptionKind, version: taskDescriptionVersion,
+                  id: `multica:description:${parsed.data.data.issueId}`, data } });
+              }));
               const address = { connectionKey: parsed.data.data.connectionKey, issueId: parsed.data.data.issueId, rootId: "main" };
               emit({ type: "timeline.item", sessionId: input.sessionId, item: { type: "plugin", id: `multica:thread:main:${address.issueId}`, pluginId: "multica", kind: "thread", version: 1, data: { ...address, title: "任务事件" } } });
               if (input.history === "replay") for (const row of issue.mainHistory.rows) emitRow(input.sessionId, address, row);
-              subscriptions.set(input.sessionId, threads.subscribe(address, row => emitRow(input.sessionId, address, row)));
+              subscriptions.set(input.sessionId, threads.subscribe(address, (row, includeOriginal) => emitRow(input.sessionId, address, row, includeOriginal), input.history !== "replay"));
             }
             const address = { connectionKey: parsed.data.data.connectionKey, issueId: parsed.data.data.issueId, rootId: parsed.data.data.discussion === "thread" ? parsed.data.data.rootId : "main" };
             addresses.set(input.sessionId, address);
@@ -118,6 +130,8 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
           }
           if (input.type === "session.close") {
             sessions.delete(input.sessionId);
+            emittedRows.delete(input.sessionId);
+            descriptionSubscriptions.get(input.sessionId)?.(); descriptionSubscriptions.delete(input.sessionId);
             addresses.delete(input.sessionId);
             runSubscriptions.get(input.sessionId)?.(); runSubscriptions.delete(input.sessionId);
             subscriptions.get(input.sessionId)?.(); subscriptions.delete(input.sessionId);
@@ -147,7 +161,7 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
           }
           if ("requestId" in input) emit({ type: "request.failed", requestId: input.requestId, error: { code: "unsupported", message: "此操作尚未支持。" } });
         },
-        async close() { for (const unsubscribe of runSubscriptions.values()) unsubscribe(); runSubscriptions.clear(); for (const unsubscribe of subscriptions.values()) unsubscribe(); subscriptions.clear(); sessions.clear(); addresses.clear(); listeners.clear(); closed = true; },
+        async close() { for (const unsubscribe of descriptionSubscriptions.values()) unsubscribe(); descriptionSubscriptions.clear(); for (const unsubscribe of runSubscriptions.values()) unsubscribe(); runSubscriptions.clear(); for (const unsubscribe of subscriptions.values()) unsubscribe(); subscriptions.clear(); sessions.clear(); addresses.clear(); listeners.clear(); closed = true; },
       };
     },
   };

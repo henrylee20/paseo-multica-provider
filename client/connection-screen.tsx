@@ -1,3 +1,4 @@
+import { SyncState } from "./sync-status.js";
 import { useEffect, useState } from "react";
 import { Text, View } from "react-native";
 import { useRpc, useSettings, type PluginSurfaceProps } from "@getpaseo/plugin/client";
@@ -88,6 +89,7 @@ export function ConnectionScreen({ host, theme }: PluginSurfaceProps) {
       <SettingsAction label="重新读取主机设置与连接" actionLabel="刷新" onPress={() => { void settings.reload(); setAttempt(value => value + 1); }} />
     </SettingsSection>
     <SettingsSection title="连接状态">
+      <SyncState theme={theme} />
       {failure ? <Text accessibilityRole="alert" style={{ color: theme.colors.statusDanger }}>{failure}</Text> : null}
       {status ? <>
         <SettingsCard>

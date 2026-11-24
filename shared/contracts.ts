@@ -42,3 +42,13 @@ export const workspaceList = defineRpc({ name: "workspace.list", input: z.object
   workspaces: z.array(z.object({ id: z.string(), name: z.string(), enabled: z.boolean(), rule: taskRuleSchema })),
 }) });
 export const workspaceEnable = defineRpc({ name: "workspace.enable", input: z.object({ workspaceId: z.string().min(1), enabled: z.boolean() }), output: syncBootstrap.output });
+
+export const syncStatusSchema = z.object({
+  status: z.enum(["idle", "syncing", "ready", "unavailable"]),
+  stage: z.enum(["idle", "connection", "workspaces", "issues", "history"]),
+  connectionKey: z.string().optional(), lastSuccessAt: z.string().optional(),
+  completedWorkspaces: z.number().int().nonnegative(), enabledWorkspaces: z.number().int().nonnegative(),
+  message: z.string().optional(),
+});
+export type SyncStatus = z.output<typeof syncStatusSchema>;
+export const syncStatus = defineRpc({ name: "sync.status", input: z.object({}), output: syncStatusSchema });
