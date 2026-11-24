@@ -168,7 +168,9 @@ export class SidebarSynchronizer {
   private async sync() {
     if (!this.host) this.host = await this.options.connectHost();
     if ((await this.host.listHosts()).self.serverId !== this.expectedServerId) throw new Error("Native host is not the owning daemon");
+    this.syncState.stage = "history";
     await this.options.onCached?.(this.host);
+    this.syncState.stage = "connection";
     const connection = await this.options.connection();
     this.syncState.connectionKey = connection.connectionKey;
     const state = await this.options.store.read();
@@ -186,7 +188,7 @@ export class SidebarSynchronizer {
     for (const [issueId] of disabledIssues) await this.archive(connection.connectionKey, issueId, "rule_disabled");
     for (const [workspaceId, rule] of enabled) {
       const workspace = workspaces.find(item => item.id === workspaceId);
-      if (!workspace) continue;
+      if (!workspace) throw new Error("Enabled workspace snapshot unavailable");
       this.syncState.stage = "issues";
       const issues: z.infer<typeof issueSchema>[] = [];
       let offset = 0;

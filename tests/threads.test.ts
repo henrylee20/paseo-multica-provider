@@ -111,6 +111,7 @@ async function fixture(initialRuns: Run[] = []) {
   const timelines = new Map<string, ProviderTimelineItem[]>();
   const providerEvents: ProviderEvent[] = [];
   const droppedOriginals = new Set<string>();
+  const nativeHistory = { failOlder: false };
   let server: FakeServer;
   let provider: ProviderConnection | undefined;
   async function connect() {
@@ -148,7 +149,7 @@ async function fixture(initialRuns: Run[] = []) {
       const all = (timelines.get(agentId) ?? []).map((item, index) => ({ seqStart: index + 1, seqEnd: index + 1, item, timestamp: stamp }));
       const available = options?.direction === "before" ? all.filter(entry => entry.seqStart < options.cursor!.seq) : all;
       const entries = available.slice(-2);
-      return { agentId, projection: "projected", epoch: "fixture-epoch", error: null, reset: false, staleCursor: false, gap: false,
+      return { agentId, projection: "projected", epoch: "fixture-epoch", error: nativeHistory.failOlder && options?.direction === "before" ? "disconnected older page" : null, reset: false, staleCursor: false, gap: false,
         entries, hasOlder: available.length > entries.length, hasNewer: false,
         startCursor: entries[0] ? { epoch: "fixture-epoch", seq: entries[0].seqStart } : null };
     },
@@ -169,7 +170,7 @@ async function fixture(initialRuns: Run[] = []) {
   cleanup.push(async () => { await provider?.close(); });
   const paseo = { hosts: { list: async () => ({ self: { serverId: "owning-daemon" } }) } } as unknown as PaseoApi;
   await server!.rpc(workspaceEnable, { workspaceId: "remote-workspace", enabled: true }, paseo);
-  return { ...started, native, timelines, droppedOriginals, reconnect, comments, requests, paseo, home, start, connect, eventsReady, signal, runs, messages, providerEvents, failMessages: (value: boolean) => { failMessages = value; }, identity: (value: string) => { identity = value; }, failRuns: (value: boolean) => { failRuns = value; }, failDiscovery: (value: boolean) => { failDiscovery = value; }, discoveryPages: (pages: Comment[][]) => { discoveryPages = pages; }, truncated: (value: boolean) => { truncated = value; }, paginate: () => { paginate = true; }, failHistory: (value: boolean) => { failHistory = value; } };
+  return { ...started, native, timelines, droppedOriginals, nativeHistory, reconnect, comments, requests, paseo, home, start, connect, eventsReady, signal, runs, messages, providerEvents, failMessages: (value: boolean) => { failMessages = value; }, identity: (value: string) => { identity = value; }, failRuns: (value: boolean) => { failRuns = value; }, failDiscovery: (value: boolean) => { failDiscovery = value; }, discoveryPages: (pages: Comment[][]) => { discoveryPages = pages; }, truncated: (value: boolean) => { truncated = value; }, paginate: () => { paginate = true; }, failHistory: (value: boolean) => { failHistory = value; } };
 }
 
 it("discovers one stable native tab for a root and recursive replies without loading full background history", async () => {
@@ -702,4 +703,22 @@ it("restores cached discussions and out-of-order run gaps without fetching every
   expect(f.requests.filter(request => request.url.includes("/messages")).at(-1)?.url).toBe("/api/tasks/recovery-run/messages?since=1");
   expect(JSON.parse((await restarted.server.rpc(runRead, { ...runAddress, revision: opened.revision!, offset: 0 }, f.paseo)).text).map((message: RunMessage) => message.seq)).toEqual([1, 2, 3]);
   expect(f.native.agents).toHaveLength(2);
+});
+
+
+it("never treats a failed older native page as proof that cached originals are missing", async () => {
+  const f = await fixture();
+  const thread = f.native.agents[1];
+  const address = JSON.parse(thread.handle.slice(7)).data;
+  await f.server.rpc(threadOpen, address, f.paseo);
+  await f.dispose();
+  const restarted = f.start();
+  await f.reconnect();
+  f.nativeHistory.failOlder = true;
+  const before = f.timelines.get(thread.id)?.filter(row => row.type !== "plugin");
+  expect(await restarted.server.rpc(syncBootstrap, {}, f.paseo)).toMatchObject({ status: "unavailable" });
+  expect(f.timelines.get(thread.id)?.filter(row => row.type !== "plugin")).toEqual(before);
+  f.nativeHistory.failOlder = false;
+  expect(await restarted.server.rpc(syncBootstrap, {}, f.paseo)).toMatchObject({ status: "ready" });
+  expect(f.timelines.get(thread.id)?.filter(row => row.type !== "plugin")).toEqual(before);
 });
