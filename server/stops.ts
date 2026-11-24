@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { runStatusSchema } from "../shared/runs.js";
-import type { AuthenticatedConnection } from "./connection.js";
+import { remoteFetch, type AuthenticatedConnection } from "./connection.js";
 import { isActiveRun, type RunAddress, type RunSynchronizer } from "./runs.js";
 import { StateStore, type LocalState } from "./state.js";
 import { remoteJson, workspaceSchema, type RemoteWorkspace } from "./sync.js";
@@ -88,9 +88,8 @@ export class StopCoordinator {
     let failed = false;
     for (const runId of runIds) {
       try {
-        const response = await fetch(`${connection.apiUrl}/api/issues/${encodeURIComponent(address.issueId)}/tasks/${encodeURIComponent(runId)}/cancel`, {
-          method: "POST", headers: { Authorization: `Bearer ${connection.token}`, "X-Workspace-Slug": workspace.slug },
-          redirect: "error", signal: AbortSignal.timeout(10_000),
+        const response = await remoteFetch(connection, `/api/issues/${encodeURIComponent(address.issueId)}/tasks/${encodeURIComponent(runId)}/cancel`, {
+          method: "POST", headers: { "X-Workspace-Slug": workspace.slug },
         });
         if (!response.ok) { await response.body?.cancel(); throw new Error(`HTTP ${response.status}`); }
         const result = cancelledRunSchema.parse(await response.json());

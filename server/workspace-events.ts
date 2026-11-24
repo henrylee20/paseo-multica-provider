@@ -2,7 +2,7 @@ import type { AuthenticatedConnection } from "./connection.js";
 import type { RemoteWorkspace } from "./sync.js";
 
 export type WorkspaceEvent = { connectionKey: string; workspaceId: string; type: string; payload?: unknown };
-type Subscription = { fingerprint: string; close(): void };
+type Subscription = { fingerprint: string; signal?: AbortSignal; close(): void };
 
 /** Workspace-wide invalidations include issues that have never been imported. */
 export class WorkspaceEvents {
@@ -20,21 +20,29 @@ export class WorkspaceEvents {
       const key = `${connection.connectionKey}:${workspace.id}`;
       // Token is held only in this daemon memory, never in URLs, state, RPC or logs.
       const fingerprint = JSON.stringify([connection.apiUrl, connection.token, workspace.slug]);
-      if (this.subscriptions.get(key)?.fingerprint === fingerprint) continue;
+      if (this.subscriptions.get(key)?.fingerprint === fingerprint && this.subscriptions.get(key)?.signal === connection.signal) continue;
       this.subscriptions.get(key)?.close();
       let closed = false;
       let socket: WebSocket | undefined;
       let retry: ReturnType<typeof setTimeout> | undefined;
       let authenticated = false;
       const notify = (type: string, payload?: unknown) => this.onInvalidate({ connectionKey: connection.connectionKey, workspaceId: workspace.id, type, payload });
-      const connect = () => {
-        if (closed) return;
+      const retire = () => { closed = true; if (retry) clearTimeout(retry); try { socket?.close(); } catch {} };
+      const connect = async () => {
+        if (closed || connection.signal?.aborted) return;
+        try { await connection.assertCurrent?.(); } catch { retire(); return; }
+        if (closed || connection.signal?.aborted) return;
         authenticated = false;
         const url = new URL(`${connection.apiUrl}/ws`);
         url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
         url.searchParams.set("workspace_slug", workspace.slug);
         socket = new WebSocket(url);
-        socket.addEventListener("open", () => { if (!closed) socket!.send(JSON.stringify({ type: "auth", payload: { token: connection.token } })); });
+        socket.addEventListener("open", () => {
+          void (async () => {
+            try { await connection.assertCurrent?.(); if (!closed) socket!.send(JSON.stringify({ type: "auth", payload: { token: connection.token } })); }
+            catch { retire(); }
+          })();
+        });
         socket.addEventListener("message", message => {
           if (closed || typeof message.data !== "string") return;
           let event: { type?: unknown; payload?: unknown };
@@ -49,11 +57,12 @@ export class WorkspaceEvents {
         });
         socket.addEventListener("error", () => { try { socket?.close(); } catch {} });
         socket.addEventListener("close", () => {
-          if (!closed) { retry = setTimeout(connect, 1_000); retry.unref?.(); }
+          if (!closed && !connection.signal?.aborted) { retry = setTimeout(() => { void connect(); }, 1_000); retry.unref?.(); }
         });
       };
-      this.subscriptions.set(key, { fingerprint, close: () => { closed = true; if (retry) clearTimeout(retry); try { socket?.close(); } catch {} } });
-      connect();
+      connection.signal?.addEventListener("abort", retire, { once: true });
+      this.subscriptions.set(key, { fingerprint, signal: connection.signal, close: () => { connection.signal?.removeEventListener("abort", retire); retire(); } });
+      void connect();
     }
   }
   close() { this.closed = true; for (const subscription of this.subscriptions.values()) subscription.close(); this.subscriptions.clear(); }
