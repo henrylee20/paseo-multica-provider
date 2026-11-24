@@ -2,7 +2,7 @@ import { nativeOriginals, hasNativeOriginal } from "./projection-recovery.js";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { ProviderTimelineItem } from "@getpaseo/plugin/server/provider";
-import type { AuthenticatedConnection } from "./connection.js";
+import { remoteFetch, type AuthenticatedConnection } from "./connection.js";
 import type { NativeHost } from "./native-host.js";
 import { StateStore } from "./state.js";
 import type { IssueMapping } from "./state.js";
@@ -107,12 +107,12 @@ export class ThreadSynchronizer {
     let cursor: { before: string; before_id: string } | undefined;
     for (;;) {
       const query = new URLSearchParams({ ...mode, ...cursor });
-      const response = await fetch(`${connection.apiUrl}/api/issues/${encodeURIComponent(issueId)}/comments?${query}`, {
-        headers: { Authorization: `Bearer ${connection.token}`, "X-Workspace-Slug": workspace.slug }, redirect: "error", signal: AbortSignal.timeout(10_000),
-      });
+      const response = await remoteFetch(connection, `/api/issues/${encodeURIComponent(issueId)}/comments?${query}`, { headers: { "X-Workspace-Slug": workspace.slug } });
       if (!response.ok) { await response.body?.cancel(); throw new Error("Comment history unavailable"); }
       if (response.headers.get("X-Comments-Truncated")?.toLowerCase() === "true") { await response.body?.cancel(); throw new Error("Remote comments were truncated"); }
-      for (const comment of z.array(commentSchema).parse(await response.json())) {
+      const page = z.array(commentSchema).parse(await response.json());
+      await connection.assertCurrent?.();
+      for (const comment of page) {
         if (comment.issue_id !== issueId) throw new Error("Comment belongs to another issue");
         comments.set(comment.id, comment);
       }

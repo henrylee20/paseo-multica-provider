@@ -114,9 +114,10 @@ export class SidebarSynchronizer {
   }
   /** Reconcile a saved comment without changing the client's selected discussion. */
   reconcile(): Promise<void> { return this.expectedServerId ? this.serialize(() => this.sync()) : Promise.resolve(); }
-  enable(paseo: PaseoApi, workspaceId: string, enabled: boolean): Promise<void> {
+  enable(paseo: PaseoApi, workspaceId: string, enabled: boolean, expectedConnectionKey?: string): Promise<void> {
     return this.serialize(async () => {
       const connection = await this.options.connection();
+      if (expectedConnectionKey && connection.connectionKey !== expectedConnectionKey) throw new Error("Connection identity changed");
       const workspace = (await this.workspaces(connection)).find(item => item.id === workspaceId);
       if (!workspace) throw new Error("Multica workspace unavailable");
       await this.options.store.update(state => {
@@ -125,9 +126,10 @@ export class SidebarSynchronizer {
       });
     }).then(() => this.bootstrap(paseo));
   }
-  rule(paseo: PaseoApi, workspaceId: string, rule: TaskRule): Promise<void> {
+  rule(paseo: PaseoApi, workspaceId: string, rule: TaskRule, expectedConnectionKey?: string): Promise<void> {
     return this.serialize(async () => {
       const connection = await this.options.connection();
+      if (expectedConnectionKey && connection.connectionKey !== expectedConnectionKey) throw new Error("Connection identity changed");
       if (!(await this.workspaces(connection)).some(item => item.id === workspaceId)) throw new Error("Multica workspace unavailable");
       await this.options.store.update(state => {
         const rules = connectionState(state, connection.connectionKey).rules;
