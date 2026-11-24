@@ -14,3 +14,9 @@ daemon 或插件进程重启后需要至少一次客户端连接来重新引导�
 显式停用工作区规则通过 workspace 级归档保留历史，持久化自动归档原因。重新启用先恢复原 workspace，只恢复因该规则归档的已归档 agent；不对运行中的 agent 调用具有中断语义的 `refreshAgent`。
 
 #4 将 workspace 级自动生命周期扩展到动态筛选退出。自动归档前持久化 `rule_disabled`／`filter_exit` 原因、待确认标记与所有此前活跃的 Multica tab 身份；归档回执丢失时保留该集合重试，不用归档后的空活跃集合覆盖。重新匹配时先恢复原 workspace，再仅恢复这份集合中仍已归档的 agent。工作区 WebSocket 只负责使完整分页快照失效，网络、鉴权、格式与分页错误均不能推导任务离开范围。
+
+#6 将人工隐藏独立持久化为 workspace 与讨论身份集合。真实 SDK 提供 `agent.archive.after` 和 `workspace.archive.after`；宿主 `archiveWorkspaceContents` 会先逐个产生 agent 归档事件，再归档 workspace 记录，事件没有归档原因或操作编号。常规原生 WebSocket 归档路径的 `archivingAt` 又属于各自 Session 的 WorkspaceDirectory，不能作为所有客户端、所有调用路径共享的原因标记。因此不能靠时间窗口猜测某个 tab 是先前被单独关闭还是本次 workspace 归档的组成部分。
+
+为了保留全部人工选择，管理页分别提供“仅恢复工作区”和“恢复此讨论”。恢复某个讨论先恢复原 workspace，再仅当选定原 agent 确已归档时 refresh；其他隐藏讨论保持隐藏。workspace 归档所关闭的讨论也逐项可恢复，不猜测归档前的活跃集合。自动筛选归档仍使用事先持久化的 `archiveReason`、`archivePending` 与可恢复 agent 集合，在这些事件中不新增人工隐藏。人工隐藏优先于自动重返；失败或回执丢失保留选择，重试遇到已存活 agent 不 refresh。原生归档不删除占位目录或历史，`session.close` 仅释放资源，不表示人工隐藏或远端取消。
+
+上述事件顺序已从固定宿主源码核对，公开贡献入口的原生契约测试覆盖之；真实 0.15.3 加载及 UI 演示由集成验收单独记录，不以模拟宿主替代实际验证。

@@ -43,3 +43,7 @@
 评论角色由连接用户 ID 与 `author_type` 共同决定；成员名称使用成员的 `user_id`，agent 即使由本人拥有也保留带署名 assistant。首次可获取快照形成不可变原生消息；之后的编辑、删除和系统变化使用独立且稳定的插件行，超长事件通过 `thread.event` 按需读取完整正文。每条原生评论另有稳定的“评论来源”记录，公开显示首次快照的发言和更新时间；来源时间也发送给 provider，但宿主实时追加路径仍可能以本地时间记录原生时钟。已有历史可离线重放；跨断线恢复仍由 #14 验收。
 
 用户已明确要求 ADR 和本文件随实现提交到集成分支。
+
+2026-11-24 #6 增加按连接持久化的 workspace／本地主讨论／Thread 人工隐藏。公开 `agent.archive.after` 与 `workspace.archive.after` 捕获原生关闭和归档；自动归档原因先于宿主事件保存，因此不误记成人工选择。新 Thread 发现、评论 WebSocket 失效、规则退出重返、多个客户端引导及正常重启都保留隐藏；普通 session.close 和贡献清理只释放资源。
+
+管理页独立读取所有连接的本地隐藏对象，CLI 离线时仍可列出与恢复缓存历史。恢复操作绑定原 workspace、agent 与 cwd，不 resume 新身份、不重复 import，也不 refresh 活跃 agent。因宿主归档事件没有 bulk cause，workspace 归档关闭的讨论同样分别列出：仅恢复工作区不恢复 tab；恢复某个讨论先恢复原 workspace，再恢复选定且已归档的 agent。失败或回执丢失保留隐藏，重试不会 refresh 已恢复的活跃 tab。具体取舍与原生证据见 ADR 0002。真实宿主/真实 Multica 验收继续由母工单负责。

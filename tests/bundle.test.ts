@@ -28,8 +28,8 @@ it("the host-compiled server entry registers CLI connection management", async (
   const dispose = setup(server.context);
   expect(server.settings.has("multica")).toBe(true);
   expect(server.providers.has("multica")).toBe(true);
-  dispose();
-});
+  await dispose();
+}, 15_000);
 
 it("the host-compiled client entry offers a Multica management screen and sidebar entry", async () => {
   const setup = await bundledContribution("../index.client.tsx", { "@getpaseo/plugin/client": {}, "@getpaseo/plugin/client/ui": {}, "react-native": {} });
@@ -167,4 +167,55 @@ it("the native thread renderer lazily opens history and comment events render as
   expect(JSON.stringify(source)).toContain("2020-01-01T00:00:00Z");
   expect(JSON.stringify(source)).toContain("2026-11-24T12:00:00Z");
   dispose();
+});
+
+it("management lists shared hidden objects and offers separate workspace and selected-tab restoration", async () => {
+  const effects: Array<() => unknown> = [];
+  const cleanups: Array<() => void> = [];
+  const actions: Array<{ actionLabel: string; onPress(): unknown }> = [];
+  const state: unknown[] = [];
+  const calls: Array<{ name: string; input: unknown }> = [];
+  let cursor = 0;
+  let Component: (props: unknown) => unknown = () => null;
+  const objects = [
+    { connectionKey: "old-connection", issueId: "issue", workspaceId: "workspace", cwd: "/original", kind: "workspace", title: "Task" },
+    { connectionKey: "old-connection", issueId: "issue", workspaceId: "workspace", cwd: "/original", kind: "thread", rootId: "root", agentId: "original-agent", title: "Task · Root" },
+  ];
+  const rpcs = new Map<string, (input: unknown) => Promise<unknown>>();
+  const passthrough = (props: { label?: string; title?: string; hint?: string; children?: unknown }) => [props.label, props.title, props.hint, props.children];
+  const setup = await bundledContribution("../index.client.tsx", {
+    react: { useState: (initial: unknown) => {
+      const index = cursor++;
+      if (!(index in state)) state[index] = initial;
+      return [state[index], (value: unknown) => { state[index] = typeof value === "function" ? value(state[index]) : value; }];
+    }, useEffect: (effect: () => unknown) => effects.push(effect) },
+    "@getpaseo/plugin/client": {
+      useSettings: () => ({ status: "ready", values: { profile: "" }, revision: "1" }),
+      useRpc: (contract: { name: string }) => {
+        if (!rpcs.has(contract.name)) rpcs.set(contract.name, async input => {
+          calls.push({ name: contract.name, input });
+          if (contract.name === "hidden.list") return { objects };
+          if (contract.name === "hidden.restore") return { status: "ready" };
+          if (contract.name === "workspace.list") return { workspaces: [] };
+          return { status: "offline", message: "offline", profile: "", source: { api: "none", credentials: "none", app: "none" } };
+        });
+        return rpcs.get(contract.name);
+      },
+    },
+    "@getpaseo/plugin/client/ui": { SettingsSection: passthrough, SettingsCard: passthrough, SettingsInput: passthrough, SettingsRow: passthrough,
+      SettingsAction: (props: { label: string; actionLabel: string; onPress(): unknown }) => { actions.push(props); return [props.label, props.actionLabel]; } },
+    "react-native": { View: "View", Text: "Text" },
+  });
+  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: (entry: { Component: typeof Component }) => { Component = entry.Component; return () => {}; },
+    addSidebarHeaderItem: () => () => {}, addTimelineRenderer: () => () => {} });
+  const render = () => { cursor = 0; actions.length = 0; return renderedText(Component({ host: { id: "host", label: "Host" }, theme: { colors: {} } })); };
+  try {
+    render();
+    for (const effect of effects.splice(0)) { const cleanup = effect(); if (typeof cleanup === "function") cleanups.push(cleanup as () => void); }
+    await vi.waitFor(() => { expect(render()).toContain("人工隐藏"); expect(render()).toContain("Task · Root"); });
+    expect(actions.map(action => action.actionLabel)).toContain("仅恢复工作区");
+    const action = actions.find(action => action.actionLabel === "恢复此讨论")!;
+    action.onPress();
+    await vi.waitFor(() => expect(calls).toContainEqual({ name: "hidden.restore", input: { connectionKey: "old-connection", issueId: "issue", rootId: "root" } }));
+  } finally { for (const cleanup of cleanups) cleanup(); dispose(); }
 });

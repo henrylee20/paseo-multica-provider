@@ -5,6 +5,7 @@ import { ExternalLink, SettingsAction, SettingsCard, SettingsInput, SettingsRow,
 import { connectionStatus, multicaSettings, workspaceList, workspaceEnable, type ConnectionStatus, type TaskRule } from "../shared/contracts.js";
 
 import { WorkspaceRuleEditor } from "./workspace-rule.js";
+import { HiddenObjects } from "./hidden-objects.js";
 
 const labels: Record<ConnectionStatus["status"], string> = {
   ready: "已连接", missing_config: "未配置 CLI", unreadable_config: "配置无法读取", invalid_config: "配置无效",
@@ -118,5 +119,6 @@ export function ConnectionScreen({ host, theme }: PluginSurfaceProps) {
       {status?.status === "ready" && !workspaces.length && !workspaceFailure ? <Text style={muted}>当前没有可用的 Multica 工作区。</Text> : null}
       <Text style={muted}>每项任务使用独立的非 Git 占位目录，主讨论中可读任务描述。原生文件与终端打开的是占位目录。</Text>
     </SettingsSection>
+    <HiddenObjects theme={theme} refreshKey={`${host.id}:${configuredProfile}:${attempt}`} />
   </View>;
 }
