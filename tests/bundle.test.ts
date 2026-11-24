@@ -148,7 +148,7 @@ it("the native thread renderer lazily opens history and comment events render as
   });
   const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {},
     addTimelineRenderer: (renderer: any) => { renderers.push(renderer); return () => {}; } });
-  expect(renderers.map(renderer => renderer.kind)).toEqual(["task-description", "thread", "run-summary", "comment-event"]);
+  expect(renderers.map(renderer => renderer.kind)).toEqual(["task-description", "thread", "run-summary", "comment-event", "comment-delivery"]);
   expect(calls).toEqual([]);
   const address = { connectionKey: "connection", issueId: "issue", rootId: "root" };
   const theme = { colors: { foreground: "black", foregroundMuted: "gray" } };
@@ -167,6 +167,27 @@ it("the native thread renderer lazily opens history and comment events render as
   expect(JSON.stringify(source)).toContain("2020-01-01T00:00:00Z");
   expect(JSON.stringify(source)).toContain("2026-11-24T12:00:00Z");
   dispose();
+});
+
+it("delivery rows distinguish durable input, saved comments and unknown results without claiming a Run started", async () => {
+  const renderers: Array<{ kind: string; schema: zod.ZodType; Component: (props: any) => any }> = [];
+  const setup = await bundledContribution("../index.client.tsx", {
+    "@getpaseo/plugin/client": { useRpc: () => async () => ({}) }, "@getpaseo/plugin/client/ui": {},
+    "react-native": { Text: "Text", View: "View", Pressable: "Pressable" },
+    react: { useState: (initial: unknown) => [initial, () => {}] },
+  });
+  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: any) => { renderers.push(renderer); return () => {}; } });
+  try {
+    const renderer = renderers.find(renderer => renderer.kind === "comment-delivery");
+    expect(renderer).toBeDefined();
+    const base = { connectionKey: "connection", issueId: "issue", rootId: "main", clientMessageId: "input", idempotencyKey: "key", createdAt: "2026-11-24T10:00:00Z", body: "Preserved input" };
+    const render = (status: string) => renderedText(renderer!.Component({ item: { data: renderer!.schema.parse({ ...base, status }) }, theme: { colors: { foreground: "black", foregroundMuted: "gray", statusDanger: "red" } } }));
+    expect(render("received")).toContain("插件已接收");
+    expect(render("saved")).toContain("评论已保存");
+    expect(render("saved")).toContain("Run 状态");
+    expect(render("pending_verification")).toContain("待核实");
+    expect(render("failed")).toContain("投递失败");
+  } finally { dispose(); }
 });
 
 it("renders each run's agent and actual state as a bounded summary and observes activity after timeline mounting", async () => {
@@ -286,6 +307,7 @@ it("expands run messages in source order with honest tool correlation and keeps 
 });
 
 it("management lists shared hidden objects and offers separate workspace and selected-tab restoration", async () => {
+  const navigation: unknown[] = [];
   const effects: Array<() => unknown> = [];
   const cleanups: Array<() => void> = [];
   const actions: Array<{ actionLabel: string; onPress(): unknown }> = [];
@@ -313,6 +335,9 @@ it("management lists shared hidden objects and offers separate workspace and sel
           if (contract.name === "stop.list") return { records: [{ connectionKey: "old-connection", issueId: "issue", rootId: "root", runId: "failed-run", title: "Closed Task", status: "running", cleanup: "unknown", retryable: true, message: "cancel failed" },
             { connectionKey: "old-connection", issueId: "issue", rootId: "root", runId: "cancelled-run", title: "Stopped Task", status: "cancelled", cleanup: "pending", retryable: false }] };
           if (contract.name === "stop.retry") return { status: "ready" };
+          if (contract.name === "delivery.list") return { records: [{ connectionKey: "old-connection", issueId: "issue", rootId: "main", clientMessageId: "native-input", idempotencyKey: "key", body: "Saved input", createdAt: "2026-11-24T10:00:00Z", status: "saved", threadRootId: "new-root", threadAgentId: "new-thread-agent" }] };
+          if (contract.name === "delivery.targets") return { issues: [{ connectionKey: "old-connection", issueId: "issue", title: "Task" }] };
+          if (contract.name === "delivery.mentions") return { agents: [{ id: "agent-id", name: "Agent A", reference: "[@Agent A](mention://agent/agent-id)" }] };
           if (contract.name === "hidden.list") return { objects };
           if (contract.name === "hidden.restore") return { status: "ready" };
           if (contract.name === "workspace.list") return { workspaces: [] };
@@ -327,7 +352,7 @@ it("management lists shared hidden objects and offers separate workspace and sel
   });
   const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: (entry: { Component: typeof Component }) => { Component = entry.Component; return () => {}; },
     addSidebarHeaderItem: () => () => {}, addTimelineRenderer: () => () => {} });
-  const render = () => { cursor = 0; actions.length = 0; return renderedText(Component({ host: { id: "host", label: "Host" }, theme: { colors: {} } })); };
+  const render = () => { cursor = 0; actions.length = 0; return renderedText(Component({ host: { id: "host", label: "Host" }, theme: { colors: {} }, navigation: { openAgent: (input: unknown) => navigation.push(input) } })); };
   try {
     render();
     for (const effect of effects.splice(0)) { const cleanup = effect(); if (typeof cleanup === "function") cleanups.push(cleanup as () => void); }
@@ -335,6 +360,12 @@ it("management lists shared hidden objects and offers separate workspace and sel
     expect(render()).toContain("原生停止结果");
     expect(render()).toContain("cancel failed");
     expect(render()).toContain("进程清理尚待确认");
+    expect(render()).toContain("评论已保存");
+    expect(navigation).toEqual([]);
+    actions.find(action => action.actionLabel === "继续此 Thread")!.onPress();
+    expect(navigation).toEqual([{ agentId: "new-thread-agent", serverId: "host" }]);
+    actions.find(action => action.actionLabel === "读取可提及身份")!.onPress();
+    await vi.waitFor(() => expect(render()).toContain("[@Agent A](mention://agent/agent-id)"));
     actions.find(action => action.actionLabel === "重试此 Run")!.onPress();
     await vi.waitFor(() => expect(calls).toContainEqual({ name: "stop.retry", input: { connectionKey: "old-connection", issueId: "issue", rootId: "root", runId: "failed-run" } }));
     expect(actions.map(action => action.actionLabel)).toContain("仅恢复工作区");

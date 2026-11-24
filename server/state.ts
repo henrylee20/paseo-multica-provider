@@ -5,6 +5,7 @@ import { storedRunSchema } from "./run-state.js";
 import { runMessageSchema } from "../shared/runs.js";
 import { stopRecordSchema } from "./stop-state.js";
 import { threadSchema } from "./thread-state.js";
+import { deliveryRecordSchema } from "./delivery-state.js";
 import { taskRuleSchema } from "../shared/contracts.js";
 
 const projectSchema = z.object({ cwd: z.string(), name: z.string(), projectId: z.string().optional() });
@@ -18,6 +19,7 @@ const issueSchema = z.object({
   runDetails: z.record(z.string(), z.object({ messages: z.array(runMessageSchema) })).default({}),
   stopEpochs: z.record(z.string(), z.number().int().nonnegative()).default({}),
   stopRecords: z.record(z.string(), stopRecordSchema).default({}),
+  deliveries: z.record(z.string(), deliveryRecordSchema).default({}),
   commentSourceTaskIds: z.record(z.string(), z.string()).default({}),
   commentCreatedAt: z.record(z.string(), z.string()).default({}),
   commentRoots: z.record(z.string(), z.string()).default({}),

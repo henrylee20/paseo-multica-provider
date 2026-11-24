@@ -66,6 +66,12 @@
 
 管理页独立列出所有连接的本地停止记录；部分失败使原生停止返回失败，并持续提供单 Run 重试，tab 随后关闭、CLI 离线和正常重启仍可看到。重试不恢复 workspace 或讨论，不改变人工隐藏。整 workspace 归档、规则退出、单纯 session.archive／unarchive／close、连接关闭和贡献清理均不发起远端取消；清理等待已接受的停止请求。`StopCoordinator.epoch`／`guardDelivery` 为 #10／#11 提供持久停止栅栏，旧待投递必须在发送或重试领取前检查同一讨论的 epoch。真实宿主及真实服务验证仍由母工单负责。
 
+2026-11-24 #10 加入文本普通评论投递。原生输入先持久保存 clientMessageId、随机稳定 Idempotency-Key、不变正文、连接／Issue／讨论目标、时间、宿主原 delivery 选择及停止 epoch，再报告插件已接收。主讨论每次 POST 顶层评论；真实 Thread 的 parent_id 始终是根评论。管理页提供按当前目录真实 agent ID 生成的 canonical mention 引用，同名身份逐项列出，不按裸 @名字推断路由。普通发送始终只有 content/type/parent_id，不向 Multica 添加 steering 指令，也不创建 Issue。
+
+运行中在等待持久化前捕获当前唯一聚合 turn UUID，以该缓存 ID 回答宿主 steer admission；远端 POST 在 admission 后独立进行。接收、保存、失败、待核实使用稳定 comment-delivery 插件行，保存评论不生成虚构 Run。网络／回执丢失及 5xx 保留待核实，确定拒绝与发送前错误保留失败；没有自动重发。存储写入失败时运行中仍使用匹配的缓存 turn 防止宿主 failed fallback 意外取消，同时追加明确“未能持久接收、未发送远端评论”的原生错误；全局磁盘故障下不承诺任何一侧记录一定可持久化。此特殊路径不伪造保存回执。
+
+首次 POST 前通过 StopCoordinator.guardDelivery 原子领取原 epoch 的记录，中途 Stop 会阻止旧未发送输入。收到回执后以 commentId 映射同一讨论的 clientMessageId，协调原生乐观输入及远端 echo；新 Thread 是另一个会话，不借主讨论 client ID 跳过其根评论。HTTP 回执未定时先等待在途请求再投影；仍未知的同正文自身评论不能靠正文猜为本次回执，暂缓该候选原生 echo。完整输入留在本地，可分块读取。重启恢复通过 #14 原生 canonical 历史逐页检查 client ID、角色及全文，仅补缺失输入，不发送评论。管理页的继续 Thread 入口绑定回执根及对应 native agent，只在用户点击时导航。真实 Paseo 0.15.3 的生产 provider 回显／steer 竞态及目标服务验收由母工单单独记录，公共边界模拟通过不替代真实验收。
+
 
 2026-11-24 #14 补齐 daemon 恢复循环与缓存投影核对。客户端仍立即并每十秒调用 `sync.bootstrap`；第一次客户端连接验证所属 daemon 后即建立唯一后台定时器，首次 Multica 读取失败也继续重试，多个客户端与定时机会共享同一次进行中的核对。客户端退出不停止后台同步；daemon/plugin 重启后仍需至少一次客户端连接，不声称无人连接时自启。`sync.status` 为管理页和原生讨论提供同一同步阶段、工作区进度、上次完成时间和保留缓存提示；WebSocket 握手只触发分页快照核对，不代表缺口已补齐。
 

@@ -3,6 +3,7 @@ import { z } from "zod";
 export const storedRowSchema = z.object({
   id: z.string(), role: z.enum(["user", "assistant", "event"]), text: z.string(),
   commentId: z.string(), category: z.enum(["system", "correction", "deletion"]).optional(),
+  clientMessageId: z.string().optional(),
   sourceCreatedAt: z.string().optional(), sourceUpdatedAt: z.string().optional(),
 });
 export type StoredRow = z.infer<typeof storedRowSchema>;

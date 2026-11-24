@@ -19,6 +19,8 @@ import { ManualHiding } from "./hiding.js";
 import { hiddenList, hiddenRestore } from "../shared/hiding.js";
 import { StopCoordinator } from "./stops.js";
 import { stopList, stopRetry } from "../shared/stops.js";
+import { CommentDelivery } from "./delivery.js";
+import { deliveryList, deliveryRead, deliveryTargets, deliveryMentions } from "../shared/delivery.js";
 
 export interface ServerDependencies extends ConnectionDependencies {
   stateDirectory: string;
@@ -56,13 +58,19 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     const runs = new RunSynchronizer(store);
     const runDetails = new RunDetails(store, connection);
     const stops = new StopCoordinator(store, connection, runs);
+    const deliveries = new CommentDelivery(store, connection, stops, () => synchronizer.reconcile());
+    threads.coordinateDeliveries(() => deliveries.waitForPosts());
+    server.handle(deliveryList, async () => deliveries.list());
+    server.handle(deliveryRead, async input => deliveries.read(input));
+    server.handle(deliveryTargets, async () => deliveries.targets());
+    server.handle(deliveryMentions, async input => deliveries.mentions(input));
     server.handle(stopList, async () => stops.list());
     server.handle(stopRetry, async input => {
       try { await stops.retry(input); return { status: "ready" as const }; }
       catch (error) { return { status: "unavailable" as const, message: error instanceof Error ? error.message : "停止重试失败。" }; }
     });
     const descriptions = new TaskDescriptions(store);
-    server.registerProvider(createMulticaProvider(store, threads, runs, stops, descriptions));
+    server.registerProvider(createMulticaProvider(store, threads, runs, stops, deliveries, descriptions));
     server.handle(observeTaskDescription, input => descriptions.observe(input));
     server.handle(readTaskDescription, async input => {
       // The host authenticates this RPC. Cached history belongs to its persisted
@@ -93,7 +101,7 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       return { text: row.text };
     });
     const synchronizer = new SidebarSynchronizer({ store, connection,
-      onCached: async host => { await threads.reconcile(host); },
+      onCached: async host => { await threads.reconcile(host); await deliveries.recover(host); },
       onIssue: async (connection, workspace, issueId, host) => {
         await descriptions.observe({ connectionKey: connection.connectionKey, issueId });
         await threads.discover(connection, workspace, issueId, host);
@@ -129,6 +137,6 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       try { await synchronizer.rule(context.paseo, input.workspaceId, input.rule); return { status: "ready" as const }; }
       catch { return { status: "unavailable" as const, message: "筛选规则保存或同步失败，请检查连接后重试。" }; }
     });
-    return async () => { await synchronizer.close(); await stops.close(); await threads.close(); await runDetails.close(); runs.close(); descriptions.close(); };
+    return async () => { await deliveries.close(); await synchronizer.close(); await stops.close(); await threads.close(); await runDetails.close(); runs.close(); descriptions.close(); };
   };
 }

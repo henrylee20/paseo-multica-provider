@@ -31,7 +31,7 @@ export function hasNativeOriginal(entries: Awaited<ReturnType<typeof nativeOrigi
   const matches = entries.filter(entry => {
     const item = entry.item;
     return (item.type === "user_message" || item.type === "assistant_message") &&
-      item.messageId === row.commentId;
+      (item.messageId === row.commentId || (row.role === "user" && row.clientMessageId !== undefined && item.type === "user_message" && item.clientMessageId === row.clientMessageId));
   });
   if (!matches.length) return false;
   if (matches.some(entry => entry.item.type !== type) || matches.sort((a, b) => a.seqStart - b.seqStart).map(entry => "text" in entry.item ? entry.item.text : "").join("") !== row.text) {

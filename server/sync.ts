@@ -113,6 +113,8 @@ export class SidebarSynchronizer {
       await operation(this.host);
     });
   }
+  /** Reconcile a saved comment without changing the client's selected discussion. */
+  reconcile(): Promise<void> { return this.expectedServerId ? this.serialize(() => this.sync()) : Promise.resolve(); }
   enable(paseo: PaseoApi, workspaceId: string, enabled: boolean): Promise<void> {
     return this.serialize(async () => {
       const connection = await this.options.connection();
@@ -229,6 +231,7 @@ export class SidebarSynchronizer {
             commentSourceTaskIds: local.issues[issue.id]?.commentSourceTaskIds ?? {},
             runs: local.issues[issue.id]?.runs ?? {}, runDetails: local.issues[issue.id]?.runDetails ?? {}, commentCreatedAt: local.issues[issue.id]?.commentCreatedAt ?? {},
             stopEpochs: local.issues[issue.id]?.stopEpochs ?? {}, stopRecords: local.issues[issue.id]?.stopRecords ?? {},
+            deliveries: local.issues[issue.id]?.deliveries ?? {},
             manualHidden: local.issues[issue.id]?.manualHidden ?? { workspace: false, discussions: [] },
             threads: local.issues[issue.id]?.threads ?? {}, commentRoots: local.issues[issue.id]?.commentRoots ?? {}, unresolvedCommentIds: local.issues[issue.id]?.unresolvedCommentIds ?? [],
             systemRootIds: local.issues[issue.id]?.systemRootIds ?? [], mainHistory: local.issues[issue.id]?.mainHistory ?? { title: "主讨论", historyLoaded: false, rows: [], observed: {} },
