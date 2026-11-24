@@ -14,6 +14,7 @@ import { stopList, stopRetry } from "../shared/stops.js";
 import { hiddenList } from "../shared/hiding.js";
 import { threadOpen } from "../shared/threads.js";
 import { createServerContribution } from "../server/contribute.js";
+import type { LocalState } from "../server/state.js";
 import { FakeServer } from "./support/fake-server.js";
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
@@ -171,6 +172,9 @@ it("credential rotation reuses history while account and service switches isolat
   await f.send("pending-input");
   await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[0]?.status).toBe("pending_verification");
   const delivery = (await f.server.rpc(deliveryList, {}, f.paseo)).records[0];
+  const immutableDelivery = { connectionKey: delivery.connectionKey, issueId: delivery.issueId, rootId: delivery.rootId,
+    clientMessageId: delivery.clientMessageId, idempotencyKey: delivery.idempotencyKey, body: delivery.body, createdAt: delivery.createdAt };
+  const originalIntent = Object.values((JSON.parse(await f.persisted()) as LocalState).connections[original.connectionKey].issues.issue.deliveries)[0];
   await (await f.connect()).send({ type: "session.interrupt", requestId: "stop-original", sessionId: originalThread.id });
   originalThread.archivedAt = "2026-11-24T10:05:00Z";
   await f.server.hook("agent.archive.after", { agent: { id: originalThread.id, provider: "multica", workspaceId: originalThread.workspaceId, cwd: originalThread.cwd, parentAgentId: null, title: null }, archivedAt: originalThread.archivedAt }, f.paseo);
@@ -222,7 +226,15 @@ it("credential rotation reuses history while account and service switches isolat
   await (await f.connect()).send({ type: "session.open", requestId: "old-replay", sessionId: "old-replay", history: "replay", persistence: { version: 1, data: { connectionKey: original.connectionKey, issueId: "issue", discussion: "thread", rootId: "root" } }, config: { cwd: originalThread.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
   expect(f.events).toContainEqual(expect.objectContaining({ type: "timeline.item", sessionId: "old-replay", item: expect.objectContaining({ type: "user_message", messageId: "root", text: "Original Lin comment" }) }));
   expect(f.events).toContainEqual(expect.objectContaining({ type: "timeline.item", sessionId: "old-replay", item: expect.objectContaining({ type: "plugin", kind: "run-summary", data: expect.objectContaining({ ...original, runId: "run" }) }) }));
-  expect((await f.server.rpc(deliveryList, {}, f.paseo)).records.find(record => record.clientMessageId === "pending-input")).toEqual(delivery);
+  // Background receipt verification may update its explanation; the accepted
+  // input and its original identity, target, key and Stop fence must survive.
+  expect((await f.server.rpc(deliveryList, {}, f.paseo)).records.find(record => record.clientMessageId === "pending-input"))
+    .toMatchObject({ ...immutableDelivery, status: "pending_verification" });
+  const retainedIntents = Object.values((JSON.parse(await f.persisted()) as LocalState).connections[original.connectionKey].issues.issue.deliveries);
+  expect(retainedIntents.find(record => record.clientMessageId === "pending-input")).toMatchObject({
+    ...immutableDelivery, stopEpoch: originalIntent.stopEpoch, nativeDelivery: originalIntent.nativeDelivery,
+    remoteWorkspaceId: originalIntent.remoteWorkspaceId, status: "pending_verification",
+  });
   expect(await f.server.rpc(hiddenList, {}, f.paseo)).toEqual(hidden);
   expect(await f.server.rpc(stopList, {}, f.paseo)).toEqual(warnings);
 
