@@ -64,6 +64,7 @@ export class SidebarSynchronizer {
   constructor(private readonly options: {
     store: StateStore; connection: () => Promise<AuthenticatedConnection>;
     connectHost: () => Promise<NativeHost>; intervalMs: number; onRemoteEvent?: (event: WorkspaceEvent) => void;
+    onIssue?: (connection: AuthenticatedConnection, workspace: RemoteWorkspace, issueId: string, host: NativeHost) => Promise<void>;
   }) {}
 
   async workspaces(connection: AuthenticatedConnection): Promise<RemoteWorkspace[]> {
@@ -185,6 +186,8 @@ export class SidebarSynchronizer {
           local.issues[issue.id] = { ...local.issues[issue.id], remoteWorkspaceId: workspaceId,
             workspaceId: local.issues[issue.id]?.workspaceId ?? `wks_${stableId(connection.connectionKey, issue.id).slice(0, 16)}`,
             workspaceCreated: local.issues[issue.id]?.workspaceCreated ?? false,
+            threads: local.issues[issue.id]?.threads ?? {}, commentRoots: local.issues[issue.id]?.commentRoots ?? {}, unresolvedCommentIds: local.issues[issue.id]?.unresolvedCommentIds ?? [],
+            systemRootIds: local.issues[issue.id]?.systemRootIds ?? [], mainHistory: local.issues[issue.id]?.mainHistory ?? { title: "主讨论", historyLoaded: false, rows: [], observed: {} },
             ruleArchivedAgentIds: local.issues[issue.id]?.ruleArchivedAgentIds ?? [], archivePending: local.issues[issue.id]?.archivePending ?? false, cwd, title, description: issue.description ?? "", updatedAt: issue.updated_at };
         });
         const mapping = (await this.options.store.read()).connections[connection.connectionKey].issues[issue.id];
@@ -230,6 +233,7 @@ export class SidebarSynchronizer {
           await this.options.store.update(state => { state.connections[connection.connectionKey].issues[issue.id].mainAgentId = mainAgentId; });
         }
         await this.host.updateAgent(mainAgentId, { name: "主讨论" });
+        await this.options.onIssue?.(connection, workspace, issue.id, this.host);
       }
     }
   }

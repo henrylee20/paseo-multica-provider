@@ -59,6 +59,7 @@ async function fixture(syncIntervalMs = 15_000, homePrefix = "multica-sidebar-")
       return;
     }
     response.end(JSON.stringify(url.pathname === "/api/me" ? { id: "user-42", name: "Lin" }
+      : url.pathname.endsWith("/comments") ? []
       : url.pathname.endsWith("/members") ? [{ id: "membership-row", user_id: "user-42", name: "Lin", email: "lin@example.test" }]
       : url.pathname === "/api/agents" ? [{ id: "agent-owned", name: "Builder", owner_id: "user-42" }]
       : url.pathname === "/api/squads" ? [{ id: "squad-owned", name: "Team", leader_id: "agent-owned" }]
@@ -339,18 +340,19 @@ it("the main discussion replays a stable task description row without participan
   expect(events.at(-1)).toEqual({ type: "session.ready", requestId: "open", sessionId: "main" });
   const beforeClose = f.requests.length;
   await connection.send({ type: "session.close", requestId: "close", sessionId: "main" });
-  const firstRow = events.find(event => event.type === "timeline.item");
+  const firstRow = events.find(event => event.type === "timeline.item" && event.item.type === "plugin" && event.item.kind === "task-description");
   events.length = 0;
   await connection.send({ type: "session.open", requestId: "reopen", sessionId: "restored-main", history: "replay",
     persistence: JSON.parse(agent.handle.slice("plugin:".length)),
     config: { cwd: agent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
-  expect(events.find(event => event.type === "timeline.item")).toEqual({ ...firstRow, sessionId: "restored-main" });
+  expect(events.find(event => event.type === "timeline.item" && event.item.type === "plugin" && event.item.kind === "task-description")).toEqual({ ...firstRow, sessionId: "restored-main" });
   await connection.send({ type: "session.close", requestId: "close-restored", sessionId: "restored-main" });
   events.length = 0;
   await connection.send({ type: "session.open", requestId: "skip", sessionId: "existing-history", history: "skip",
     persistence: JSON.parse(agent.handle.slice("plugin:".length)),
     config: { cwd: agent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
-  expect(events.some(event => event.type === "timeline.item")).toBe(false);
+  expect(events.some(event => event.type === "timeline.item" && event.item.type === "plugin" && event.item.kind === "task-description")).toBe(false);
+  expect(events).toContainEqual(expect.objectContaining({ type: "timeline.item", item: expect.objectContaining({ type: "plugin", kind: "thread" }) }));
   await connection.close();
   expect(f.requests).toHaveLength(beforeClose);
 });

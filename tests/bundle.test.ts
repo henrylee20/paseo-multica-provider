@@ -136,3 +136,35 @@ it("a reader can explicitly load every page of a long description from its visib
     ]);
   } finally { dispose(); }
 });
+
+it("the native thread renderer lazily opens history and comment events render as independent records", async () => {
+  const effects: Array<() => unknown> = [];
+  const calls: Array<{ name: string; input: unknown }> = [];
+  const renderers: Array<{ kind: string; schema: zod.ZodType; Component: (props: any) => any }> = [];
+  const setup = await bundledContribution("../index.client.tsx", {
+    "@getpaseo/plugin/client": { useRpc: (contract: { name: string }) => async (input: unknown) => { calls.push({ name: contract.name, input }); return { status: "ready" }; } },
+    "@getpaseo/plugin/client/ui": {}, "react-native": { Text: "Text", View: "View", Pressable: "Pressable" },
+    react: { useEffect: (effect: () => unknown) => effects.push(effect), useState: (initial: unknown) => [initial, () => {}] },
+  });
+  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {},
+    addTimelineRenderer: (renderer: any) => { renderers.push(renderer); return () => {}; } });
+  expect(renderers.map(renderer => renderer.kind)).toEqual(["task-description", "thread", "comment-event"]);
+  expect(calls).toEqual([]);
+  const address = { connectionKey: "connection", issueId: "issue", rootId: "root" };
+  const theme = { colors: { foreground: "black", foregroundMuted: "gray" } };
+  const threadRenderer = renderers.find(renderer => renderer.kind === "thread")!;
+  const eventRenderer = renderers.find(renderer => renderer.kind === "comment-event")!;
+  threadRenderer.Component({ item: { data: threadRenderer.schema.parse({ ...address, title: "Thread" }) }, theme });
+  for (const effect of effects.splice(0)) effect();
+  await Promise.resolve();
+  expect(calls).toEqual([{ name: "thread.open", input: address }]);
+  const event = eventRenderer.Component({ item: { data: eventRenderer.schema.parse({ ...address, recordId: "correction", commentId: "root", category: "correction", text: "Updated text", sourceUpdatedAt: "2026-11-24T12:00:00Z", truncated: false }) }, theme });
+  expect(JSON.stringify(event)).toContain("评论更正");
+  expect(JSON.stringify(event)).toContain("Updated text");
+  expect(JSON.stringify(event)).toContain("2026-11-24T12:00:00Z");
+  const source = eventRenderer.Component({ item: { data: eventRenderer.schema.parse({ ...address, recordId: "original", commentId: "root", category: "source", text: "First observed snapshot", sourceCreatedAt: "2020-01-01T00:00:00Z", sourceUpdatedAt: "2026-11-24T12:00:00Z", truncated: false }) }, theme });
+  expect(JSON.stringify(source)).toContain("评论来源");
+  expect(JSON.stringify(source)).toContain("2020-01-01T00:00:00Z");
+  expect(JSON.stringify(source)).toContain("2026-11-24T12:00:00Z");
+  dispose();
+});
