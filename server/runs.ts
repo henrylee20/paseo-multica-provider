@@ -4,12 +4,13 @@ import type { AuthenticatedConnection } from "./connection.js";
 import { StateStore, type IssueMapping } from "./state.js";
 import type { StoredRun } from "./run-state.js";
 import { remoteJson, type RemoteWorkspace } from "./sync.js";
-import { runStatusSchema, runSummarySchema } from "../shared/runs.js";
+import { runMetadataSchema, runStatusSchema, runSummarySchema } from "../shared/runs.js";
 
 export const isActiveRun = (status: StoredRun["status"]) => ["queued", "dispatched", "running", "waiting_local_directory", "deferred"].includes(status);
 export type RunAddress = { connectionKey: string; issueId: string; rootId: string };
 const key = (address: RunAddress) => JSON.stringify([address.connectionKey, address.issueId, address.rootId]);
 const remoteRunSchema = z.object({
+  ...runMetadataSchema.shape,
   id: z.string().min(1).max(256), issue_id: z.string().max(256), agent_id: z.string().max(256), status: runStatusSchema,
   trigger_comment_id: z.string().nullish(), coalesced_comment_ids: z.array(z.string()).nullish(),
   delivered_comment_ids: z.array(z.string()).nullish(), supplement_comment_ids: z.array(z.string()).nullish(),
@@ -69,7 +70,10 @@ export class RunSynchronizer {
         issue.runs[run.id] = { agentId: run.agent_id, agentName: agents.find(agent => agent.id === run.agent_id)?.name ?? `Agent ${run.agent_id}`, status: staleActive ? previous.status : run.status,
           ownerRootId: previous?.ownerRootId ?? owner(issue, run, generatedCommentIds), generatedCommentIds, triggerCommentId: run.trigger_comment_id,
           coalescedCommentIds: run.coalesced_comment_ids ?? [], deliveredCommentIds: run.delivered_comment_ids ?? undefined, supplementCommentIds: run.supplement_comment_ids ?? [],
-          createdAt: run.created_at, startedAt: run.started_at ?? undefined, completedAt: staleActive ? previous.completedAt : run.completed_at ?? undefined };
+          createdAt: run.created_at, startedAt: run.started_at ?? undefined, completedAt: staleActive ? previous.completedAt : run.completed_at ?? undefined,
+          // Omission is no new evidence; explicit null/empty values are. A
+          // stale active snapshot must not replace terminal failure metadata.
+          metadata: staleActive ? previous.metadata : { ...previous?.metadata, ...runMetadataSchema.parse(run) } };
       }
     });
     const issue = (await this.store.read()).connections[connection.connectionKey].issues[issueId];

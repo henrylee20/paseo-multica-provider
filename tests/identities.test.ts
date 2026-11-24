@@ -93,7 +93,7 @@ async function fixture() {
     addProject: async (cwd: string) => { let project = projects.find(value => value.cwd === cwd); if (!project) { project = { projectId: `project-${projects.length}`, cwd }; projects.push(project); } return { project: { ...project, projectKind: "non_git" } }; },
     renameProject: async () => {}, fetchWorkspaces: async () => ({ entries: workspaces, pageInfo: { hasMore: false } }),
     createWorkspace: async (input: { workspaceId: string }) => { const workspace = { id: input.workspaceId }; workspaces.push(workspace); return { workspace }; }, setWorkspaceTitle: async () => {},
-    fetchAgents: async () => ({ entries: agents.map(agent => ({ agent })), pageInfo: { hasMore: false } }),
+    fetchAgents: async () => ({ entries: agents.map(agent => ({ agent: { provider: "multica", ...agent } })), pageInfo: { hasMore: false } }),
     fetchAgent: async (id: string) => ({ agent: agents.find(agent => agent.id === id)! }),
     fetchAgentTimeline: async (agentId: string) => ({ agentId, epoch: "epoch", entries: [], hasOlder: false, hasNewer: false }),
     importAgent: async (input: { workspaceId: string; cwd: string; labels: Record<string, string>; providerHandleId: string }) => {

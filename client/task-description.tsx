@@ -4,6 +4,7 @@ import { Markdown, SettingsAction } from "@getpaseo/plugin/client/ui";
 import { Text, View } from "react-native";
 import type { z } from "zod";
 import { readTaskDescription, observeTaskDescription, taskDescriptionSchema } from "../shared/description.js";
+import { collectText } from "./chunked-text.js";
 
 type DescriptionProps = PluginTimelineItemProps<z.output<typeof taskDescriptionSchema>>;
 
@@ -34,21 +35,17 @@ function TaskDescriptionBody({ item, theme }: DescriptionProps) {
   const [fullDescription, setFullDescription] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [scope] = useState({ active: true });
+  useEffect(() => { scope.active = true; return () => { scope.active = false; }; }, [scope]);
   async function load() {
     if (loading) return;
     setLoading(true);
     setError(null);
     try {
-      const parts: string[] = [];
-      let offset: number | null = 0;
-      while (offset !== null) {
-        const page = await read({ connectionKey: item.data.connectionKey, issueId: item.data.issueId, revision: item.data.revision, offset });
-        parts.push(page.text);
-        offset = page.nextOffset;
-      }
-      setFullDescription(parts.join(""));
-    } catch { setError("完整描述暂不可用，请重新打开讨论后重试。"); }
-    finally { setLoading(false); }
+      const text = await collectText(offset => read({ connectionKey: item.data.connectionKey, issueId: item.data.issueId, revision: item.data.revision, offset }), () => scope.active);
+      if (text !== undefined) setFullDescription(text);
+    } catch { if (scope.active) setError("完整描述暂不可用，请重新打开讨论后重试。"); }
+    finally { if (scope.active) setLoading(false); }
   }
   return <View style={{ gap: 8 }}>
     <Text style={{ color: theme.colors.foregroundMuted }}>任务描述</Text>

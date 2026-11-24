@@ -18,9 +18,9 @@ export class RunDetails {
   private async cached(address: Address) {
     const issue = (await this.store.read()).connections[address.connectionKey]?.issues[address.issueId];
     if (!issue || issue.runs[address.runId]?.ownerRootId !== address.rootId) throw new Error("Run does not belong to this discussion");
-    return { issue, cache: issue.runDetails[address.runId] };
+    return { issue, cache: issue.runDetails[address.runId], metadata: issue.runs[address.runId].metadata };
   }
-  async open(address: Address): Promise<{ status: "ready" | "cached" | "unavailable"; revision?: string; message?: string }> {
+  async open(address: Address): Promise<{ status: "ready" | "cached" | "unavailable"; revision?: string; metadataRevision?: string; message?: string }> {
     try { await this.cached(address); } catch { return { status: "unavailable", message: "此执行段尚未映射到当前讨论。" }; }
     let status: "ready" | "cached" | "unavailable" = "ready";
     try {
@@ -32,9 +32,10 @@ export class RunDetails {
       }
       await operation;
     } catch { status = "cached"; }
-    const { cache } = await this.cached(address);
-    if (!cache) return { status: "unavailable", message: "无法读取执行明细；尚无已读缓存。" };
-    return { status, revision: revision(JSON.stringify(cache.messages)), ...(status === "cached" ? { message: "远端执行明细暂不可用，正在显示已读缓存。" } : {}) };
+    const { cache, metadata } = await this.cached(address);
+    const metadataRevision = metadata && Object.keys(metadata).length ? revision(JSON.stringify(metadata)) : undefined;
+    if (!cache) return { status: metadataRevision ? "cached" : "unavailable", metadataRevision, message: "无法读取执行消息；尚无已读消息缓存。" };
+    return { status, revision: revision(JSON.stringify(cache.messages)), metadataRevision, ...(status === "cached" ? { message: "远端执行明细暂不可用，正在显示已读缓存。" } : {}) };
   }
   private async refresh(address: Address) {
     const { issue, cache } = await this.cached(address);
@@ -67,6 +68,14 @@ export class RunDetails {
     if (!cache) throw new Error("Run details unavailable");
     const text = JSON.stringify(cache.messages);
     if (revision(text) !== address.revision || address.offset > text.length) throw new Error("Run details changed; reopen the execution segment");
+    const end = Math.min(text.length, address.offset + 8192);
+    return { text: text.slice(address.offset, end), nextOffset: end < text.length ? end : null };
+  }
+  async readMetadata(address: Address & { revision: string; offset: number }) {
+    const { metadata } = await this.cached(address);
+    if (!metadata) throw new Error("Run metadata unavailable");
+    const text = JSON.stringify(metadata);
+    if (revision(text) !== address.revision || address.offset > text.length) throw new Error("Run metadata changed; reopen the execution segment");
     const end = Math.min(text.length, address.offset + 8192);
     return { text: text.slice(address.offset, end), nextOffset: end < text.length ? end : null };
   }

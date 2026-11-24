@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { ProviderTimelineItem } from "@getpaseo/plugin/server/provider";
 import { remoteFetch, type AuthenticatedConnection } from "./connection.js";
-import type { NativeHost } from "./native-host.js";
+import { findNativeDiscussion, type NativeHost } from "./native-host.js";
 import { StateStore } from "./state.js";
 import type { IssueMapping } from "./state.js";
 import type { StoredRow } from "./thread-state.js";
@@ -171,14 +171,7 @@ export class ThreadSynchronizer {
       let agentId = mapping.agentId;
       if (!agentId) {
         const labels = { "multica.connection": connection.connectionKey, "multica.issue": issueId, "multica.discussion": root.id };
-        let cursor: string | undefined;
-        do {
-          const page = await host.fetchAgents({ filter: { labels, includeArchived: true }, page: { limit: 100, cursor } });
-          agentId = page.entries.find(entry => entry.agent.workspaceId === issue.workspaceId && Object.entries(labels).every(([key, value]) => entry.agent.labels[key] === value))?.agent.id;
-          if (agentId || !page.pageInfo.hasMore) break;
-          if (!page.pageInfo.nextCursor || page.pageInfo.nextCursor === cursor) throw new Error("Incomplete native thread pagination");
-          cursor = page.pageInfo.nextCursor;
-        } while (true);
+        agentId = (await findNativeDiscussion(host, { workspaceId: issue.workspaceId, provider: "multica", labels }))?.id;
         agentId ??= (await host.importAgent({ providerId: "multica", providerHandleId: `plugin:${JSON.stringify(threadPersistence(connection.connectionKey, issueId, root.id))}`,
           cwd: issue.cwd, workspaceId: issue.workspaceId, labels })).id;
         await this.store.update(state => { state.connections[connection.connectionKey].issues[issueId].threads[root.id].agentId = agentId; });

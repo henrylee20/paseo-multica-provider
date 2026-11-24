@@ -10,7 +10,7 @@ import type { ProviderConnection, ProviderEvent, ProviderTimelineItem } from "@g
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 import { hiddenList } from "../shared/hiding.js";
-import { runObserve } from "../shared/runs.js";
+import { runObserve, runOpen, runMetadataRead } from "../shared/runs.js";
 import { workspaceEnable, syncBootstrap } from "../shared/contracts.js";
 import { createServerContribution } from "../server/contribute.js";
 
@@ -133,7 +133,7 @@ async function fixture(initialRuns: Run[] = []) {
     addProject: async () => ({ project: { projectId: "project", projectKind: "non_git" } }), renameProject: async () => {},
     fetchWorkspaces: async () => ({ entries: [], pageInfo: { hasMore: false } }),
     createWorkspace: async (input: { workspaceId: string }) => ({ workspace: { id: input.workspaceId } }), setWorkspaceTitle: async () => {},
-    fetchAgents: async () => ({ entries: native.agents.map(agent => ({ agent })), pageInfo: { hasMore: false } }),
+    fetchAgents: async () => ({ entries: native.agents.map(agent => ({ agent: { provider: "multica", ...agent } })), pageInfo: { hasMore: false } }),
     importAgent: async (input: { workspaceId: string; cwd: string; labels: Record<string, string>; providerHandleId: string }) => {
       const agent = { id: `native-${native.agents.length}`, workspaceId: input.workspaceId, cwd: input.cwd, labels: input.labels, handle: input.providerHandleId };
       native.agents.push(agent);
@@ -209,6 +209,20 @@ it("reads actual terminal race outcomes and keeps task status separate from clea
   expect(summaries.map(row => row.type === "plugin" ? row.data : null)).toEqual(expect.arrayContaining([
     expect.objectContaining({ runId: "finished", status: "completed" }), expect.objectContaining({ runId: "failed", status: "failed" }),
   ]));
+});
+
+it("keeps available failure metadata from a per-Run Stop receipt when execution messages are unavailable", async () => {
+  const f = await fixture([run("failed-during-stop", "running")]);
+  const metadata = { error: "Runtime failed before streaming", failure_reason: "local_directory_error", work_dir: "/remote/original", relative_work_dir: null };
+  f.cancel(async () => ({ body: { ...f.runs[0], status: "failed", ...metadata } }));
+  const thread = f.native.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
+  await (await f.connect()).send({ type: "session.interrupt", requestId: "failed-receipt", sessionId: thread.id });
+  const address = { ...JSON.parse(thread.handle.slice(7)).data, runId: "failed-during-stop" };
+  const opened = await f.server.rpc(runOpen, address, f.paseo);
+  expect(opened).toMatchObject({ status: "cached", metadataRevision: expect.any(String) });
+  const page = await f.server.rpc(runMetadataRead, { ...address, revision: opened.metadataRevision!, offset: 0 }, f.paseo);
+  expect(JSON.parse(page.text)).toEqual(metadata);
+  expect(f.providerEvents.some(event => event.type === "timeline.item" && event.item.type === "assistant_message")).toBe(false);
 });
 
 it("reports partial failure natively and retains per-run retry after tab closure, restart and offline listing", async () => {

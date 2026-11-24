@@ -7,10 +7,12 @@ import { afterEach, expect, it } from "vitest";
 import type { PaseoApi } from "@getpaseo/client";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { ProviderConnection, ProviderEvent, ProviderTimelineItem } from "@getpaseo/plugin/server/provider";
+import { defineRpc } from "@getpaseo/plugin";
 import { runObserve, runOpen, runRead } from "../shared/runs.js";
 import { workspaceEnable, syncBootstrap } from "../shared/contracts.js";
 import { createServerContribution } from "../server/contribute.js";
 import { threadOpen, threadResolve, commentEventDetail } from "../shared/threads.js";
+import { cachedIssueSnapshot, issueHistoryList, issueHistoryRead } from "../shared/access.js";
 import { FakeServer } from "./support/fake-server.js";
 
 const cleanup: Array<() => void | Promise<void>> = [];
@@ -25,7 +27,7 @@ function conversationRows(rows: ProviderTimelineItem[] | undefined) {
 }
 
 
-type Run = { id: string; issue_id: string; agent_id: string; status: string; trigger_comment_id?: string | null; coalesced_comment_ids?: string[]; delivered_comment_ids?: string[]; supplement_comment_ids?: string[] };
+type Run = { id: string; issue_id: string; agent_id: string; status: string; trigger_comment_id?: string | null; coalesced_comment_ids?: string[]; delivered_comment_ids?: string[]; supplement_comment_ids?: string[]; error?: string | null; failure_reason?: string | null; work_dir?: string | null; relative_work_dir?: string | null };
 type RunMessage = { task_id: string; issue_id: string; seq: number; type: "text" | "thinking" | "tool_use" | "tool_result" | "error"; call_id?: string; tool?: string; content?: string; input?: Record<string, unknown>; output?: string; output_truncated?: boolean };
 async function fixture(initialRuns: Run[] = []) {
   const home = await mkdtemp(join(tmpdir(), "multica-threads-"));
@@ -135,7 +137,7 @@ async function fixture(initialRuns: Run[] = []) {
     addProject: async () => ({ project: { projectId: "project", projectKind: "non_git" } }), renameProject: async () => {},
     fetchWorkspaces: async () => ({ entries: [], pageInfo: { hasMore: false } }),
     createWorkspace: async (input: { workspaceId: string }) => ({ workspace: { id: input.workspaceId } }), setWorkspaceTitle: async () => {},
-    fetchAgents: async () => ({ entries: native.agents.map(agent => ({ agent })), pageInfo: { hasMore: false } }),
+    fetchAgents: async () => ({ entries: native.agents.map(agent => ({ agent: { provider: "multica", ...agent } })), pageInfo: { hasMore: false } }),
     importAgent: async (input: { workspaceId: string; cwd: string; labels: Record<string, string>; providerHandleId: string }) => {
       const agent = { id: `native-${native.agents.length}`, workspaceId: input.workspaceId, cwd: input.cwd, labels: input.labels, handle: input.providerHandleId };
       native.agents.push(agent);
@@ -546,6 +548,72 @@ it("uses generated-comment provenance as first-discovery associations but never 
   expect(owners("trigger-priority")).toEqual(["root"]);
   expect(f.requests.some(request => request.url.includes("thread="))).toBe(false);
   expect([...f.timelines.values()].flat().some(row => row.type === "assistant_message")).toBe(false);
+});
+
+const metadataRead = defineRpc({ name: "run.metadata.read", input: runRead.input, output: runRead.output });
+
+it("shows task failure metadata and exact remote paths even when a Run failed before streaming", async () => {
+  const metadata = { error: "Runtime failed before streaming", failure_reason: "local_directory_error", work_dir: "/remote/agent/../checkout with spaces", relative_work_dir: "../checkout with spaces" };
+  const f = await fixture([{ id: "failed", issue_id: "issue", agent_id: "owned-agent", status: "failed", trigger_comment_id: "root", ...metadata }]);
+  const address = { ...JSON.parse(f.native.agents[1].handle.slice(7)).data, runId: "failed" };
+  const opened = await f.server.rpc(runOpen, address, f.paseo) as { revision?: string; metadataRevision?: string };
+  expect(opened.metadataRevision).toEqual(expect.any(String));
+  const page = await f.server.rpc(metadataRead, { ...address, revision: opened.metadataRevision!, offset: 0 }, f.paseo);
+  expect(JSON.parse(page.text)).toEqual(metadata);
+  expect(JSON.parse((await f.server.rpc(runRead, { ...address, revision: opened.revision!, offset: 0 }, f.paseo)).text)).toEqual([]);
+  expect(f.native.agents.every(agent => agent.cwd !== metadata.work_dir && agent.cwd !== metadata.relative_work_dir)).toBe(true);
+  expect(f.timelines.get(f.native.agents[1].id)?.some(row => row.type === "assistant_message")).toBe(false);
+  f.failMessages(true);
+  expect(await f.server.rpc(runOpen, address, f.paseo)).toMatchObject({ metadataRevision: opened.metadataRevision });
+});
+
+it("retains full versioned task metadata without message access across restart and old-identity cache reads", async () => {
+  const metadata = { error: "Failed😀\n".repeat(20000), failure_reason: "local_directory_error", work_dir: "/remote/" + "深い/".repeat(30000), relative_work_dir: null };
+  const f = await fixture([{ id: "failed", issue_id: "issue", agent_id: "owned-agent", status: "failed", trigger_comment_id: "root", ...metadata }]);
+  const address = { ...JSON.parse(f.native.agents[1].handle.slice(7)).data, runId: "failed" };
+  f.failMessages(true);
+  const opened = await f.server.rpc(runOpen, address, f.paseo);
+  expect(opened).toMatchObject({ status: "cached", metadataRevision: expect.any(String) });
+  expect(opened.revision).toBeUndefined();
+  let text = "", offset: number | null = 0;
+  while (offset !== null) {
+    const page: { text: string; nextOffset: number | null } = await f.server.rpc(metadataRead, { ...address, revision: opened.metadataRevision!, offset }, f.paseo);
+    expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThan(64 * 1024);
+    text += page.text; offset = page.nextOffset;
+  }
+  expect(JSON.parse(text)).toEqual(metadata);
+  const summary = f.timelines.get(f.native.agents[1].id)?.find(row => row.id === "multica:run:failed");
+  expect(Buffer.byteLength(JSON.stringify(summary))).toBeLessThan(64 * 1024);
+  expect(JSON.stringify(summary)).not.toContain("Failed");
+
+  // Omission carries no replacement evidence; explicit null and empty do.
+  f.runs[0].error = null; delete f.runs[0].failure_reason; f.runs[0].relative_work_dir = "";
+  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  const changed = await f.server.rpc(runOpen, address, f.paseo);
+  await expect(f.server.rpc(metadataRead, { ...address, revision: opened.metadataRevision!, offset: 8192 }, f.paseo)).rejects.toThrow("changed");
+  f.runs[0].status = "running"; f.runs[0].error = "Stale active snapshot";
+  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  expect(await f.server.rpc(runOpen, address, f.paseo)).toMatchObject({ metadataRevision: changed.metadataRevision });
+  f.identity("other-user");
+  const messageReads = f.requests.filter(request => request.url.includes("/messages")).length;
+  expect(await f.server.rpc(runOpen, address, f.paseo)).toMatchObject({ status: "cached", metadataRevision: changed.metadataRevision });
+  expect(f.requests.filter(request => request.url.includes("/messages"))).toHaveLength(messageReads);
+  await f.dispose();
+  await writeFile(join(f.home, ".multica", "config.json"), "{}");
+  const restarted = f.start();
+  const requests = f.requests.length;
+  const cached = await restarted.server.rpc(runOpen, address, f.paseo);
+  expect(cached).toMatchObject({ status: "cached", metadataRevision: changed.metadataRevision });
+  const first = await restarted.server.rpc(metadataRead, { ...address, revision: cached.metadataRevision!, offset: 0 }, f.paseo);
+  expect(first.text).toContain('"error":null,"failure_reason":"local_directory_error"');
+  const listed = await restarted.server.rpc(issueHistoryList, {}, f.paseo);
+  let history = ""; offset = 0;
+  while (offset !== null) {
+    const page: { text: string; nextOffset: number | null } = await restarted.server.rpc(issueHistoryRead, { connectionKey: address.connectionKey, issueId: "issue", revision: listed.issues[0].revision, offset }, f.paseo);
+    history += page.text; offset = page.nextOffset;
+  }
+  expect(cachedIssueSnapshot.parse(JSON.parse(history)).runs[0].metadata).toEqual({ ...metadata, error: null, relative_work_dir: "" });
+  expect(f.requests).toHaveLength(requests);
 });
 
 it("loads complete run details only on expansion and chunks large ordered source messages without making assistant replies", async () => {

@@ -114,7 +114,7 @@ async function fixture(syncIntervalMs = 15_000, homePrefix = "multica-sidebar-")
       return { workspace, error: null };
     },
     setWorkspaceTitle: async (id: string, title: string) => { native.workspaces.find(item => item.id === id)!.title = title; },
-    fetchAgents: async () => ({ entries: native.agents.map(agent => ({ agent })), pageInfo: { hasMore: false, nextCursor: null } }),
+    fetchAgents: async () => ({ entries: native.agents.map(agent => ({ agent: { provider: "multica", ...agent } })), pageInfo: { hasMore: false, nextCursor: null } }),
     importAgent: async (input: { workspaceId: string; cwd: string; providerHandleId: string; labels: Record<string, string> }) => {
       const agent = { id: `native-agent-${native.agents.length + 1}`, workspaceId: input.workspaceId, cwd: input.cwd, labels: input.labels, handle: input.providerHandleId };
       native.agents.push(agent); return agent;
@@ -297,11 +297,30 @@ it("a lost native import response is reconciled through stable labels without im
   expect(await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo)).toMatchObject({ status: "unavailable" });
   expect(f.native.agents).toHaveLength(1);
   f.host.importAgent = importAgent;
+  const existing = f.native.agents[0];
+  // Host filters can return other providers/workspaces. Match all stable
+  // identity fields, even when the valid record is on a later page.
+  f.host.fetchAgents = (async (input?: { page?: { cursor?: string } }) => ({ entries: [{ agent: { ...existing, provider: input?.page?.cursor === "valid" ? "multica" : "other", id: input?.page?.cursor === "valid" ? existing.id : "other-provider" } }],
+    pageInfo: { hasMore: input?.page?.cursor !== "valid", nextCursor: input?.page?.cursor === "valid" ? null : "valid" } })) as unknown as DaemonClient["fetchAgents"];
   await f.dispose();
   const restarted = f.start();
   expect(await restarted.server.rpc(bootstrap, {}, f.paseo)).toMatchObject({ status: "ready" });
   expect(f.native.workspaces).toHaveLength(2);
   expect(f.native.agents).toHaveLength(2);
+});
+
+it("an incomplete native discussion directory with a cursor cycle never imports another handle", async () => {
+  const f = await fixture();
+  const seen: Array<string | undefined> = [];
+  f.host.fetchAgents = (async (input?: { page?: { cursor?: string } }) => {
+    const cursor = input?.page?.cursor;
+    seen.push(cursor);
+    if (seen.length > 3) throw new Error("Fixture rejected repeated cursor");
+    return { entries: [], pageInfo: { hasMore: true, nextCursor: cursor === "first" ? "second" : "first" } };
+  }) as unknown as DaemonClient["fetchAgents"];
+  expect(await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo)).toMatchObject({ status: "unavailable" });
+  expect(f.native.agents).toEqual([]);
+  expect(seen).toEqual([undefined, "first", "second"]);
 });
 
 it("bootstrap rejects a different native daemon before creating sidebar records", async () => {

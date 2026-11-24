@@ -138,6 +138,60 @@ it("a reader can explicitly load every page of a long description from its visib
   } finally { dispose(); }
 });
 
+it.each(["task-description", "comment-delivery"])("the compiled %s reader stops stalled cursors and cancels further pages on unmount", async kind => {
+  vi.useFakeTimers();
+  const renderers: Array<{ kind: string; Component: (props: any) => any }> = [];
+  const state: unknown[] = [], dependencies: unknown[][] = [];
+  const effects: Array<() => void> = [], cleanups: Array<undefined | (() => void)> = [];
+  const actions: Array<{ onPress(): void }> = [];
+  const calls: number[] = [];
+  const rpcs = new Map<string, (input: any) => Promise<any>>();
+  let cursor = 0, cancelled = false;
+  let release: (value: unknown) => void = () => {};
+  const data = kind === "task-description" ? { connectionKey: "connection", issueId: "issue", revision: "revision", preview: "Preview", truncated: true }
+    : { connectionKey: "connection", issueId: "issue", rootId: "root", clientMessageId: "input", idempotencyKey: "key", body: "Preview", truncated: true, createdAt: "2026-11-24T10:00:00Z", status: "failed" };
+  const setup = await bundledContribution("../index.client.tsx", {
+    react: {
+      useState: (initial: unknown) => { const index = cursor++; if (!(index in state)) state[index] = initial; return [state[index], (value: unknown) => { state[index] = typeof value === "function" ? value(state[index]) : value; }]; },
+      useEffect: (effect: () => unknown, next: unknown[]) => {
+        const index = cursor++;
+        if (dependencies[index] && next.every((value, i) => Object.is(value, dependencies[index][i]))) return;
+        dependencies[index] = next;
+        effects.push(() => { cleanups[index]?.(); const result = effect(); cleanups[index] = typeof result === "function" ? result as () => void : undefined; });
+      },
+    },
+    "@getpaseo/plugin/client": { useRpc: (contract: { name: string }) => {
+      if (!rpcs.has(contract.name)) rpcs.set(contract.name, async input => {
+        if (!contract.name.endsWith(".read")) return data;
+        calls.push(input.offset);
+        if (cancelled) return new Promise(resolve => { release = resolve; });
+        if (calls.length > 2) throw new Error("Fixture rejected repeated read");
+        return { text: "partial", nextOffset: 8 };
+      });
+      return rpcs.get(contract.name);
+    } },
+    "@getpaseo/plugin/client/ui": { Markdown: ({ children }: any) => children, SettingsAction: ({ onPress, actionLabel }: any) => { actions.push({ onPress }); return actionLabel; } },
+    "react-native": { View: "View", Text: "Text", Pressable: ({ onPress, children }: any) => { actions.push({ onPress }); return children; } },
+  });
+  const dispose = setup({ rpc: async () => ({}), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: any) => { renderers.push(renderer); return () => {}; } });
+  const renderer = renderers.find(renderer => renderer.kind === kind)!;
+  const render = () => { cursor = 0; actions.length = 0; const text = renderedText(renderer.Component({ item: { data }, theme: { colors: {} } })); for (const effect of effects.splice(0)) effect(); return text; };
+  try {
+    render(); actions[0].onPress();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(render()).toContain(kind === "task-description" ? "完整描述暂不可用" : "无法读取原输入");
+    expect(calls).toEqual([0, 8]);
+    expect(render()).toContain("Preview");
+    calls.length = 0; cancelled = true;
+    actions[0].onPress();
+    await vi.advanceTimersByTimeAsync(0);
+    for (const cleanup of cleanups) cleanup?.();
+    release({ text: "partial after unmount", nextOffset: 8 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls).toEqual([0]);
+  } finally { for (const cleanup of cleanups) cleanup?.(); dispose(); vi.useRealTimers(); }
+});
+
 it("the native thread renderer lazily opens history and comment events render as independent records", async () => {
   const effects: Array<() => unknown> = [];
   const calls: Array<{ name: string; input: unknown }> = [];
@@ -175,7 +229,7 @@ it("delivery rows distinguish durable input, saved comments and unknown results 
   const setup = await bundledContribution("../index.client.tsx", {
     "@getpaseo/plugin/client": { useRpc: () => async () => ({}) }, "@getpaseo/plugin/client/ui": {},
     "react-native": { Text: "Text", View: "View", Pressable: "Pressable" },
-    react: { useState: (initial: unknown) => [initial, () => {}] },
+    react: { useState: (initial: unknown) => [initial, () => {}], useEffect: () => {} },
   });
   const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: any) => { renderers.push(renderer); return () => {}; } });
   try {
@@ -217,7 +271,7 @@ it("renders each run's agent and actual state as a bounded summary and observes 
   } finally { dispose(); }
 });
 
-it("expands run messages in source order with honest tool correlation and keeps live detail reads inside expansion", async () => {
+it.each(["messages", "empty", "unavailable"])("expands source Run metadata with %s output and keeps detail reads inside expansion", async mode => {
   vi.useFakeTimers();
   const calls: Array<{ name: string; input: any }> = [];
   const renderers: Array<{ kind: string; schema: zod.ZodType; Component: (props: any) => any }> = [];
@@ -226,7 +280,8 @@ it("expands run messages in source order with honest tool correlation and keeps 
   const cleanups: Array<undefined | (() => void)> = [];
   const effects: Array<() => void> = [];
   let cursor = 0;
-  const messages: any[] = [
+  const metadata = { error: "Runtime failed before streaming", failure_reason: "local_directory_error", work_dir: "/remote/agent/../checkout with spaces", relative_work_dir: "../checkout with spaces" };
+  const messages: any[] = mode === "messages" ? [
     { task_id: "run", issue_id: "issue", seq: 1, type: "text", content: "Run text" },
     { task_id: "run", issue_id: "issue", seq: 2, type: "thinking", content: "Run thought" },
     { task_id: "run", issue_id: "issue", seq: 3, type: "tool_use", call_id: "reliable", tool: "read", input: { file: "code.ts" } },
@@ -239,7 +294,7 @@ it("expands run messages in source order with honest tool correlation and keeps 
     { task_id: "run", issue_id: "issue", seq: 10, type: "tool_use", call_id: "ambiguous", input: {} },
     { task_id: "run", issue_id: "issue", seq: 11, type: "tool_use", call_id: "ambiguous", input: {} },
     { task_id: "run", issue_id: "issue", seq: 12, type: "tool_result", call_id: "ambiguous", output: "Cannot pair" },
-  ];
+  ] : [];
   const rpcs = new Map<string, (input: any) => Promise<any>>();
   const setup = await bundledContribution("../index.client.tsx", {
     react: {
@@ -254,8 +309,9 @@ it("expands run messages in source order with honest tool correlation and keeps 
     "@getpaseo/plugin/client": { useRpc: (contract: { name: string }) => {
       if (!rpcs.has(contract.name)) rpcs.set(contract.name, async input => {
         calls.push({ name: contract.name, input });
-        if (contract.name === "run.open") return { status: "ready", revision: String(messages.length) };
+        if (contract.name === "run.open") return { status: mode === "unavailable" ? "cached" : "ready", ...(mode !== "unavailable" ? { revision: String(messages.length) } : {}), metadataRevision: "metadata", message: mode === "unavailable" ? "No message cache" : undefined };
         if (contract.name === "run.read") return input.offset === 0 ? { text: JSON.stringify(messages).slice(0, 80), nextOffset: 80 } : { text: JSON.stringify(messages).slice(80), nextOffset: null };
+        if (contract.name === "run.metadata.read") return input.offset === 0 ? { text: JSON.stringify(metadata).slice(0, 40), nextOffset: 40 } : { text: JSON.stringify(metadata).slice(40), nextOffset: null };
         return { status: "ready" };
       });
       return rpcs.get(contract.name);
@@ -283,22 +339,32 @@ it("expands run messages in source order with honest tool correlation and keeps 
     render();
     await vi.advanceTimersByTimeAsync(0);
     const text = render();
-    expect(text).toContain("Run text");
-    expect(text.indexOf("Run thought")).toBeGreaterThan(text.indexOf("Run text"));
-    expect(text.indexOf("Exact output")).toBeGreaterThan(text.indexOf("code.ts"));
-    expect(text.indexOf("Source error")).toBeGreaterThan(text.indexOf("Partial output"));
-    expect(text).toContain("结果序号 #4");
-    expect(text).toContain("输入序号 #3");
-    expect(text).toContain("调用关联未知");
-    expect(text).toContain("工具输入缺失");
-    expect(text).toContain("输出完整性未知");
-    expect(text).toContain("源端已截断");
-    expect(text).toContain("输出缺失");
-    expect(text).toContain("调用 ID：ambiguous · 调用关联未知（调用 ID 不唯一）");
-    messages.push({ task_id: "run", issue_id: "issue", seq: 13, type: "text", content: "Live update" });
-    await vi.advanceTimersByTimeAsync(2100);
-    expect(render()).toContain("Live update");
-    expect(calls.filter(call => call.name === "run.read").map(call => call.input.offset)).toEqual([0, 80, 0, 80]);
+    expect(text).toContain("Runtime failed before streaming");
+    expect(text).toContain("local_directory_error");
+    expect(text).toContain("REMOTE · work_dir");
+    expect(text).toContain("REMOTE · relative_work_dir");
+    expect(text).toContain("/remote/agent/../checkout with spaces");
+    expect(text).toContain("../checkout with spaces");
+    expect(text).toContain("与 Paseo 本地占位目录不同");
+    expect(calls.filter(call => call.name === "run.metadata.read").map(call => call.input.offset)).toEqual([0, 40]);
+    if (mode === "messages") {
+      expect(text).toContain("Run text");
+      expect(text.indexOf("Run thought")).toBeGreaterThan(text.indexOf("Run text"));
+      expect(text.indexOf("Exact output")).toBeGreaterThan(text.indexOf("code.ts"));
+      expect(text.indexOf("Source error")).toBeGreaterThan(text.indexOf("Partial output"));
+      expect(text).toContain("结果序号 #4");
+      expect(text).toContain("输入序号 #3");
+      expect(text).toContain("调用关联未知");
+      expect(text).toContain("工具输入缺失");
+      expect(text).toContain("输出完整性未知");
+      expect(text).toContain("源端已截断");
+      expect(text).toContain("输出缺失");
+      expect(text).toContain("调用 ID：ambiguous · 调用关联未知（调用 ID 不唯一）");
+      messages.push({ task_id: "run", issue_id: "issue", seq: 13, type: "text", content: "Live update" });
+      await vi.advanceTimersByTimeAsync(2100);
+      expect(render()).toContain("Live update");
+      expect(calls.filter(call => call.name === "run.read").map(call => call.input.offset)).toEqual([0, 80, 0, 80]);
+    }
     actions[0].onPress();
     render();
     const before = calls.filter(call => call.name === "run.open").length;
@@ -334,7 +400,7 @@ it("management lists shared hidden objects and offers separate workspace and sel
         if (!rpcs.has(contract.name)) rpcs.set(contract.name, async input => {
           calls.push({ name: contract.name, input });
           if (contract.name === "issue.history.list") return { issues: [{ connectionKey: "old-connection", issueId: "issue", workspaceId: "workspace", title: "Read-only Task", status: "inaccessible", reason: "forbidden", lastSuccessAt: "2026-11-24T10:00:00Z", checkedAt: "2026-11-24T11:00:00Z", revision: "cache-revision" }] };
-          if (contract.name === "issue.history.read") return { text: JSON.stringify({ title: "Read-only Task", description: "Preserved goal", discussions: [{ rootId: "root", title: "Original thread", rows: [{ id: "comment", role: "user", text: "Original cached comment" }] }], runs: [{ id: "run", agentName: "Original agent", status: "running", ownerRootId: "root", messages: [{ task_id: "run", issue_id: "issue", seq: 1, type: "text", content: "Preserved output" }] }], deliveries: [], stops: [] }), nextOffset: null };
+          if (contract.name === "issue.history.read") return { text: JSON.stringify({ title: "Read-only Task", description: "Preserved goal", discussions: [{ rootId: "root", title: "Original thread", rows: [{ id: "comment", role: "user", text: "Original cached comment" }] }], runs: [{ id: "run", agentName: "Original agent", status: "running", ownerRootId: "root", metadata: { error: "Cached task failure", work_dir: "/remote/cache/../original" }, messages: [{ task_id: "run", issue_id: "issue", seq: 1, type: "text", content: "Preserved output" }] }], deliveries: [], stops: [] }), nextOffset: null };
           if (contract.name === "connection.history") return { connections: [{ connectionKey: "old-connection", apiUrl: "https://original.example.test", user: { id: "original-user", name: "Original account", email: "" }, profiles: ["office"], projectCount: 1, issueCount: 2, hiddenCount: 1, pendingDeliveryCount: 1, stopWarningCount: 1 }] };
           if (contract.name === "stop.list") return { records: [{ connectionKey: "old-connection", issueId: "issue", rootId: "root", runId: "failed-run", title: "Closed Task", status: "running", cleanup: "unknown", retryable: true, message: "cancel failed" },
             { connectionKey: "old-connection", issueId: "issue", rootId: "root", runId: "cancelled-run", title: "Stopped Task", status: "cancelled", cleanup: "pending", retryable: false }] };
@@ -378,6 +444,9 @@ it("management lists shared hidden objects and offers separate workspace and sel
     await vi.waitFor(() => expect(render()).toContain("Original cached comment"));
     expect(render()).toContain("Preserved output");
     expect(render()).toContain("Preserved goal");
+    expect(render()).toContain("Cached task failure");
+    expect(render()).toContain("REMOTE · work_dir");
+    expect(render()).toContain("/remote/cache/../original");
     expect(calls).toContainEqual({ name: "issue.history.read", input: { connectionKey: "old-connection", issueId: "issue", revision: "cache-revision", offset: 0 } });
     actions.find(action => action.actionLabel === "核实原投递")!.onPress();
     await vi.waitFor(() => expect(calls).toContainEqual({ name: "delivery.verify", input: { connectionKey: "old-connection", issueId: "issue", rootId: "root", clientMessageId: "uncertain-input" } }));
@@ -395,7 +464,7 @@ it("management lists shared hidden objects and offers separate workspace and sel
     await vi.waitFor(() => expect(render()).toContain("[@Agent A](mention://agent/agent-id)"));
     actions.find(action => action.actionLabel === "重试此 Run")!.onPress();
     await vi.waitFor(() => expect(calls).toContainEqual({ name: "stop.retry", input: { connectionKey: "old-connection", issueId: "issue", rootId: "root", runId: "failed-run" } }));
-    expect(actions.map(action => action.actionLabel)).toContain("仅恢复工作区");
+    expect(actions.map(action => action.actionLabel)).toContain("仅恢复 Paseo 工作区");
     const action = actions.find(action => action.actionLabel === "恢复此讨论")!;
     action.onPress();
     await vi.waitFor(() => expect(calls).toContainEqual({ name: "hidden.restore", input: { connectionKey: "old-connection", issueId: "issue", rootId: "root" } }));

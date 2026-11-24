@@ -37,11 +37,17 @@ Paseo 安装本地目录时引用该目录，**不执行 manifest build**；必�
 | 响应丢失与有界恢复 | 未对云注入断线 | 0.17.4：保存后丢响应 1 POST／1 effect；未保存后同 key 重试 2 POST／1 effect；两次均未保存后无第 3 POST；Stop 后 0 重试 | 这是实际 daemon＋隔离 HTTP，不是真实云故障注入。 |
 | 同账号续用、切换身份与请求栅栏 | 未旋转真实凭据或切换账号／profile | 0.17.4 合成 A→B→A 保留旧身份、隐藏、投递／Stop 告警，跨身份拒绝写入，回切原 ID；文件轮换／登出／profile／在途撤销有自动化覆盖 | **真实 CLI Token 轮换、命名 profile／账号切换未执行**。 |
 | 离线补读、daemon 重启与引导 | 独立 0.17.4 实例实际加载；真实浏览器连接未执行 | 实际 0.17.4 离线重启、5 个 canonical 原文身份和缓存描述／执行恢复通过；编译客户端验证无需打开管理页的 bootstrap 与重试 | 重启后仍需一次客户端连接；不声称无人连接自启或已看见实际 UI 自动连接。 |
-| 对象失权只读、连接级失败不误删 | 未撤销云权限或删除目标 | 公开边界测试覆盖对象 403／404、网络／401／503、缓存历史、写入竞态和恢复；实际 0.17.4 额外发现原生发送先解归档后拒收的生命周期问题 | 写入阻止有效；不匹配筛选时重新归档的修复与实际复验尚待集成。真实云失权未执行。 |
+| 对象失权只读、连接级失败不误删 | 未撤销云权限或删除目标 | 公开边界覆盖对象 403／404、网络／401／503、缓存历史、写入竞态和恢复；实际 0.17.4 在已合入的 `3f5b940` 验证重新归档修复，包含精确归档时间戳与全部可见讨论重开后的 60 秒回退 | 只读拒收、重新归档及原身份／恢复集合／人工隐藏保留通过；活动缓存隐藏 Run 的本地投影关闭并重新归档，远端 Run 不变且 0 cancel。真实云失权未执行。 |
 
 ## 原生发现的问题与修复
 
 实际 0.15.3 验收曾发现恢复已活跃 workspace 被宿主拒绝、导入早期活动事件丢失／完成 turn ID 复用、Stop 等待期间新 Run 导致原生活动丢失、重启后已保存回复重复 replay。实现分别改为核对完整原生目录、挂载后观察并为新周期分配 UUID、结束原 Stop 聚合后用新 turn 展示后来 Run、共享原始消息身份核对。均保留公开行为回归；Stop 后来 Run 及重启恢复有再次实际宿主证据。未通过降低宿主支持范围掩盖问题。
+
+实际 0.17.4 的只读拒收前解归档问题已在 `3f5b940` 完成所需修复范围的实际复验：单个及全部原可见讨论重开、宿主精确时间戳与 60 秒回退均重新归档，匹配筛选后保留原 ID、原恢复集合与人工隐藏。活动隐藏 Run 的已有本地聚合投影先完成并关闭，再读回无活动与归档结果；远端执行及 Stop 状态未变，未发送远端修改。保护结束后另一次显式原生 `fetchAgentTimeline` 可以重新打开已归档讨论的 provider 并产生新的缓存聚合；归档时间戳、隐藏意愿和远端 Run 均保持。这里不承诺任意显式原生查询之后持续没有本地活动；只读缓存应使用管理页 `issue.history`。
+
+后续独立用例在实际 0.17.4 发现同一宿主回退也影响管理页的手动 Paseo 工作区恢复。本轮实现让手动与自动恢复共用关闭隐藏投影、等待已接收 Stop、确认无活动后重新归档的保护；只排除明确选定恢复的讨论，保留其他隐藏记录。公开边界已覆盖仅恢复 Paseo 工作区、选定讨论及已接收 Stop；该新增手动入口的实际宿主复验由最终集成验收补充，不把此前自动入口的通过结果移用到这里。
+
+Run 任务元数据回归覆盖执行前失败、空／不可用执行消息、长错误与路径的有界分页、版本变化和离线重启。`error`、`failure_reason`、`work_dir`、`relative_work_dir` 原样缓存并在执行段及只读历史显示；远端路径标为 REMOTE，不作为本地目录或工具链接。这些是隔离 HTTP／RPC 与编译 renderer 证据，不增加真实云丰富输出的验收主张。
 
 应用从 0.15.3 更新到 0.17.4 时，旧 daemon 进程与新 plugin worker 文件混用曾造成协议拒绝；仅重启拥有的隔离 daemon 后恢复。用户原主 daemon 未被重启或 reload，本记录不声称最终源码已部署到用户原 daemon。遇到类似更新情况，先确认运行进程和安装文件版本，再按正常部署方式重启目标 daemon 使版本一致。
 
@@ -54,6 +60,8 @@ Paseo 安装本地目录时引用该目录，**不执行 manifest build**；必�
 - `/tmp/paseo-multica-real-final-acceptance.md` 及 `/tmp/paseo-multica-live-acceptance/{import,plain-comment,replay-proof,run-stop}-evidence.json`：本次真实云结果。
 - `/tmp/paseo-multica-runs-acceptance.md` 与 `/tmp/paseo-multica-runtime-egrktl_j/{runs-acceptance,stops-acceptance,interrupt-acceptance}-evidence.json`：早期 0.15.3 原生结果及其边界。
 - 同目录 `stop-late-run-fixed-evidence.json`、`recovery-acceptance52-evidence.json` 与 `/tmp/paseo-multica-recovery-identity-acceptance.md`：修复复验、0.17.4 离线重启和有界恢复／身份隔离。
+- `/tmp/paseo-multica-retired-reopen-acceptance.md` 与同运行目录 `retired-reopen-acceptance72-evidence.json`：`3f5b940` 的实际重新归档修复通过；`retired-reopen-post-timeline-observation.json` 单列保护结束后的显式原生查询观察。此前 `readonly-acceptance63-evidence.json` 的原失败证据保留。
+- `/tmp/paseo-multica-manual-restore-edge.md` 与同运行目录 `manual-restore-edge74-evidence.json`：随后发现的实际手动恢复回退问题及原始失败证据；新增修复的实际复验另记。
 - `/tmp/paseo-multica-delivery-load-evidence.json`：干净产物依赖安装后的实际宿主编译／贡献加载检查；此项没有使用 daemon。
 - `/tmp/paseo-multica-delivery-runtime/install-evidence.json`：全新实际 `0.17.4` daemon 安装干净解压产物、catalog／隔离连接／零导入与精确停止清理的证据。
 

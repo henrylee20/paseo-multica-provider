@@ -2,7 +2,9 @@ import { useEffect, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { useRpc, type PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import type { z } from "zod";
-import { runObserve, runOpen, runRead, runMessageSchema, runSummarySchema, type RunMessage } from "../shared/runs.js";
+import { runObserve, runOpen, runRead, runMetadataRead, runMetadataSchema, runMessageSchema, runSummarySchema, type RunMessage, type RunMetadata } from "../shared/runs.js";
+import { collectText } from "./chunked-text.js";
+import { RunMetadataView } from "./run-metadata.js";
 
 type Props = PluginTimelineItemProps<z.infer<typeof runSummarySchema>>;
 export function RunSummary(props: Props) {
@@ -14,8 +16,10 @@ function RunSummaryBody({ item, theme }: Props) {
   const observe = useRpc(runObserve);
   const open = useRpc(runOpen);
   const read = useRpc(runRead);
+  const readMetadata = useRpc(runMetadataRead);
   const [expanded, setExpanded] = useState(false);
   const [messages, setMessages] = useState<RunMessage[]>([]);
+  const [metadata, setMetadata] = useState<RunMetadata>();
   const [notice, setNotice] = useState("");
   const [attempt, setAttempt] = useState(0);
   const { connectionKey, issueId, rootId, agentName, agentId, runId, status } = item.data;
@@ -29,6 +33,7 @@ function RunSummaryBody({ item, theme }: Props) {
     let active = true;
     let reading = false;
     let revision: string | undefined;
+    let metadataRevision: string | undefined;
     const refresh = async () => {
       if (reading) return;
       reading = true;
@@ -36,18 +41,17 @@ function RunSummaryBody({ item, theme }: Props) {
         const address = { connectionKey, issueId, rootId, runId };
         const result = await open(address);
         if (!active) return;
+        if (result.metadataRevision && result.metadataRevision !== metadataRevision) {
+          const text = await collectText(offset => readMetadata({ ...address, revision: result.metadataRevision!, offset }), () => active);
+          if (text === undefined) return;
+          setMetadata(runMetadataSchema.parse(JSON.parse(text)));
+          metadataRevision = result.metadataRevision;
+        }
         if (!result.revision) { setNotice(result.message ?? "无法读取执行明细；已读内容仍保留。"); return; }
         if (result.revision !== revision) {
-          let offset: number | null = 0;
-          const chunks: string[] = [];
-          while (offset !== null && active) {
-            const page: { text: string; nextOffset: number | null } = await read({ ...address, revision: result.revision, offset });
-            if (page.nextOffset !== null && page.nextOffset <= offset) throw new Error("Invalid run detail cursor");
-            chunks.push(page.text);
-            offset = page.nextOffset;
-          }
-          if (!active) return;
-          const records = runMessageSchema.array().parse(JSON.parse(chunks.join("")));
+          const text = await collectText(offset => read({ ...address, revision: result.revision!, offset }), () => active);
+          if (text === undefined) return;
+          const records = runMessageSchema.array().parse(JSON.parse(text));
           setMessages(records);
           revision = result.revision;
         }
@@ -59,7 +63,7 @@ function RunSummaryBody({ item, theme }: Props) {
     void refresh();
     const timer = setInterval(() => { void refresh(); }, 2000);
     return () => { active = false; clearInterval(timer); };
-  }, [expanded, open, read, connectionKey, issueId, rootId, runId, attempt]);
+  }, [expanded, open, read, readMetadata, connectionKey, issueId, rootId, runId, attempt]);
 
   const color = { color: theme.colors.foreground };
   const muted = { color: theme.colors.foregroundMuted };
@@ -77,7 +81,8 @@ function RunSummaryBody({ item, theme }: Props) {
     <Pressable accessibilityRole="button" onPress={() => setExpanded(value => !value)}><Text style={color}>{expanded ? "收起执行明细" : "展开执行明细"}</Text></Pressable>
     {expanded ? <View style={{ gap: 10 }}>
       {notice ? <Text style={muted}>{notice}</Text> : null}
-      {!messages.length && !notice ? <Text style={muted}>暂无可用执行明细。</Text> : null}
+      <RunMetadataView metadata={metadata} theme={theme} />
+      {!messages.length && !notice ? <Text style={muted}>暂无可用执行消息。</Text> : null}
       {messages.map(message => <View key={`${message.task_id}:${message.seq}`} style={{ gap: 4 }}>
         <Text style={muted}>#{message.seq} · {({ text: "运行文本", thinking: "思考记录", tool_use: "工具调用", tool_result: "工具结果", error: "执行错误" })[message.type]}{message.created_at ? ` · ${message.created_at}` : ""}</Text>
         {message.type === "tool_use" || message.type === "tool_result" ? <>

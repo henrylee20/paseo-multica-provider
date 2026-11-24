@@ -1,4 +1,4 @@
-import { runObserve, runOpen, runRead } from "../shared/runs.js";
+import { runObserve, runOpen, runRead, runMetadataRead } from "../shared/runs.js";
 import { RunSynchronizer } from "./runs.js";
 import { RunDetails } from "./run-details.js";
 import { homedir } from "node:os";
@@ -78,7 +78,8 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     const history = new IssueHistory(store);
     server.handle(issueHistoryList, () => history.list());
     server.handle(issueHistoryRead, input => history.read(input));
-    const hiding = new ManualHiding(store);
+    const lifecycle = new DiscussionLifecycle();
+    const hiding = new ManualHiding(store, lifecycle);
     server.addHook("agent.archive.after", async ({ agent }) => { await hiding.archivedAgent(agent); });
     server.addHook("workspace.archive.after", async ({ workspace }) => { await hiding.archivedWorkspace(workspace.id); });
     server.handle(hiddenList, async () => hiding.list());
@@ -99,7 +100,6 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       catch (error) { return { status: "unavailable" as const, message: error instanceof Error ? error.message : "停止重试失败。" }; }
     });
     const descriptions = new TaskDescriptions(store);
-    const lifecycle = new DiscussionLifecycle();
     server.registerProvider(createMulticaProvider(store, threads, runs, stops, deliveries, descriptions, lifecycle));
     server.handle(observeTaskDescription, input => descriptions.observe(input));
     server.handle(readTaskDescription, async input => {
@@ -116,6 +116,7 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     server.handle(runObserve, async input => runs.observe(input));
     server.handle(runOpen, async input => runDetails.open(input));
     server.handle(runRead, async input => runDetails.read(input));
+    server.handle(runMetadataRead, async input => runDetails.readMetadata(input));
     server.handle(threadOpen, async input => threads.open(input));
     server.handle(threadResolve, async input => {
       const issue = (await store.read()).connections[input.connectionKey]?.issues[input.issueId];
@@ -156,7 +157,7 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     });
     server.handle(workspaceEnable, async (input, context) => {
       try { await synchronizer.enable(context.paseo, input.workspaceId, input.enabled, input.connectionKey); return { status: "ready" as const }; }
-      catch { return { status: "unavailable" as const, message: "工作区规则保存或同步失败，请检查连接后重试。" }; }
+      catch { return { status: "unavailable" as const, message: "Multica 工作区规则保存或同步失败，请检查连接后重试。" }; }
     });
     server.handle(workspaceCatalog, async input => {
       const authenticated = await connection();

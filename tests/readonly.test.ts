@@ -350,15 +350,44 @@ it("closes only the hidden projection before rearchiving a host-restored tab and
   expect(f.events).toContainEqual(expect.objectContaining({ type: "session.opened", requestId: "cached-hidden-open" }));
 });
 
-it("an explicit Stop accepted before hidden projection closure finishes independently", async () => {
+it.each([undefined, "main"])("manual restore of %s preserves every unselected hide after the host's legacy timestamp fallback", async selectedRoot => {
+  const f = await fixture(true);
+  f.native.restoreAgents = true;
+  f.comments.push(comment("other", null, "Other discussion"));
+  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  const original = f.agents.map(agent => ({ id: agent.id, cwd: agent.cwd, handle: agent.handle }));
+  const main = f.agents.find(agent => agent.labels["multica.discussion"] === "main")!;
+  const thread = f.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
+  const other = f.agents.find(agent => agent.labels["multica.discussion"] === "other")!;
+  const address = { connectionKey: thread.labels["multica.connection"], issueId: "issue" };
+  thread.archivedAt = stamp;
+  await f.server.hook("agent.archive.after", { agent: { ...thread, provider: "multica" } } as never, f.paseo);
+  await f.host.archiveWorkspace(main.workspaceId);
+  // All exact workspace-stamp matches are reopened while its record remains
+  // archived. The modern host now falls back to the earlier hidden Run tab.
+  await f.host.refreshAgent(main.id); await f.host.refreshAgent(other.id);
+  expect(f.native.archived).toBe(true);
+  expect(f.agents.some(agent => agent.archivedAt === f.native.archiveStamp)).toBe(false);
+  expect(await f.server.rpc(hiddenRestore, { ...address, ...(selectedRoot ? { rootId: selectedRoot } : {}) }, f.paseo)).toEqual({ status: "ready" });
+  expect(f.native.archived).toBe(false);
+  expect(thread.archivedAt).toBeTruthy();
+  expect(other.archivedAt).toBeTruthy();
+  expect(!!main.archivedAt).toBe(selectedRoot === undefined);
+  expect((await f.server.rpc(hiddenList, {}, f.paseo)).objects.map(object => object.rootId).sort()).toEqual(selectedRoot ? ["other", "root"] : ["main", "other", "root"]);
+  expect(f.agents.map(agent => ({ id: agent.id, cwd: agent.cwd, handle: agent.handle }))).toEqual(original);
+  expect(f.runs[0].status).toBe("running"); expect(f.posts).toEqual([]);
+  expect((await f.server.rpc(stopList, {}, f.paseo)).records).toEqual([]);
+});
+
+it.each(["automatic", "manual"])("an explicit Stop accepted before %s hidden projection closure finishes independently", async restore => {
   const f = await fixture(true);
   f.native.restoreAgents = true;
   const main = f.agents.find(agent => agent.labels["multica.discussion"] === "main")!;
   const thread = f.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
   thread.archivedAt = stamp;
   await f.server.hook("agent.archive.after", { agent: { ...thread, provider: "multica" } } as never, f.paseo);
-  f.remote.visible = false;
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  if (restore === "manual") await f.host.archiveWorkspace(main.workspaceId);
+  else { f.remote.visible = false; await f.server.rpc(syncBootstrap, {}, f.paseo); }
   main.archivedAt = null;
   await f.server.rpc(syncBootstrap, {}, f.paseo);
   let release!: () => void;
@@ -368,7 +397,7 @@ it("an explicit Stop accepted before hidden projection closure finishes independ
   const stopping = (await f.connect()).send({ type: "session.interrupt", requestId: "accepted-explicit-stop", sessionId: thread.id });
   await waiting;
   f.remote.visible = true;
-  const restoring = f.server.rpc(syncBootstrap, {}, f.paseo);
+  const restoring = restore === "manual" ? f.server.rpc(hiddenRestore, { connectionKey: thread.labels["multica.connection"], issueId: "issue" }, f.paseo) : f.server.rpc(syncBootstrap, {}, f.paseo);
   try {
     await expect.poll(async () => {
       await (await f.connect()).send({ type: "session.open", requestId: "stop-drain-probe", sessionId: thread.id, history: "skip", persistence: JSON.parse(thread.handle.slice(7)), config: { cwd: thread.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
@@ -384,6 +413,24 @@ it("an explicit Stop accepted before hidden projection closure finishes independ
   expect(f.posts.map(post => post.path)).toEqual(["/api/issues/issue/tasks/run/cancel"]);
   expect(f.events).toContainEqual({ type: "request.completed", requestId: "accepted-explicit-stop" });
   expect((await f.server.rpc(stopList, {}, f.paseo)).records).toContainEqual(expect.objectContaining({ runId: "run", status: "cancelled" }));
+});
+
+it("a lost workspace restore acknowledgement still reapplies unselected hiding before releasing its guard", async () => {
+  const f = await fixture(true);
+  f.native.restoreAgents = true;
+  const main = f.agents.find(agent => agent.labels["multica.discussion"] === "main")!;
+  const thread = f.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
+  thread.archivedAt = stamp;
+  await f.server.hook("agent.archive.after", { agent: { ...thread, provider: "multica" } } as never, f.paseo);
+  await f.host.archiveWorkspace(main.workspaceId);
+  await f.host.refreshAgent(main.id);
+  const restore = f.host.restoreWorkspace.bind(f.host);
+  f.host.restoreWorkspace = async id => { await restore(id); throw new Error("Acknowledgement lost"); };
+  const address = { connectionKey: thread.labels["multica.connection"], issueId: "issue" };
+  expect(await f.server.rpc(hiddenRestore, address, f.paseo)).toMatchObject({ status: "unavailable" });
+  expect(f.agents.every(agent => agent.archivedAt)).toBe(true);
+  expect((await f.server.rpc(hiddenList, {}, f.paseo)).objects.map(object => object.kind).sort()).toEqual(["main", "thread", "workspace"]);
+  expect(f.posts).toEqual([]); expect(f.runs[0].status).toBe("running");
 });
 
 it("object permission loss keeps cached Run output, failed stops and manual hiding while gating remote operations", async () => {

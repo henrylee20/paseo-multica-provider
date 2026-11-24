@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { runStatusSchema } from "../shared/runs.js";
+import { runMetadataSchema, runStatusSchema } from "../shared/runs.js";
 import { remoteFetch, type AuthenticatedConnection } from "./connection.js";
 import { isActiveRun, type RunAddress, type RunSynchronizer } from "./runs.js";
 import { StateStore, type LocalState } from "./state.js";
@@ -8,7 +8,7 @@ import { remoteJson, workspaceSchema, type RemoteWorkspace } from "./sync.js";
 import { assertWritableIssue } from "./access.js";
 
 const cancelledRunSchema = z.object({ id: z.string(), issue_id: z.string(), status: runStatusSchema,
-  completed_at: z.string().nullish(), failure_reason: z.string().nullish(),
+  ...runMetadataSchema.shape, completed_at: z.string().nullish(),
   result: z.unknown().optional(),
 });
 
@@ -112,6 +112,7 @@ export class StopCoordinator {
           const run = issue.runs[runId];
           if (run?.ownerRootId === address.rootId && (isActiveRun(run.status) || !isActiveRun(result.status))) {
             run.status = result.status;
+            run.metadata = { ...run.metadata, ...runMetadataSchema.parse(result) };
             if (result.completed_at) run.completedAt = result.completed_at;
           }
         });

@@ -89,7 +89,7 @@ async function fixture() {
     createWorkspace: async (input: { workspaceId: string; source: { path: string } }) => {
       const workspace = { id: input.workspaceId, cwd: input.source.path, archivedAt: null }; native.workspaces.push(workspace); return { workspace };
     }, setWorkspaceTitle: async () => {},
-    fetchAgents: async () => ({ entries: native.agents.map(agent => ({ agent })), pageInfo: { hasMore: false } }),
+    fetchAgents: async () => ({ entries: native.agents.map(agent => ({ agent: { provider: "multica", ...agent } })), pageInfo: { hasMore: false } }),
     importAgent: async (input: { cwd: string; workspaceId: string; labels: Record<string, string>; providerHandleId: string }) => {
       const agent = { id: `agent-${native.agents.length}`, cwd: input.cwd, workspaceId: input.workspaceId, labels: input.labels, handle: input.providerHandleId, archivedAt: null };
       native.agents.push(agent); native.effects.push(`import:${agent.id}`);
