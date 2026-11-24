@@ -18,7 +18,7 @@ function Choices({ title, values, choices, onChange, disabled }: { title: string
   </SettingsSection>;
 }
 
-export function WorkspaceRuleEditor({ workspaceId, initialRule, theme, onSaved }: { workspaceId: string; initialRule: TaskRule; theme: PluginSurfaceProps["theme"]; onSaved(): void }) {
+export function WorkspaceRuleEditor({ workspaceId, connectionKey, initialRule, theme, onSaved }: { workspaceId: string; connectionKey?: string; initialRule: TaskRule; theme: PluginSurfaceProps["theme"]; onSaved(): void }) {
   const load = useRpc(workspaceCatalog);
   const save = useRpc(workspaceRule);
   const [catalog, setCatalog] = useState<Catalog | null>(null);
@@ -28,13 +28,13 @@ export function WorkspaceRuleEditor({ workspaceId, initialRule, theme, onSaved }
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     let active = true;
-    void load({ workspaceId }).then(result => { if (active) { setCatalog(result); setFailure(null); } }, () => { if (active) setFailure("无法读取筛选目录，请检查连接后重试。"); });
+    void load({ workspaceId, connectionKey }).then(result => { if (active) { setCatalog(result); setFailure(null); } }, () => { if (active) setFailure("无法读取筛选目录，请检查连接后重试。"); });
     return () => { active = false; };
-  }, [load, workspaceId, attempt]);
+  }, [load, workspaceId, connectionKey, attempt]);
   async function persist() {
     setSaving(true);
     try {
-      const result = await save({ workspaceId, rule });
+      const result = await save({ workspaceId, connectionKey, rule });
       if (result.status === "ready") onSaved();
       else setFailure(result.message ?? "规则同步失败，已保存的规则会在连接恢复后重新核对。");
     } catch { setFailure("规则保存失败，请重试。"); }

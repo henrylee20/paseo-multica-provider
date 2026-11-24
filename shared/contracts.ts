@@ -21,6 +21,17 @@ export const connectionStatusSchema = z.object({
 export type ConnectionStatus = z.output<typeof connectionStatusSchema>;
 export const connectionStatus = defineRpc({ name: "connection.status", input: z.object({}), output: connectionStatusSchema });
 
+export const connectionIdentitySchema = z.object({
+  apiUrl: z.string(), appUrl: z.string().optional(), user: z.object({ id: z.string(), name: z.string(), email: z.string() }),
+  profiles: z.array(z.string()), lastVerifiedAt: z.string(),
+});
+export const connectionHistory = defineRpc({ name: "connection.history", input: z.object({}), output: z.object({
+  connections: z.array(connectionIdentitySchema.partial().extend({
+    connectionKey: z.string(), profiles: z.array(z.string()), projectCount: z.number().int().nonnegative(), issueCount: z.number().int().nonnegative(),
+    hiddenCount: z.number().int().nonnegative(), pendingDeliveryCount: z.number().int().nonnegative(), stopWarningCount: z.number().int().nonnegative(),
+  })),
+}) });
+
 export const syncBootstrap = defineRpc({ name: "sync.bootstrap", input: z.object({}), output: z.object({
   status: z.enum(["ready", "unavailable"]), message: z.string().optional(),
 }) });
@@ -32,16 +43,17 @@ export const taskRuleSchema = z.object({
   projectIds: z.array(filterValue).default([]), labelIds: z.array(filterValue).default([]),
 });
 export type TaskRule = z.output<typeof taskRuleSchema>;
-export const workspaceRule = defineRpc({ name: "workspace.rule", input: z.object({ workspaceId: z.string().min(1), rule: taskRuleSchema }), output: syncBootstrap.output });
+export const workspaceRule = defineRpc({ name: "workspace.rule", input: z.object({ connectionKey: z.string().optional(), workspaceId: z.string().min(1), rule: taskRuleSchema }), output: syncBootstrap.output });
 const catalogItem = z.object({ id: z.string(), name: z.string() });
-export const workspaceCatalog = defineRpc({ name: "workspace.catalog", input: z.object({ workspaceId: z.string().min(1) }), output: z.object({
+export const workspaceCatalog = defineRpc({ name: "workspace.catalog", input: z.object({ connectionKey: z.string().optional(), workspaceId: z.string().min(1) }), output: z.object({
   assignees: z.array(catalogItem.extend({ type: z.enum(["member", "agent", "squad"]) })),
   statuses: z.array(z.object({ key: z.string(), name: z.string(), category: z.string() })), projects: z.array(catalogItem), labels: z.array(catalogItem),
 }) });
 export const workspaceList = defineRpc({ name: "workspace.list", input: z.object({}), output: z.object({
+  connectionKey: z.string(),
   workspaces: z.array(z.object({ id: z.string(), name: z.string(), enabled: z.boolean(), rule: taskRuleSchema })),
 }) });
-export const workspaceEnable = defineRpc({ name: "workspace.enable", input: z.object({ workspaceId: z.string().min(1), enabled: z.boolean() }), output: syncBootstrap.output });
+export const workspaceEnable = defineRpc({ name: "workspace.enable", input: z.object({ connectionKey: z.string().optional(), workspaceId: z.string().min(1), enabled: z.boolean() }), output: syncBootstrap.output });
 
 export const syncStatusSchema = z.object({
   status: z.enum(["idle", "syncing", "ready", "unavailable"]),

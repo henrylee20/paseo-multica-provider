@@ -6,7 +6,7 @@ import { z } from "zod";
 import { taskRuleSchema, type TaskRule, type SyncStatus } from "../shared/contracts.js";
 import { issueQuery } from "./filters.js";
 import { WorkspaceEvents, type WorkspaceEvent } from "./workspace-events.js";
-import type { AuthenticatedConnection } from "./connection.js";
+import { remoteFetch, type AuthenticatedConnection } from "./connection.js";
 import { ensureWorkspaceActive, findActiveWorkspace, type NativeHost } from "./native-host.js";
 import { StateStore, connectionState } from "./state.js";
 import { hiddenAgent } from "./hiding.js";
@@ -27,12 +27,11 @@ export function issueLabels(connectionKey: string, issueId: string) {
 function stableId(...parts: string[]) { return createHash("sha256").update(JSON.stringify(parts)).digest("hex"); }
 
 export async function remoteJson(connection: AuthenticatedConnection, path: string, schema: z.ZodType, workspace?: RemoteWorkspace) {
-  const response = await fetch(`${connection.apiUrl}${path}`, {
-    headers: { Authorization: `Bearer ${connection.token}`, ...(workspace ? { "X-Workspace-Slug": workspace.slug } : {}) },
-    redirect: "error", signal: AbortSignal.timeout(10_000),
-  });
+  const response = await remoteFetch(connection, path, { headers: workspace ? { "X-Workspace-Slug": workspace.slug } : {} });
   if (!response.ok) { await response.body?.cancel(); throw new Error(`Multica read failed (HTTP ${response.status})`); }
-  return schema.parse(await response.json());
+  const value = schema.parse(await response.json());
+  await connection.assertCurrent?.();
+  return value;
 }
 
 export class SidebarSynchronizer {
@@ -115,9 +114,10 @@ export class SidebarSynchronizer {
   }
   /** Reconcile a saved comment without changing the client's selected discussion. */
   reconcile(): Promise<void> { return this.expectedServerId ? this.serialize(() => this.sync()) : Promise.resolve(); }
-  enable(paseo: PaseoApi, workspaceId: string, enabled: boolean): Promise<void> {
+  enable(paseo: PaseoApi, workspaceId: string, enabled: boolean, expectedConnectionKey?: string): Promise<void> {
     return this.serialize(async () => {
       const connection = await this.options.connection();
+      if (expectedConnectionKey && connection.connectionKey !== expectedConnectionKey) throw new Error("Connection identity changed");
       const workspace = (await this.workspaces(connection)).find(item => item.id === workspaceId);
       if (!workspace) throw new Error("Multica workspace unavailable");
       await this.options.store.update(state => {
@@ -126,9 +126,10 @@ export class SidebarSynchronizer {
       });
     }).then(() => this.bootstrap(paseo));
   }
-  rule(paseo: PaseoApi, workspaceId: string, rule: TaskRule): Promise<void> {
+  rule(paseo: PaseoApi, workspaceId: string, rule: TaskRule, expectedConnectionKey?: string): Promise<void> {
     return this.serialize(async () => {
       const connection = await this.options.connection();
+      if (expectedConnectionKey && connection.connectionKey !== expectedConnectionKey) throw new Error("Connection identity changed");
       if (!(await this.workspaces(connection)).some(item => item.id === workspaceId)) throw new Error("Multica workspace unavailable");
       await this.options.store.update(state => {
         const rules = connectionState(state, connection.connectionKey).rules;
