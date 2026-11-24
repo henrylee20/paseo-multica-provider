@@ -214,6 +214,9 @@ it("expands run messages in source order with honest tool correlation and keeps 
     { task_id: "run", issue_id: "issue", seq: 7, type: "tool_result", call_id: "no-input", output: "Partial output", output_truncated: true },
     { task_id: "run", issue_id: "issue", seq: 8, type: "tool_result", call_id: "missing-output", output_truncated: false },
     { task_id: "run", issue_id: "issue", seq: 9, type: "error", content: "Source error" },
+    { task_id: "run", issue_id: "issue", seq: 10, type: "tool_use", call_id: "ambiguous", input: {} },
+    { task_id: "run", issue_id: "issue", seq: 11, type: "tool_use", call_id: "ambiguous", input: {} },
+    { task_id: "run", issue_id: "issue", seq: 12, type: "tool_result", call_id: "ambiguous", output: "Cannot pair" },
   ];
   const rpcs = new Map<string, (input: any) => Promise<any>>();
   const setup = await bundledContribution("../index.client.tsx", {
@@ -269,7 +272,8 @@ it("expands run messages in source order with honest tool correlation and keeps 
     expect(text).toContain("输出完整性未知");
     expect(text).toContain("源端已截断");
     expect(text).toContain("输出缺失");
-    messages.push({ task_id: "run", issue_id: "issue", seq: 10, type: "text", content: "Live update" });
+    expect(text).toContain("调用 ID：ambiguous · 调用关联未知（调用 ID 不唯一）");
+    messages.push({ task_id: "run", issue_id: "issue", seq: 13, type: "text", content: "Live update" });
     await vi.advanceTimersByTimeAsync(2100);
     expect(render()).toContain("Live update");
     expect(calls.filter(call => call.name === "run.read").map(call => call.input.offset)).toEqual([0, 80, 0, 80]);

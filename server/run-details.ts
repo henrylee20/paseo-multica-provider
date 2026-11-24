@@ -54,6 +54,7 @@ export class RunDetails {
     if (messages.some(message => message.task_id !== address.runId || message.issue_id !== address.issueId)) throw new Error("Run message identity mismatch");
     const unique = new Map(cache?.messages.map(message => [message.seq, message]));
     for (const message of messages) if (!unique.has(message.seq)) unique.set(message.seq, message);
+    if (cache && unique.size === cache.messages.length) return;
     await this.store.update(state => {
       state.connections[address.connectionKey].issues[address.issueId].runDetails[address.runId] = { messages: [...unique.values()].sort((a, b) => a.seq - b.seq) };
     });
