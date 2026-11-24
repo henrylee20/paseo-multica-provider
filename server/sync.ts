@@ -38,6 +38,7 @@ export async function remoteJson(connection: AuthenticatedConnection, path: stri
 export class SidebarSynchronizer {
   private pending: Promise<unknown> = Promise.resolve();
   private host?: NativeHost;
+  private syncPending?: Promise<void>;
   private expectedServerId?: string;
   private timer?: ReturnType<typeof setInterval>;
   private closed = false;
@@ -55,7 +56,7 @@ export class SidebarSynchronizer {
       this.eventTimer = undefined;
       this.eventDirty = false;
       this.eventSyncPending = true;
-      void this.serialize(() => this.sync()).catch(() => {}).finally(() => {
+      void this.requestSync().catch(() => {}).finally(() => {
         this.eventSyncPending = false;
         if (this.eventDirty) this.scheduleInvalidation();
       });
@@ -71,17 +72,24 @@ export class SidebarSynchronizer {
   async workspaces(connection: AuthenticatedConnection): Promise<RemoteWorkspace[]> {
     return await remoteJson(connection, "/api/workspaces", z.array(workspaceSchema)) as RemoteWorkspace[];
   }
-  bootstrap(paseo: PaseoApi): Promise<void> {
-    return this.serialize(async () => {
-      const serverId = (await paseo.hosts.list()).self.serverId;
-      if (this.expectedServerId && this.expectedServerId !== serverId) throw new Error("Bootstrap daemon identity changed");
-      this.expectedServerId = serverId;
-      await this.sync();
-      if (!this.closed && !this.timer) {
-        this.timer = setInterval(() => { void this.serialize(() => this.sync()).catch(() => {}); }, this.options.intervalMs);
-        this.timer.unref?.();
-      }
-    });
+  async bootstrap(paseo: PaseoApi): Promise<void> {
+    const serverId = (await paseo.hosts.list()).self.serverId;
+    if (this.expectedServerId && this.expectedServerId !== serverId) throw new Error("Bootstrap daemon identity changed");
+    this.expectedServerId = serverId;
+    // A client connection starts daemon recovery even if the first remote read fails.
+    if (!this.closed && !this.timer) {
+      this.timer = setInterval(() => { void this.requestSync().catch(() => {}); }, this.options.intervalMs);
+      this.timer.unref?.();
+    }
+    return this.requestSync();
+  }
+  private requestSync(): Promise<void> {
+    if (!this.syncPending) {
+      const operation = this.serialize(() => this.sync());
+      this.syncPending = operation;
+      void operation.finally(() => { if (this.syncPending === operation) this.syncPending = undefined; }).catch(() => {});
+    }
+    return this.syncPending;
   }
   withNativeHost(paseo: PaseoApi, operation: (host: NativeHost) => Promise<void>): Promise<void> {
     return this.serialize(async () => {

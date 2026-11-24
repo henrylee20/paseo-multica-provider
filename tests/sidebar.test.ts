@@ -3,7 +3,7 @@ import { createRequire } from "node:module";
 import { mkdtemp, mkdir, writeFile, rm, stat, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import type { PaseoApi } from "@getpaseo/client";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { ProviderEvent } from "@getpaseo/plugin/server/provider";
@@ -40,7 +40,7 @@ async function fixture(syncIntervalMs = 15_000, homePrefix = "multica-sidebar-")
   ];
   const scopes: Array<{ path: string; slug?: string }> = [];
   const workspaces = [{ id: "remote-workspace", name: "产品开发", slug: "product" }];
-  const remote = { disconnect: false, issueStatus: 200, invalidIssuePage: false, nextPageFails: false };
+  const remote = { disconnect: false, authStatus: 200, issueStatus: 200, invalidIssuePage: false, nextPageFails: false };
   const http = createServer((request, response) => {
     requests.push(request.url!);
     scopes.push({ path: request.url!, slug: request.headers["x-workspace-slug"] as string | undefined });
@@ -58,6 +58,7 @@ async function fixture(syncIntervalMs = 15_000, homePrefix = "multica-sidebar-")
       response.end(JSON.stringify(remote.invalidIssuePage ? { issues: [] } : { issues: found.slice(Number(url.searchParams.get("offset")), Number(url.searchParams.get("offset")) + 1), total: found.length }));
       return;
     }
+    if (url.pathname === "/api/me") response.statusCode = remote.authStatus;
     response.end(JSON.stringify(url.pathname === "/api/me" ? { id: "user-42", name: "Lin" }
       : (url.pathname.endsWith("/comments") || url.pathname.endsWith("/task-runs")) ? []
       : url.pathname.endsWith("/members") ? [{ id: "membership-row", user_id: "user-42", name: "Lin", email: "lin@example.test" }]
@@ -563,4 +564,25 @@ it("retries a lost automatic workspace restore acknowledgement after restart wit
   expect(f.native.agents.every(item => !item.archivedAt)).toBe(true);
   expect(f.native.agents.map(agent => ({ id: agent.id, cwd: agent.cwd, handle: agent.handle }))).toEqual(original);
   expect(await restarted.server.rpc(bootstrap, {}, f.paseo)).toEqual({ status: "ready" });
+});
+
+
+it("a restarted daemon keeps one retry worker after the connecting client leaves during an offline bootstrap", async () => {
+  const f = await fixture(1000);
+  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const originalIds = f.native.agents.map(agent => agent.id);
+  await f.dispose();
+  f.remote.authStatus = 503;
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  try {
+    const restarted = f.start();
+    expect(await restarted.server.rpc(bootstrap, {}, f.paseo)).toMatchObject({ status: "unavailable" });
+    // No further client RPC or management page is needed after this connection.
+    f.remote.authStatus = 200;
+    f.issues.push({ ...f.issues[0], id: "issue-after-client-close", title: "Recovered in background" });
+    await vi.advanceTimersByTimeAsync(1000);
+    await expect.poll(() => f.native.agents.length).toBe(3);
+    expect(f.native.agents.slice(0, 2).map(agent => agent.id)).toEqual(originalIds);
+    await restarted.dispose();
+  } finally { vi.useRealTimers(); }
 });
