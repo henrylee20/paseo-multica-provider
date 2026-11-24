@@ -12,7 +12,7 @@ export function ThreadSummary({ item, theme }: PluginTimelineItemProps<z.infer<t
   useEffect(() => {
     let active = true;
     void open({ connectionKey, issueId, rootId }).then(result => {
-      if (active) setMessage(result.status === "ready" ? "已读取当前可用历史。原生消息时间为本地导入时间，独立事件另显示来源时间。" : result.message ?? "无法读取远端历史。");
+      if (active) setMessage(result.status === "ready" ? "已读取当前可用历史。原生消息时间由宿主记录，可能为本地导入时间；独立事件另显示来源时间。" : result.message ?? "无法读取远端历史。");
     }).catch(() => { if (active) setMessage("无法读取远端历史，已读记录仍保存在本地。"); });
     return () => { active = false; };
   }, [open, connectionKey, issueId, rootId, attempt]);

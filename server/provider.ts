@@ -3,6 +3,7 @@ import type { ProviderEvent, ProviderRegistration } from "@getpaseo/plugin/serve
 import { StateStore } from "./state.js";
 import { mainPersistence, providerId } from "./sync.js";
 import { projectRow, threadPersistence, type ThreadSynchronizer } from "./threads.js";
+import type { StoredRow } from "./thread-state.js";
 
 const persistenceSchema = z.object({ version: z.literal(1), data: z.object({
   connectionKey: z.string(), issueId: z.string(),
@@ -22,6 +23,10 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
       const subscriptions = new Map<string, () => void>();
       let closed = false;
       const emit = (event: ProviderEvent) => { if (!closed) for (const listener of listeners) listener(event); };
+      const emitRow = (sessionId: string, address: { connectionKey: string; issueId: string; rootId: string }, row: StoredRow) => {
+        const timestamp = row.role === "event" ? row.sourceUpdatedAt ?? row.sourceCreatedAt : row.sourceCreatedAt;
+        emit({ type: "timeline.item", sessionId, item: projectRow(address, row), ...(timestamp && Number.isFinite(Date.parse(timestamp)) ? { timestamp } : {}) });
+      };
       return {
         version: 1, capabilities,
         onEvent(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
@@ -56,16 +61,16 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
               emit({ type: "timeline.item", sessionId: input.sessionId, item: { type: "plugin", id: `multica:thread:${rootId}`, pluginId: "multica", kind: "thread", version: 1,
                 data: { connectionKey, issueId, rootId, title: issue.threads[rootId].title } } });
               const address = { connectionKey, issueId, rootId };
-              if (input.history === "replay") for (const row of issue.threads[rootId].rows) emit({ type: "timeline.item", sessionId: input.sessionId, item: projectRow(address, row) });
-              subscriptions.set(input.sessionId, threads.subscribe(address, row => emit({ type: "timeline.item", sessionId: input.sessionId, item: projectRow(address, row) })));
+              if (input.history === "replay") for (const row of issue.threads[rootId].rows) emitRow(input.sessionId, address, row);
+              subscriptions.set(input.sessionId, threads.subscribe(address, row => emitRow(input.sessionId, address, row)));
             } else if (input.history === "replay") emit({ type: "timeline.item", sessionId: input.sessionId, item: {
               type: "notification", level: "info", id: `multica:description:${parsed.data.data.issueId}`, message: `任务描述\n\n${issue.description || "（此任务暂无描述）"}`,
             } });
             if (parsed.data.data.discussion === "main") {
               const address = { connectionKey: parsed.data.data.connectionKey, issueId: parsed.data.data.issueId, rootId: "main" };
               emit({ type: "timeline.item", sessionId: input.sessionId, item: { type: "plugin", id: `multica:thread:main:${address.issueId}`, pluginId: "multica", kind: "thread", version: 1, data: { ...address, title: "任务事件" } } });
-              if (input.history === "replay") for (const row of issue.mainHistory.rows) emit({ type: "timeline.item", sessionId: input.sessionId, item: projectRow(address, row) });
-              subscriptions.set(input.sessionId, threads.subscribe(address, row => emit({ type: "timeline.item", sessionId: input.sessionId, item: projectRow(address, row) })));
+              if (input.history === "replay") for (const row of issue.mainHistory.rows) emitRow(input.sessionId, address, row);
+              subscriptions.set(input.sessionId, threads.subscribe(address, row => emitRow(input.sessionId, address, row)));
             }
             emit({ type: "session.ready", requestId: input.requestId, sessionId: input.sessionId });
             return;
