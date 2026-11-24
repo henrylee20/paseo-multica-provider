@@ -12,6 +12,7 @@ const issueSchema = z.object({
   archiveReason: z.enum(["rule_disabled", "filter_exit"]).optional(), ruleArchivedAgentIds: z.array(z.string()).default([]), archivePending: z.boolean().default(false),
   threads: z.record(z.string(), threadSchema).default({}),
   runs: z.record(z.string(), storedRunSchema).default({}),
+  commentSourceTaskIds: z.record(z.string(), z.string()).default({}),
   commentCreatedAt: z.record(z.string(), z.string()).default({}),
   commentRoots: z.record(z.string(), z.string()).default({}),
   unresolvedCommentIds: z.array(z.string()).default([]),

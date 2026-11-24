@@ -4,7 +4,7 @@ Multica 的一个 Run 可能处理多个 Thread 的评论，但 Paseo 只在一�
 对有评论关联的 Run，优先选择触发评论所属 Thread，没有触发评论时选择最早关联评论所属 Thread；确定后不因其他 Thread 的合并或追加评论而迁移。
 首次展示时完全无评论关联的 Run 固定展示在该 Issue 的本地主讨论 tab，后续即使发现评论关联也不迁移；该 tab 同时承载 Issue 描述，且仅同步展示不会自动向 Multica 发表评论。
 
-#7 从完整成功的 Issue `task-runs?view=timeline` 快照读取关联。远端触发、合并、已交付和补充评论 ID 分开保存，首次 `ownerRootId` 独立持久化。优先解析触发评论；无触发时按评论的真实 `created_at`（含 RFC3339Nano 精度与时区）选择最早关联评论。缺失父链或跨 Thread 评论缺少可靠时间时等待补齐，不按 ID 猜测，也不固定到主讨论。成功读取且确实零关联时才使用主讨论。
+#7 从完整成功的 Issue `task-runs?view=timeline` 快照读取关联。远端触发、合并、已交付、补充评论 ID 与 `source_task_id` 指向该 Run 的生成评论 provenance 分开保存，首次 `ownerRootId` 独立持久化。优先解析触发评论；无触发时按评论的真实 `created_at`（含 RFC3339Nano 精度与时区）选择最早关联评论，包含已观测到的生成评论关联；生成评论不充当输入覆盖回执。缺失父链或跨 Thread 评论缺少可靠时间时等待补齐，不按 ID 猜测，也不固定到主讨论。成功读取且确实零关联时才使用主讨论。
 
 每个 Run 使用稳定 `multica:run:<runId>` 插件行；后续状态更新替换同一行。行内只保存有界的 agent、状态、身份和来源时间；执行输出由后续按需读取切片提供，不追加日志 assistant 消息。
 

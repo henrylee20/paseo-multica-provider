@@ -17,7 +17,7 @@ const cleanup: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const dispose of cleanup.splice(0).reverse()) await dispose(); });
 const stamp = "2026-11-24T10:00:00Z";
 const comment = (id: string, parent_id: string | null, content: string, author_id = "member-me", author_type = "member") => ({
-  id, parent_id, content, author_id, author_type, issue_id: "issue", type: "comment", created_at: stamp, updated_at: stamp, attachments: [],
+  id, parent_id, content, author_id, author_type, source_task_id: undefined as string | null | undefined, issue_id: "issue", type: "comment", created_at: stamp, updated_at: stamp, attachments: [],
 });
 type Comment = ReturnType<typeof comment>;
 function conversationRows(rows: ProviderTimelineItem[] | undefined) {
@@ -501,4 +501,25 @@ it("restores cached summaries and activity after native attachment while close, 
   f.runs[0].status = "completed";
   await f.server.rpc(syncBootstrap, {}, f.paseo);
   expect(turns()).toMatchObject([{ state: "started" }, { state: "completed" }]);
+});
+
+it("uses generated-comment provenance as first-discovery associations but never moves an already fixed main owner", async () => {
+  const f = await fixture([{ id: "fixed-main", issue_id: "issue", agent_id: "owned-agent", status: "completed" }]);
+  f.comments.push(
+    { ...comment("generated-early", null, "Earlier generated output", "owned-agent", "agent"), source_task_id: "generated-only", created_at: "2020-01-01T00:00:00Z" },
+    { ...comment("generated-later", null, "Later generated output", "owned-agent", "agent"), source_task_id: "generated-only", created_at: "2025-01-01T00:00:00Z" },
+    { ...comment("late-for-main", "root", "Late generated output", "owned-agent", "agent"), source_task_id: "fixed-main" },
+    { ...comment("generated-for-trigger", "generated-early", "Triggered output", "owned-agent", "agent"), source_task_id: "trigger-priority" },
+  );
+  f.runs.push(
+    { id: "generated-only", issue_id: "issue", agent_id: "owned-agent", status: "completed" },
+    { id: "trigger-priority", issue_id: "issue", agent_id: "owned-agent", status: "completed", trigger_comment_id: "root" },
+  );
+  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  const owners = (id: string) => f.native.agents.filter(agent => f.timelines.get(agent.id)?.some(row => row.id === `multica:run:${id}`)).map(agent => agent.labels["multica.discussion"]);
+  expect(owners("generated-only")).toEqual(["generated-early"]);
+  expect(owners("fixed-main")).toEqual(["main"]);
+  expect(owners("trigger-priority")).toEqual(["root"]);
+  expect(f.requests.some(request => request.url.includes("thread="))).toBe(false);
+  expect([...f.timelines.values()].flat().some(row => row.type === "assistant_message")).toBe(false);
 });

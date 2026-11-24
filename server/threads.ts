@@ -15,7 +15,7 @@ const commentSchema = z.object({
   id: z.string(), issue_id: z.string(), parent_id: z.string().nullish(), content: z.string(),
   author_id: z.string(), author_type: z.enum(["member", "agent", "system"]), type: z.enum(["comment", "status_change", "progress_update", "system"]),
   created_at: z.string().optional(), updated_at: z.string().optional(), revision: z.number().optional(),
-  deleted_at: z.string().nullish(), attachments: z.array(attachmentSchema).nullish(), content_truncated: z.boolean().optional(),
+  source_task_id: z.string().nullish(), deleted_at: z.string().nullish(), attachments: z.array(attachmentSchema).nullish(), content_truncated: z.boolean().optional(),
 });
 type Comment = z.infer<typeof commentSchema>;
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -110,6 +110,7 @@ export class ThreadSynchronizer {
       for (const comment of comments.values()) {
         const rootId = roots.get(comment.id);
         if (comment.created_at) issue.commentCreatedAt[comment.id] = comment.created_at;
+        if (comment.source_task_id) issue.commentSourceTaskIds[comment.id] = comment.source_task_id;
         if (rootId) issue.commentRoots[comment.id] = issue.systemRootIds.includes(rootId) ? "main" : rootId;
         else issue.unresolvedCommentIds.push(comment.id);
       }

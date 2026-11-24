@@ -6,6 +6,7 @@ export const storedRunSchema = z.object({
   ownerRootId: z.string().optional(),
   // Remote coverage changes independently from the permanent display owner.
   triggerCommentId: z.string().nullish(), coalescedCommentIds: z.array(z.string()),
+  generatedCommentIds: z.array(z.string()).default([]),
   deliveredCommentIds: z.array(z.string()).optional(), supplementCommentIds: z.array(z.string()),
   createdAt: z.string().optional(), startedAt: z.string().optional(), completedAt: z.string().optional(),
 });

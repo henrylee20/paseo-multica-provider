@@ -26,9 +26,9 @@ function sourceTime(value: string | undefined): bigint | undefined {
   return BigInt(seconds) * 1_000_000n + BigInt((match[2] ?? "").padEnd(9, "0"));
 }
 
-function owner(issue: IssueMapping, run: z.infer<typeof remoteRunSchema>): string | undefined {
+function owner(issue: IssueMapping, run: z.infer<typeof remoteRunSchema>, generatedCommentIds: string[]): string | undefined {
   if (run.trigger_comment_id) return issue.commentRoots[run.trigger_comment_id];
-  const associations = [...new Set([...(run.coalesced_comment_ids ?? []), ...(run.delivered_comment_ids ?? []), ...(run.supplement_comment_ids ?? [])])];
+  const associations = [...new Set([...(run.coalesced_comment_ids ?? []), ...(run.delivered_comment_ids ?? []), ...(run.supplement_comment_ids ?? []), ...generatedCommentIds])];
   if (!associations.length) return "main";
   if (associations.some(id => !issue.commentRoots[id])) return undefined;
   const roots = new Set(associations.map(id => issue.commentRoots[id]));
@@ -63,8 +63,9 @@ export class RunSynchronizer {
       const issue = state.connections[connection.connectionKey].issues[issueId];
       for (const run of records) {
         const previous = issue.runs[run.id];
+        const generatedCommentIds = Object.entries(issue.commentSourceTaskIds).filter(([, taskId]) => taskId === run.id).map(([commentId]) => commentId);
         issue.runs[run.id] = { agentId: run.agent_id, agentName: agents.find(agent => agent.id === run.agent_id)?.name ?? `Agent ${run.agent_id}`, status: run.status,
-          ownerRootId: previous?.ownerRootId ?? owner(issue, run), triggerCommentId: run.trigger_comment_id,
+          ownerRootId: previous?.ownerRootId ?? owner(issue, run, generatedCommentIds), generatedCommentIds, triggerCommentId: run.trigger_comment_id,
           coalescedCommentIds: run.coalesced_comment_ids ?? [], deliveredCommentIds: run.delivered_comment_ids ?? undefined, supplementCommentIds: run.supplement_comment_ids ?? [],
           createdAt: run.created_at, startedAt: run.started_at ?? undefined, completedAt: run.completed_at ?? undefined };
       }
