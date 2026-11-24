@@ -81,6 +81,9 @@ export function createConnectionResolver(dependencies: ConnectionDependencies) {
     const context = await effective(profile);
     const base = context.status;
     const token = context.token;
+    if (dependencies.currentProfile && await dependencies.currentProfile() !== profile) {
+      return { ...base, status: "offline", message: "CLI profile 已变化，请重新读取当前连接。" };
+    }
     if (!token) { invalidate(); return base; }
     // Only daemon memory contains the opaque credential or this fingerprint.
     const fingerprint = JSON.stringify([profile, base.apiUrl, token]);
@@ -102,7 +105,7 @@ export function createConnectionResolver(dependencies: ConnectionDependencies) {
       });
       if (response.status === 401 || response.status === 403) {
         await response.body?.cancel();
-        invalidate();
+        if (active?.controller === controller) invalidate();
         return fail("authentication_failed", "CLI 凭据已失效或无权访问，请在 daemon 主机重新运行 CLI 登录。");
       }
       if (!response.ok) {
