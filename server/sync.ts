@@ -7,7 +7,7 @@ import { taskRuleSchema, type TaskRule } from "../shared/contracts.js";
 import { issueQuery } from "./filters.js";
 import { WorkspaceEvents, type WorkspaceEvent } from "./workspace-events.js";
 import type { AuthenticatedConnection } from "./connection.js";
-import type { NativeHost } from "./native-host.js";
+import { ensureWorkspaceActive, findActiveWorkspace, type NativeHost } from "./native-host.js";
 import { StateStore, connectionState } from "./state.js";
 import { hiddenAgent } from "./hiding.js";
 
@@ -208,7 +208,7 @@ export class SidebarSynchronizer {
         const mapping = (await this.options.store.read()).connections[connection.connectionKey].issues[issue.id];
         if (mapping.manualHidden.workspace) continue;
         if (mapping.archiveReason) {
-          await this.host.restoreWorkspace(mapping.workspaceId);
+          await ensureWorkspaceActive(this.host, mapping.workspaceId);
           for (const agentId of mapping.ruleArchivedAgentIds) {
             if (hiddenAgent(mapping, agentId)) continue;
             const existing = await this.host.fetchAgent(agentId);
@@ -223,8 +223,7 @@ export class SidebarSynchronizer {
           });
         }
         if (!mapping.workspaceCreated) {
-          const existing = await this.host.fetchWorkspaces({ filter: { idPrefix: mapping.workspaceId }, page: { limit: 100 } });
-          if (!existing.entries.some(item => item.id === mapping.workspaceId)) {
+          if (!await findActiveWorkspace(this.host, mapping.workspaceId)) {
             const result = await this.host.createWorkspace({ source: { kind: "directory", path: cwd, projectId }, title,
               workspaceId: mapping.workspaceId, idempotencyKey: `multica:${connection.connectionKey}:${issue.id}` });
             if (result.error || result.workspace?.id !== mapping.workspaceId) throw new Error("Native workspace creation failed");

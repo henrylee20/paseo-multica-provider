@@ -8,6 +8,27 @@ export type NativeHost = Pick<DaemonClient, "listHosts" | "addProject" | "rename
   "createWorkspace" | "setWorkspaceTitle" | "fetchAgents" | "importAgent" | "updateAgent" | "close" |
   "archiveWorkspace" | "restoreWorkspace" | "fetchAgent" | "refreshAgent">;
 
+/** The native directory contains active workspaces, without an archivedAt field.
+ * idPrefix is accepted but ignored by the host, so check exact IDs across pages. */
+export async function findActiveWorkspace(host: NativeHost, workspaceId: string) {
+  let cursor: string | undefined;
+  const cursors = new Set<string>();
+  for (;;) {
+    const page = await host.fetchWorkspaces({ filter: { idPrefix: workspaceId }, page: { limit: 100, cursor } });
+    const workspace = page.entries.find(entry => entry.id === workspaceId);
+    if (workspace) return workspace;
+    if (!page.pageInfo.hasMore) return undefined;
+    const next = page.pageInfo.nextCursor;
+    if (!next || cursors.has(next)) throw new Error("Incomplete native workspace pagination");
+    cursors.add(next);
+    cursor = next;
+  }
+}
+
+export async function ensureWorkspaceActive(host: NativeHost, workspaceId: string) {
+  if (!await findActiveWorkspace(host, workspaceId)) await host.restoreWorkspace(workspaceId);
+}
+
 export async function connectNativeHost(paseoHome: string): Promise<NativeHost> {
   if (!paseoHome) throw new Error("Owning daemon PASEO_HOME is required");
   const metadata = JSON.parse(await readFile(join(paseoHome, "paseo.pid"), "utf8"));
