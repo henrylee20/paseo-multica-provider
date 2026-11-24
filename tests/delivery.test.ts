@@ -58,6 +58,7 @@ async function fixture(active = false) {
   await writeFile(join(home, ".multica/config.json"), JSON.stringify({ server_url: `http://127.0.0.1:${(http.address() as { port: number }).port}`, token: "synthetic" }));
   const events: ProviderEvent[] = [];
   const canonical = new Map<string, Array<{ seqStart: number; seqEnd: number; item: Record<string, unknown> }>>();
+  const nativeHistory = { persistOriginals: true };
   const agents: Array<{ id: string; workspaceId: string; cwd: string; labels: Record<string, string>; handle: string }> = [];
   let server: FakeServer;
   let provider: ProviderConnection | undefined;
@@ -69,6 +70,7 @@ async function fixture(active = false) {
       if (event.type !== "timeline.item") return;
       const entries = canonical.get(event.sessionId) ?? [];
       const item = event.item;
+      if (!nativeHistory.persistOriginals && (item.type === "user_message" || item.type === "assistant_message")) return;
       const existing = entries.find(entry => item.type === "user_message" && item.clientMessageId ? entry.item.clientMessageId === item.clientMessageId : entry.item.id === item.id);
       if (existing) existing.item = { ...item }; else entries.push({ seqStart: entries.length, seqEnd: entries.length, item: { ...item } });
       canonical.set(event.sessionId, entries);
@@ -94,7 +96,7 @@ async function fixture(active = false) {
     const agent = agents.find(agent => agent.labels["multica.discussion"] === rootId)!;
     await (await connect()).send({ type: "session.prompt", sessionId: agent.id, prompt: { clientMessageId, delivery, input: { type: "message", content: [{ type: "text", text }] } } });
   };
-  return { ...started, home, paseo, agents, events, canonical, comments, runs, posts, connect, send, start, identity: (id: string) => { identity = id; }, beforeMe: (handler?: () => Promise<void>) => { beforeMe = handler; }, post: (handler: typeof post) => { post = handler; } };
+  return { ...started, home, paseo, agents, events, canonical, nativeHistory, comments, runs, posts, connect, send, start, identity: (id: string) => { identity = id; }, beforeMe: (handler?: () => Promise<void>) => { beforeMe = handler; }, post: (handler: typeof post) => { post = handler; } };
 }
 
 it("main discussion saves an ordinary text comment, preserves its identity and offers the new Thread", async () => {
@@ -127,6 +129,67 @@ it("a Thread replies to its root and matches the saved echo to the original nati
   const restarted = f.start();
   expect((await restarted.server.rpc(deliveryList, {}, f.paseo)).records[0]).toMatchObject({ body: "A reply", commentId: "saved-1", status: "saved" });
   expect(f.posts).toHaveLength(1);
+});
+
+it("replays each saved input once in its original discussion after contribution restart", async () => {
+  const f = await fixture();
+  const thread = f.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
+  const address = { connectionKey: thread.labels["multica.connection"], issueId: "issue", rootId: "root" };
+  await f.server.rpc(threadOpen, address, f.paseo);
+  await f.send("root", "Saved reply", "saved-reply");
+  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[0]?.status).toBe("saved");
+  await f.server.rpc(threadOpen, address, f.paseo);
+  await f.send("main", "New Thread root", "saved-reply");
+  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[1]?.status).toBe("saved");
+  await expect.poll(() => f.agents.some(agent => agent.labels["multica.discussion"] === "saved-2")).toBe(true);
+  const main = f.agents.find(agent => agent.labels["multica.discussion"] === "main")!;
+  const created = f.agents.find(agent => agent.labels["multica.discussion"] === "saved-2")!;
+  await f.server.rpc(threadOpen, { ...address, rootId: "saved-2" }, f.paseo);
+  await f.dispose(); f.start();
+  const boundary = f.events.length;
+  for (const agent of [thread, main, created]) await (await f.connect()).send({ type: "session.open", requestId: `replay-${agent.id}`, sessionId: agent.id, history: "replay", persistence: JSON.parse(agent.handle.slice(7)), config: { cwd: agent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
+  const originals = f.events.slice(boundary).flatMap(event => event.type === "timeline.item" && event.item.type === "user_message" ? [{ sessionId: event.sessionId, text: event.item.text, clientMessageId: event.item.clientMessageId }] : []);
+  expect(originals).toEqual([
+    { sessionId: thread.id, text: "Existing root", clientMessageId: undefined },
+    { sessionId: thread.id, text: "Saved reply", clientMessageId: "saved-reply" },
+    { sessionId: main.id, text: "New Thread root", clientMessageId: "saved-reply" },
+    { sessionId: created.id, text: "New Thread root", clientMessageId: undefined },
+  ]);
+  expect(f.posts).toHaveLength(2);
+});
+
+it("recovers each missing saved or input-only original once when native writes lag across history-skip recovery", async () => {
+  const f = await fixture();
+  const thread = f.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
+  const address = { connectionKey: thread.labels["multica.connection"], issueId: "issue", rootId: "root" };
+  await f.server.rpc(threadOpen, address, f.paseo);
+  await f.send("root", "Shared content", "surviving-saved");
+  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[0]?.status).toBe("saved");
+  await f.send("root", "Missing saved reply", "missing-saved");
+  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[1]?.status).toBe("saved");
+  await f.server.rpc(threadOpen, address, f.paseo);
+  f.post(async () => ({ status: 403 }));
+  await f.send("root", "Missing failed input", "missing-failed");
+  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[2]?.status).toBe("failed");
+  f.post(async body => { f.comments.push(comment("unknown-same-body", "root", body.content)); return { disconnect: true }; });
+  await f.send("root", "Shared content", "pending-same-body");
+  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[3]?.status).toBe("pending_verification");
+  await f.server.rpc(threadOpen, address, f.paseo);
+  f.canonical.set(thread.id, f.canonical.get(thread.id)!.filter(entry => !["missing-saved", "missing-failed", "pending-same-body"].includes(entry.item.clientMessageId as string)));
+  await f.dispose(); const restarted = f.start();
+  const boundary = f.events.length;
+  await (await f.connect()).send({ type: "session.open", requestId: "recover-saved", sessionId: thread.id, history: "skip", persistence: JSON.parse(thread.handle.slice(7)), config: { cwd: thread.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
+  // The host can accept provider events before they become readable history.
+  f.nativeHistory.persistOriginals = false;
+  await restarted.server.rpc(syncBootstrap, {}, f.paseo);
+  await restarted.server.rpc(syncBootstrap, {}, f.paseo);
+  const originals = f.events.slice(boundary).flatMap(event => event.type === "timeline.item" && event.item.type === "user_message" ? [event.item] : []);
+  expect(originals.map(item => ({ text: item.text, clientMessageId: item.clientMessageId }))).toEqual([
+    { text: "Missing saved reply", clientMessageId: "missing-saved" },
+    { text: "Missing failed input", clientMessageId: "missing-failed" },
+    { text: "Shared content", clientMessageId: "pending-same-body" },
+  ]);
+  expect(f.posts).toHaveLength(4);
 });
 
 it("keeps running ordinary delivery admission separate from network failure and never sends remote steering", async () => {
