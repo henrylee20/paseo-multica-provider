@@ -185,13 +185,100 @@ it("renders each run's agent and actual state as a bounded summary and observes 
     const address = { connectionKey: "connection", issueId: "issue", rootId: "root" };
     const data = renderer!.schema.parse({ ...address, runId: "run-one", agentId: "agent", agentName: "Build Agent", status: "waiting_local_directory" });
     const tree = renderer!.Component({ item: { data }, theme: { colors: { foreground: "black", foregroundMuted: "gray" } } });
-    expect(renderedText(tree)).toContain("Build Agent");
-    expect(renderedText(tree)).toContain("waiting_local_directory");
+    const text = renderedText(tree);
+    expect(text).toContain("Build Agent");
+    expect(text).toContain("waiting_local_directory");
     expect(calls).toEqual([]);
     for (const effect of effects) effect();
     await Promise.resolve();
     expect(calls).toEqual([{ name: "run.observe", input: address }]);
   } finally { dispose(); }
+});
+
+it("expands run messages in source order with honest tool correlation and keeps live detail reads inside expansion", async () => {
+  vi.useFakeTimers();
+  const calls: Array<{ name: string; input: any }> = [];
+  const renderers: Array<{ kind: string; schema: zod.ZodType; Component: (props: any) => any }> = [];
+  const state: unknown[] = [];
+  const dependencies: unknown[][] = [];
+  const cleanups: Array<undefined | (() => void)> = [];
+  const effects: Array<() => void> = [];
+  let cursor = 0;
+  const messages: any[] = [
+    { task_id: "run", issue_id: "issue", seq: 1, type: "text", content: "Run text" },
+    { task_id: "run", issue_id: "issue", seq: 2, type: "thinking", content: "Run thought" },
+    { task_id: "run", issue_id: "issue", seq: 3, type: "tool_use", call_id: "reliable", tool: "read", input: { file: "code.ts" } },
+    { task_id: "run", issue_id: "issue", seq: 4, type: "tool_result", call_id: "reliable", output: "Exact output", output_truncated: false },
+    { task_id: "run", issue_id: "issue", seq: 5, type: "tool_use", tool: "missing-input" },
+    { task_id: "run", issue_id: "issue", seq: 6, type: "tool_result", output: "Unknown completeness" },
+    { task_id: "run", issue_id: "issue", seq: 7, type: "tool_result", call_id: "no-input", output: "Partial output", output_truncated: true },
+    { task_id: "run", issue_id: "issue", seq: 8, type: "tool_result", call_id: "missing-output", output_truncated: false },
+    { task_id: "run", issue_id: "issue", seq: 9, type: "error", content: "Source error" },
+  ];
+  const rpcs = new Map<string, (input: any) => Promise<any>>();
+  const setup = await bundledContribution("../index.client.tsx", {
+    react: {
+      useState: (initial: unknown) => { const index = cursor++; if (!(index in state)) state[index] = initial; return [state[index], (value: unknown) => { state[index] = typeof value === "function" ? value(state[index]) : value; }]; },
+      useEffect: (effect: () => unknown, next: unknown[]) => {
+        const index = cursor++;
+        if (dependencies[index] && next.every((value, i) => Object.is(value, dependencies[index][i]))) return;
+        dependencies[index] = next;
+        effects.push(() => { cleanups[index]?.(); const result = effect(); cleanups[index] = typeof result === "function" ? result as () => void : undefined; });
+      },
+    },
+    "@getpaseo/plugin/client": { useRpc: (contract: { name: string }) => {
+      if (!rpcs.has(contract.name)) rpcs.set(contract.name, async input => {
+        calls.push({ name: contract.name, input });
+        if (contract.name === "run.open") return { status: "ready", revision: String(messages.length) };
+        if (contract.name === "run.read") return input.offset === 0 ? { text: JSON.stringify(messages).slice(0, 80), nextOffset: 80 } : { text: JSON.stringify(messages).slice(80), nextOffset: null };
+        return { status: "ready" };
+      });
+      return rpcs.get(contract.name);
+    } },
+    "@getpaseo/plugin/client/ui": {}, "react-native": { Text: "Text", View: "View", Pressable: "Pressable" },
+  });
+  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: any) => { renderers.push(renderer); return () => {}; } });
+  const renderer = renderers.find(value => value.kind === "run-summary")!;
+  const data = renderer.schema.parse({ connectionKey: "connection", issueId: "issue", rootId: "root", runId: "run", agentId: "agent", agentName: "Build Agent", status: "running" });
+  let actions: Array<{ onPress(): void }> = [];
+  const visit = (node: any): string => {
+    if (node === null || node === undefined || typeof node === "boolean") return "";
+    if (typeof node === "string" || typeof node === "number") return String(node);
+    if (Array.isArray(node)) return node.map(visit).join("");
+    if (typeof node.type === "function") return visit(node.type(node.props));
+    if (node.type === "Pressable") actions.push(node.props);
+    return visit(node.props?.children);
+  };
+  const render = () => { cursor = 0; actions = []; const text = visit(renderer.Component({ item: { data }, theme: { colors: { foreground: "black", foregroundMuted: "gray" } } })); for (const effect of effects.splice(0)) effect(); return text; };
+  try {
+    expect(render()).toContain("展开执行明细");
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(calls.map(call => call.name)).toEqual(["run.observe"]);
+    actions[0].onPress();
+    render();
+    await vi.advanceTimersByTimeAsync(0);
+    const text = render();
+    expect(text).toContain("Run text");
+    expect(text.indexOf("Run thought")).toBeGreaterThan(text.indexOf("Run text"));
+    expect(text.indexOf("Exact output")).toBeGreaterThan(text.indexOf("code.ts"));
+    expect(text.indexOf("Source error")).toBeGreaterThan(text.indexOf("Partial output"));
+    expect(text).toContain("结果序号 #4");
+    expect(text).toContain("输入序号 #3");
+    expect(text).toContain("调用关联未知");
+    expect(text).toContain("工具输入缺失");
+    expect(text).toContain("输出完整性未知");
+    expect(text).toContain("源端已截断");
+    expect(text).toContain("输出缺失");
+    messages.push({ task_id: "run", issue_id: "issue", seq: 10, type: "text", content: "Live update" });
+    await vi.advanceTimersByTimeAsync(2100);
+    expect(render()).toContain("Live update");
+    expect(calls.filter(call => call.name === "run.read").map(call => call.input.offset)).toEqual([0, 80, 0, 80]);
+    actions[0].onPress();
+    render();
+    const before = calls.filter(call => call.name === "run.open").length;
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(calls.filter(call => call.name === "run.open")).toHaveLength(before);
+  } finally { for (const cleanup of cleanups) cleanup?.(); dispose(); vi.useRealTimers(); }
 });
 
 it("management lists shared hidden objects and offers separate workspace and selected-tab restoration", async () => {

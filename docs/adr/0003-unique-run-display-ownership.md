@@ -11,3 +11,7 @@ Multica 的一个 Run 可能处理多个 Thread 的评论，但 Paseo 只在一�
 同一原生会话中的所有归属 Run 共同决定一个活动 turn：queued、dispatched、running、waiting_local_directory、deferred 均保持活动，全部终结后才完成聚合 turn。每次从空闲进入活动都生成新 UUID，不能重复使用已经完成的 turn ID。Paseo 0.15.3 实测复用已完成 ID 会使后续完成事件被忽略，造成原生状态停留在运行中。
 
 原生导入在 provider `session.open` 后才注册活动观察；0.15.3 实测在 `session.ready` 前发送 started 不会使导入记录变为运行中。因此缓存重放只输出执行摘要，在导入返回后的同步中发布活动；实际摘要 renderer 挂载后通过只读 `run.observe` 再次发布缓存活动，后续后台快照也会核对。这里不通过虚构 prompt、refresh 活动 agent 或远端写入来启动展示。
+
+#8 将完整执行消息缓存放在独立 `runDetails` 映射，不向摘要行或普通 assistant 历史写入日志。`run.open` 只由展开的执行段请求，远端读取前核对当前 CLI `/api/me` 身份，任务 ID 与 Issue ID 也必须匹配已固定的展示归属。缓存按任务与序号去重，保持源顺序；增量游标只越过连续已读序号，缺口保留后续可补读的机会，不使用最大已见序号。旧连接的已读缓存依靠宿主鉴权读取，无需当前 CLI 身份仍在线。
+
+详细历史通过版本化 `run.read` 分块返回，避免单个工具结果突破 64 KiB 传输预算；读取中版本变化明确失败，由展开 renderer 重试，防止拼接不同快照。展开时每两秒补读当前可用明细，收起或卸载后停止。工具输入与结果仅在 Run 内非空且唯一的相同 `call_id` 下标记关联，仍各自留在源序号位置；缺字段、缺配对、`output_truncated:true` 与未给截断标记的未知完整性都如实说明。源端未接收的字节不能通过展开恢复。

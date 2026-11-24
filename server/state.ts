@@ -2,6 +2,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import { storedRunSchema } from "./run-state.js";
+import { runMessageSchema } from "../shared/runs.js";
 import { threadSchema } from "./thread-state.js";
 import { taskRuleSchema } from "../shared/contracts.js";
 
@@ -13,6 +14,7 @@ const issueSchema = z.object({
   manualHidden: z.object({ workspace: z.boolean(), discussions: z.array(z.string()) }).default({ workspace: false, discussions: [] }),
   threads: z.record(z.string(), threadSchema).default({}),
   runs: z.record(z.string(), storedRunSchema).default({}),
+  runDetails: z.record(z.string(), z.object({ messages: z.array(runMessageSchema) })).default({}),
   commentSourceTaskIds: z.record(z.string(), z.string()).default({}),
   commentCreatedAt: z.record(z.string(), z.string()).default({}),
   commentRoots: z.record(z.string(), z.string()).default({}),

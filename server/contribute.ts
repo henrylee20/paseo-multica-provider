@@ -1,5 +1,6 @@
-import { runObserve } from "../shared/runs.js";
+import { runObserve, runOpen, runRead } from "../shared/runs.js";
 import { RunSynchronizer } from "./runs.js";
+import { RunDetails } from "./run-details.js";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { PluginServerContribution } from "@getpaseo/plugin/server";
@@ -51,6 +52,7 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     server.addHook("workspace.archive.after", async ({ workspace }) => { await hiding.archivedWorkspace(workspace.id); });
     server.handle(hiddenList, async () => hiding.list());
     const runs = new RunSynchronizer(store);
+    const runDetails = new RunDetails(store, connection);
     server.registerProvider(createMulticaProvider(store, threads, runs));
     server.handle(readTaskDescription, async input => {
       // The host authenticates this RPC. Cached history belongs to its persisted
@@ -64,6 +66,8 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       return { text, nextOffset: nextOffset < issue.description.length ? nextOffset : null };
     });
     server.handle(runObserve, async input => runs.observe(input));
+    server.handle(runOpen, async input => runDetails.open(input));
+    server.handle(runRead, async input => runDetails.read(input));
     server.handle(threadOpen, async input => threads.open(input));
     server.handle(threadResolve, async input => {
       const issue = (await store.read()).connections[input.connectionKey]?.issues[input.issueId];
@@ -112,6 +116,6 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       try { await synchronizer.rule(context.paseo, input.workspaceId, input.rule); return { status: "ready" as const }; }
       catch { return { status: "unavailable" as const, message: "筛选规则保存或同步失败，请检查连接后重试。" }; }
     });
-    return async () => { await synchronizer.close(); await threads.close(); runs.close(); };
+    return async () => { await synchronizer.close(); await threads.close(); await runDetails.close(); runs.close(); };
   };
 }
