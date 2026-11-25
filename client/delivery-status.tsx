@@ -127,7 +127,7 @@ export function DeliveryManagement({ theme, navigation, host, refreshKey }: Pick
 }
 
 /** Shown only while mapped issues exist. A reference names one agent by ID; a bare @name does not. */
-export function MentionReferences({ theme, refreshKey }: { theme: Theme; refreshKey: string }) {
+export function MentionReferences({ theme, refreshKey, mentionPicker = false }: { theme: Theme; refreshKey: string; mentionPicker?: boolean }) {
   const targets = useRpc(deliveryTargets), mentions = useRpc(deliveryMentions);
   const [issues, setIssues] = useState<Target[]>([]);
   const [selected, setSelected] = useState("");
@@ -154,7 +154,11 @@ export function MentionReferences({ theme, refreshKey }: { theme: Theme; refresh
   }
   if (!issues.length && !error) return null;
   const failedCopy = agents.find(agent => copied?.id === agent.id && !copied.ok);
-  return <SettingsSection title="提及 Agent" info="选择任务后复制完整身份引用，粘贴到原生输入框。同名 agent 按 ID 区分；普通 @名字不代表已选定接收者。">
+  // Paseo's own `@` suggestions are files, which a plugin cannot replace; the composer control is the picker.
+  const route = mentionPicker
+    ? "讨论输入框提供「提及 Agent」选择器：搜索当前任务的 agent，完整身份引用会插入输入框。也可以选择任务后复制引用。"
+    : "当前 Paseo 不提供输入框内的提及选择器（需要 Paseo 0.16.0 及以上）。选择任务后复制完整身份引用，粘贴到原生输入框。";
+  return <SettingsSection title="提及 Agent" info={`${route}同名 agent 按 ID 区分；普通 @名字不代表已选定接收者。`}>
     {error ? <Notice theme={theme}>{error}</Notice> : null}
     {issues.length ? <SettingsCard>
       <SettingsSelect label="任务" hint="读取此任务可提及的 agent 身份。" value={selected} onValueChange={value => { void choose(value); }}

@@ -9,6 +9,7 @@ import { StateStore } from "./state.js";
 import type { IssueMapping } from "./state.js";
 import type { StoredRow } from "./thread-state.js";
 import { remoteJson, workspaceSchema, type RemoteWorkspace } from "./sync.js";
+import { discussionKeys } from "../shared/discussion.js";
 import type { threadAddress } from "../shared/threads.js";
 
 type Address = z.infer<typeof threadAddress>;
@@ -170,7 +171,7 @@ export class ThreadSynchronizer {
       if (issue.manualHidden.workspace || issue.manualHidden.discussions.includes(root.id)) continue;
       let agentId = mapping.agentId;
       if (!agentId) {
-        const labels = { "multica.connection": connection.connectionKey, "multica.issue": issueId, "multica.discussion": root.id };
+        const labels = { [discussionKeys.connection]: connection.connectionKey, [discussionKeys.issue]: issueId, [discussionKeys.discussion]: root.id };
         agentId = (await findNativeDiscussion(host, { workspaceId: issue.workspaceId, provider: "multica", labels }))?.id;
         agentId ??= (await host.importAgent({ providerId: "multica", providerHandleId: `plugin:${JSON.stringify(threadPersistence(connection.connectionKey, issueId, root.id))}`,
           cwd: issue.cwd, workspaceId: issue.workspaceId, labels })).id;

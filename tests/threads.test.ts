@@ -3,7 +3,7 @@ import { createRequire } from "node:module";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import type { PaseoApi } from "@getpaseo/client";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { ProviderConnection, ProviderEvent, ProviderTimelineItem } from "@getpaseo/plugin/server/provider";
@@ -14,6 +14,7 @@ import { createServerContribution } from "../server/contribute.js";
 import { threadOpen, threadResolve, commentEventDetail } from "../shared/threads.js";
 import { cachedIssueSnapshot, issueHistoryList, issueHistoryRead } from "../shared/access.js";
 import { FakeServer } from "./support/fake-server.js";
+import { metadataHost } from "./support/metadata-host.js";
 
 const cleanup: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const dispose of cleanup.splice(0).reverse()) await dispose(); });
@@ -187,6 +188,14 @@ it("discovers one stable native tab for a root and recursive replies without loa
   await f.server.rpc(syncBootstrap, {}, f.paseo);
   expect(f.native.agents).toHaveLength(2);
   expect(f.requests.every(request => request.method === "GET")).toBe(true);
+});
+
+it("bootstrap copies the task into every discussion tab's metadata, Thread tabs included, for the composer's agent picker", async () => {
+  const f = await fixture();
+  const host = metadataHost(f.native.agents);
+  expect(await f.server.rpc(syncBootstrap, {}, host.paseo)).toEqual({ status: "ready" });
+  await vi.waitFor(() => expect(host.writes.map(write => write.agentId)).toEqual(f.native.agents.map(agent => agent.id)));
+  expect(host.writes.map(write => write.patch)).toEqual(f.native.agents.map(agent => ({ "multica.connection": agent.labels["multica.connection"], "multica.issue": "issue" })));
 });
 
 

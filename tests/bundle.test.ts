@@ -65,6 +65,89 @@ it("client contribution bootstraps without opening management and retries after 
   } finally { vi.useRealTimers(); }
 });
 
+type PickerItem = { id: string; label: string; description?: string; reference: string };
+/** A Paseo 0.16+ host: composer items exist and the bundle reaches the composer through `useComposer`. */
+async function pickerHarness(answer: (input: unknown) => Promise<{ agents: unknown[] }>, composer: Record<string, unknown>) {
+  const refs: unknown[] = [];
+  let cursor = 0;
+  const calls: unknown[] = [], inserted: string[] = [], focused: string[] = [];
+  const surface = { context: "agent", prompt: "", agent: { provider: "multica", metadata: {} as Record<string, unknown> },
+    insertText: (text: string) => { inserted.push(text); }, focus: async () => { focused.push("focused"); }, ...composer };
+  const setup = await bundledContribution("../index.client.tsx", {
+    react: { useRef: (initial: unknown) => (refs[cursor++] ??= { current: initial }) },
+    "@getpaseo/plugin/client": { useComposer: () => surface, useRpc: () => async (input: unknown) => { calls.push(input); return answer(input); } },
+    "@getpaseo/plugin/client/ui": { Combobox: () => null }, "react-native": {},
+  });
+  const items: Array<{ id: string; Component: (props: unknown) => unknown }> = [];
+  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: () => () => {},
+    addComposerItem: (entry: typeof items[number]) => { items.push(entry); return () => { items.splice(items.indexOf(entry), 1); }; } });
+  expect(items.map(item => item.id)).toEqual(["multica-mention"]);
+  return {
+    calls, inserted, focused, dispose, items,
+    render: () => { cursor = 0; return items[0].Component({ theme: { colors: {} }, host: { id: "host", label: "Host" }, layout: { compact: false, platform: "web" } }) as unknown as { props: { title: string; icon: string; value: null; search(event: { query: string }): Promise<readonly PickerItem[]>; onSelect(event: { item: PickerItem }): Promise<void> } } | null; },
+  };
+}
+const builder = (tail: string) => ({ id: `9f3c1a2e-0000-4000-8000-00000000000${tail}`, name: "Builder", reference: `[@Builder](mention://agent/9f3c1a2e-0000-4000-8000-00000000000${tail})` });
+const task = { "multica.connection": "connection", "multica.issue": "issue" };
+
+it("the composer's agent picker reads the discussion's agents once per opening and inserts the chosen canonical reference", async () => {
+  const agents = [builder("1"), builder("2")];
+  const h = await pickerHarness(async () => ({ agents }), { prompt: "请检查", agent: { provider: "multica", metadata: task } });
+  try {
+    const picker = h.render()!;
+    expect(picker).toMatchObject({ props: { title: "提及 Agent", icon: "AtSign", value: null } });
+    expect(h.calls).toEqual([]);
+    const choice = (agent: typeof agents[number]) => ({ ...agent, label: "Builder", description: `ID ${agent.id}` });
+    expect(await picker.props.search({ query: "" })).toEqual([choice(agents[0]), choice(agents[1])]);
+    expect(h.calls).toEqual([{ connectionKey: "connection", issueId: "issue" }]);
+    // Typing filters the reading taken when the list opened; case and surrounding spaces do not matter,
+    // and agents with the same name stay apart by ID.
+    expect(await picker.props.search({ query: " BUIL" })).toEqual([choice(agents[0]), choice(agents[1])]);
+    expect(await picker.props.search({ query: "0002" })).toEqual([choice(agents[1])]);
+    expect(await picker.props.search({ query: "nobody" })).toEqual([]);
+    expect(h.calls).toHaveLength(1);
+    // Opening the list again reads the task's agents again.
+    await picker.props.search({ query: "" });
+    expect(h.calls).toHaveLength(2);
+    await picker.props.onSelect({ item: choice(agents[1]) });
+    // A reference directly after "!" or "\" is not a link in Markdown, so a non-empty prompt keeps a gap before it.
+    expect(h.inserted).toEqual([` ${agents[1].reference} `]);
+    expect(h.focused).toEqual(["focused"]);
+  } finally { h.dispose(); }
+  const empty = await pickerHarness(async () => ({ agents }), { agent: { provider: "multica", metadata: task } });
+  try {
+    await empty.render()!.props.onSelect({ item: { ...agents[0], label: "Builder", description: "" } });
+    expect(empty.inserted).toEqual([`${agents[0].reference} `]);
+  } finally { empty.dispose(); }
+});
+
+it.each([
+  ["a draft composer", { context: "draft" }],
+  ["a discussion whose task was not copied into metadata", { agent: { provider: "multica", metadata: {} } }],
+  ["metadata that does not name a task", { agent: { provider: "multica", metadata: { ...task, "multica.issue": 7 } } }],
+])("the composer's agent picker stays out of %s", async (_name, composer) => {
+  const h = await pickerHarness(async () => ({ agents: [builder("1")] }), { agent: { provider: "multica", metadata: task }, ...composer });
+  try { expect(h.render()).toBeNull(); expect(h.calls).toEqual([]); } finally { h.dispose(); }
+});
+
+it("a picker whose agent reading fails shows the failure and reads again on the next query", async () => {
+  let offline = true;
+  const agents = [builder("1")];
+  const h = await pickerHarness(async () => { if (offline) throw new Error("CLI 未登录"); return { agents }; }, { agent: { provider: "multica", metadata: task } });
+  try {
+    const picker = h.render()!;
+    await expect(picker.props.search({ query: "" })).rejects.toThrow("CLI 未登录");
+    offline = false;
+    expect(await picker.props.search({ query: "" })).toHaveLength(1);
+  } finally { h.dispose(); }
+});
+
+it("the client removes the composer's agent picker when the contribution stops", async () => {
+  const h = await pickerHarness(async () => ({ agents: [] }), {});
+  h.dispose();
+  expect(h.items).toEqual([]);
+});
+
 function renderedText(node: unknown): string {
   if (typeof node === "string") return node;
   if (typeof node === "number") return String(node);
@@ -427,7 +510,8 @@ function componentTree() {
 }
 
 type Answer = (name: string, input: unknown) => unknown;
-async function managementHarness(answer: Answer) {
+/** `host.composerItems` is a Paseo 0.16+ host; without it the client context is the 0.15 surface. */
+async function managementHarness(answer: Answer, host: { composerItems?: boolean } = {}) {
   const tree = componentTree();
   const calls: Array<{ name: string; input: unknown }> = [];
   const actions: Array<{ label: string; hint?: string; actionLabel: string; disabled?: boolean; onPress(): unknown }> = [];
@@ -462,13 +546,15 @@ async function managementHarness(answer: Answer) {
     "react-native": { View: "View", Text: "Text", Pressable: (props: typeof pressables[number] & { children: unknown }) => { pressables.push(props); return props.children; } },
   });
   const screens: Record<string, FunctionComponent<Record<string, unknown>>> = {};
+  const composerItems: string[] = [];
   const dispose = setup({ rpc: async () => ({ status: "ready" }), openScreen: (input: unknown) => opened.push(input),
     addSettingsScreen: (entry: { Component: FunctionComponent<Record<string, unknown>> }) => { screens.settings = entry.Component; return () => {}; },
     addScreen: (entry: { Component: FunctionComponent<Record<string, unknown>> }) => { screens.management = entry.Component; return () => {}; },
-    addSidebarHeaderItem: () => () => {}, addTimelineRenderer: () => () => {} });
+    addSidebarHeaderItem: () => () => {}, addTimelineRenderer: () => () => {},
+    ...(host.composerItems ? { addComposerItem: (entry: { id: string }) => { composerItems.push(entry.id); return () => {}; } } : {}) });
   const colors = { foreground: "fg", foregroundMuted: "muted", statusDanger: "danger", statusWarning: "warning", statusSuccess: "success" };
   return {
-    calls, actions, switches, selects, pressables, copied, opened, navigation, scrolls,
+    calls, actions, switches, selects, pressables, copied, opened, navigation, scrolls, composerItems,
     render(screen: "settings" | "management" = "management", props: Record<string, unknown> = {}) {
       actions.length = 0; switches.length = 0; selects.length = 0; pressables.length = 0; scrolls.length = 0;
       return tree.render(createElement(screens[screen], { host: { id: "host", label: "Host" }, theme: { colors }, layout: { compact: false, platform: "web" },
@@ -486,6 +572,24 @@ const empty: Answer = name => ({
   "connection.history": { connections: [] }, "stop.list": { records: [] }, "hidden.list": { objects: [] }, "issue.history.list": { issues: [] },
   "delivery.list": { records: [] }, "delivery.targets": { issues: [] }, "sync.status": { status: "ready", stage: "idle", completedWorkspaces: 1, enabledWorkspaces: 1 },
 } as Record<string, unknown>)[name];
+
+it("management points at the composer's agent picker where the host has one, and at the copied reference elsewhere", async () => {
+  const answer: Answer = (name, input) => name === "delivery.targets" ? { issues: [{ connectionKey: "old-connection", issueId: "issue", title: "Task" }] } : empty(name, input);
+  const legacy = await managementHarness(answer);
+  try {
+    await vi.waitFor(() => expect(legacy.render()).toContain("提及 Agent"));
+    expect(legacy.composerItems).toEqual([]);
+    for (const text of ["需要 Paseo 0.16.0", "复制完整身份引用"]) expect(legacy.render()).toContain(text);
+  } finally { legacy.dispose(); }
+  const current = await managementHarness(answer, { composerItems: true });
+  try {
+    await vi.waitFor(() => expect(current.render()).toContain("提及 Agent"));
+    expect(current.composerItems).toEqual(["multica-mention"]);
+    const page = current.render();
+    expect(page).toContain("输入框");
+    expect(page).not.toContain("需要 Paseo 0.16.0");
+  } finally { current.dispose(); }
+});
 
 it("management lists shared hidden objects and offers separate workspace and selected-tab restoration", async () => {
   const objects = [

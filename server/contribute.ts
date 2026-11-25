@@ -9,6 +9,7 @@ import { createConnectionResolver, type AuthenticatedConnection, type Connection
 import { StateStore, connectionState } from "./state.js";
 import { SidebarSynchronizer } from "./sync.js";
 import { connectNativeHost, type NativeHost } from "./native-host.js";
+import { DiscussionMetadata } from "./discussion-metadata.js";
 import { workspaceCatalogs } from "./catalogs.js";
 import { createMulticaProvider } from "./provider.js";
 import { DiscussionLifecycle } from "./discussion-lifecycle.js";
@@ -75,6 +76,7 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
         stopWarningCount: issues.reduce((count, issue) => count + Object.values(issue.stopRecords).filter(record => record.retryable || record.cleanup === "pending" || record.cleanup === "unconfirmed").length, 0) };
     }) }));
     const threads = new ThreadSynchronizer(store, connection);
+    const metadata = new DiscussionMetadata(store);
     const history = new IssueHistory(store);
     server.handle(issueHistoryList, () => history.list());
     server.handle(issueHistoryRead, input => history.read(input));
@@ -146,6 +148,9 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     });
     server.handle(syncStatus, async () => synchronizer.status());
     server.handle(syncBootstrap, async (_, context) => {
+      // The composer's agent picker reads a discussion's task from agent metadata. A connected client
+      // bootstraps every ten seconds, which also reaches discussions imported since.
+      void metadata.mirror(context.paseo);
       try { await synchronizer.bootstrap(context.paseo); return { status: "ready" as const }; }
       catch { return { status: "unavailable" as const, message: "Multica 同步暂不可用，请检查 CLI 连接和 daemon。" }; }
     });
@@ -170,6 +175,6 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       try { await synchronizer.rule(context.paseo, input.workspaceId, input.rule, input.connectionKey); return { status: "ready" as const }; }
       catch { return { status: "unavailable" as const, message: "筛选规则保存或同步失败，请检查连接后重试。" }; }
     });
-    return async () => { await deliveries.close(); await synchronizer.close(); await stops.close(); await threads.close(); await runDetails.close(); runs.close(); descriptions.close(); };
+    return async () => { await deliveries.close(); await synchronizer.close(); await metadata.close(); await stops.close(); await threads.close(); await runDetails.close(); runs.close(); descriptions.close(); };
   };
 }

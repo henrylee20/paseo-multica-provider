@@ -10,6 +10,7 @@ import { CommentEvent, ThreadSummary } from "./client/thread-events.js";
 import { commentEventSchema, threadSummarySchema } from "./shared/threads.js";
 import { DeliveryStatus } from "./client/delivery-status.js";
 import { deliverySummary } from "./shared/delivery.js";
+import { MentionPicker, composerItemRegistrar } from "./client/mention-picker.js";
 
 function MulticaItem({ currentScreen, openScreen }: PluginSidebarItemProps) {
   return <SidebarRow icon="MessagesSquare" active={currentScreen?.screenId === "management"}
@@ -29,10 +30,14 @@ export default function contribute(client: PluginClientContext) {
   // Client setup survives reconnects. Keep retrying even when management was never opened.
   const timer = setInterval(() => { void bootstrap(); }, 10_000);
   const openManagement = () => client.openScreen({ screenId: "management" });
+  // The composer's agent picker needs Paseo 0.16; an older host keeps the copied-reference route only.
+  const composerItem = composerItemRegistrar(client);
+  const removeMention = composerItem ? composerItem({ id: "multica-mention", Component: MentionPicker }) : () => {};
   // Settings configures the connection and rules; the sidebar screen also holds records that need handling.
   const removeSettings = client.addSettingsScreen({ id: "multica", title: "Multica", icon: "MessagesSquare",
     Component: props => <ConnectionScreen {...props} scope="settings" openManagement={openManagement} /> });
-  const removeScreen = client.addScreen({ id: "management", title: "Multica", Component: props => <ConnectionScreen {...props} scope="management" /> });
+  const removeScreen = client.addScreen({ id: "management", title: "Multica",
+    Component: props => <ConnectionScreen {...props} scope="management" mentionPicker={composerItem !== null} /> });
   const removeItem = client.addSidebarHeaderItem({ id: "multica", title: "Multica", Component: MulticaItem });
   const removeDescription = client.addTimelineRenderer({ kind: taskDescriptionKind, version: taskDescriptionVersion,
     schema: taskDescriptionSchema, Component: TaskDescription });
@@ -40,5 +45,5 @@ export default function contribute(client: PluginClientContext) {
   const removeRun = client.addTimelineRenderer({ kind: "run-summary", version: 1, schema: runSummarySchema, Component: RunSummary });
   const removeEvent = client.addTimelineRenderer({ kind: "comment-event", version: 1, schema: commentEventSchema, Component: CommentEvent });
   const removeDelivery = client.addTimelineRenderer({ kind: "comment-delivery", version: 1, schema: deliverySummary, Component: props => <DeliveryStatus {...props} openManagement={openManagement} /> });
-  return () => { disposed = true; clearInterval(timer); removeDelivery(); removeRun(); removeEvent(); removeThread(); removeDescription(); removeItem(); removeScreen(); removeSettings(); };
+  return () => { disposed = true; clearInterval(timer); removeDelivery(); removeRun(); removeEvent(); removeThread(); removeDescription(); removeMention(); removeItem(); removeScreen(); removeSettings(); };
 }

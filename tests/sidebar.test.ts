@@ -12,6 +12,7 @@ import { z } from "zod";
 import { createServerContribution } from "../server/contribute.js";
 import type { LocalState } from "../server/state.js";
 import { FakeServer } from "./support/fake-server.js";
+import { metadataHost } from "./support/metadata-host.js";
 import { hiddenList, hiddenRestore } from "../shared/hiding.js";
 
 const bootstrap = defineRpc({ name: "sync.bootstrap", input: z.object({}), output: z.object({ status: z.string() }) });
@@ -175,6 +176,82 @@ it("client bootstrap leaves the native sidebar empty until a workspace rule is e
   expect(await f.server.rpc(management, {}, f.paseo)).toEqual({ workspaces: [{ id: "remote-workspace", name: "产品开发", enabled: false }] });
   expect(f.requests.some(path => path.startsWith("/api/issues"))).toBe(false);
   expect(f.websocketRequests).toEqual([]);
+});
+
+it("client bootstrap copies each discussion's task from agent labels into metadata for the composer's agent picker", async () => {
+  const f = await fixture();
+  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const host = metadataHost(f.native.agents);
+  const [first, second] = f.native.agents;
+  const task = (agent: typeof first) => ({ agentId: agent.id, patch: { "multica.connection": agent.labels["multica.connection"], "multica.issue": agent.labels["multica.issue"] } });
+  expect(await f.server.rpc(bootstrap, {}, host.paseo)).toEqual({ status: "ready" });
+  await vi.waitFor(() => expect(host.writes).toEqual([task(first), task(second)]));
+  // Only this connection's discussions are read, archived ones included; a matching copy is left alone.
+  expect(host.listings).toEqual([{ labels: { "multica.connection": first.labels["multica.connection"] }, includeArchived: true }]);
+  expect(await f.server.rpc(bootstrap, {}, host.paseo)).toEqual({ status: "ready" });
+  await vi.waitFor(() => expect(host.listings).toHaveLength(2));
+  expect(host.writes).toEqual([task(first), task(second)]);
+  // Metadata the host lost is copied again.
+  host.stored.delete(second.id);
+  expect(await f.server.rpc(bootstrap, {}, host.paseo)).toEqual({ status: "ready" });
+  await vi.waitFor(() => expect(host.writes).toEqual([task(first), task(second), task(second)]));
+});
+
+it("the metadata copy follows directory pages, and a cursor that repeats stops it without failing bootstrap", async () => {
+  const f = await fixture();
+  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const paged = metadataHost(f.native.agents, { pageSize: 1 });
+  expect(await f.server.rpc(bootstrap, {}, paged.paseo)).toEqual({ status: "ready" });
+  await vi.waitFor(() => expect(paged.writes).toHaveLength(2));
+  expect(paged.listings).toHaveLength(2);
+  const looping = metadataHost(f.native.agents, { pageSize: 1, repeatingCursor: true });
+  expect(await f.server.rpc(bootstrap, {}, looping.paseo)).toEqual({ status: "ready" });
+  await vi.waitFor(() => expect(looping.listings).toHaveLength(2));
+  // The same cursor comes back, so the directory cannot be proven complete: nothing loops, and the
+  // discussions after it wait for a readable directory.
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect(looping.writes).toHaveLength(1);
+});
+
+it("a host without agent metadata is read once, and bootstrap stays ready", async () => {
+  const f = await fixture();
+  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const host = metadataHost(f.native.agents, { legacy: true });
+  expect(await f.server.rpc(bootstrap, {}, host.paseo)).toEqual({ status: "ready" });
+  await vi.waitFor(() => expect(host.attempts()).toBe(1));
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect(await f.server.rpc(bootstrap, {}, host.paseo)).toEqual({ status: "ready" });
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect(host.attempts()).toBe(1);
+  expect(host.writes).toEqual([]);
+});
+
+it("a failed metadata copy leaves bootstrap ready and is retried; disposal waits for a copy in flight", async () => {
+  const f = await fixture();
+  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const host = metadataHost(f.native.agents);
+  host.control.failNextListing = true;
+  expect(await f.server.rpc(bootstrap, {}, host.paseo)).toEqual({ status: "ready" });
+  await vi.waitFor(() => expect(host.attempts()).toBe(1));
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect(host.writes).toEqual([]);
+  expect(await f.server.rpc(bootstrap, {}, host.paseo)).toEqual({ status: "ready" });
+  await vi.waitFor(() => expect(host.writes).toHaveLength(2));
+  await f.dispose();
+  // Bootstrap answers while the copy is still pending; shutdown does not overtake it.
+  host.stored.clear();
+  let release!: () => void;
+  host.control.holdWrites = new Promise<void>(resolve => { release = resolve; });
+  const restarted = f.start();
+  expect(await restarted.server.rpc(bootstrap, {}, host.paseo)).toEqual({ status: "ready" });
+  await vi.waitFor(() => expect(host.attempts()).toBe(3));
+  let disposed = false;
+  const disposing = Promise.resolve(restarted.dispose()).then(() => { disposed = true; });
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect(disposed).toBe(false);
+  release();
+  await disposing;
+  expect(host.writes).toHaveLength(4);
 });
 
 it("disabling a rule removes its empty Project and reenabling preserves tasks, discussion IDs and directories", async () => {

@@ -10,6 +10,7 @@ import { remoteFetch, type AuthenticatedConnection } from "./connection.js";
 import { archiveClosedDiscussion, ensureWorkspaceActive, findActiveWorkspace, findNativeDiscussion, projectHasActiveWorkspaces, restoreMappedDiscussion, type NativeHost } from "./native-host.js";
 import { StateStore, connectionState } from "./state.js";
 import { hiddenAgent, restoreWorkspacePreservingHidden } from "./hiding.js";
+import { discussionKeys } from "../shared/discussion.js";
 import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
 
 export const workspaceSchema = z.object({ id: z.string().min(1), name: z.string(), slug: z.string().min(1) });
@@ -23,7 +24,7 @@ export function mainPersistence(connectionKey: string, issueId: string) {
   return { version: 1, data: { connectionKey, issueId, discussion: "main" } } as const;
 }
 export function issueLabels(connectionKey: string, issueId: string) {
-  return { "multica.connection": connectionKey, "multica.issue": issueId, "multica.discussion": "main" };
+  return { [discussionKeys.connection]: connectionKey, [discussionKeys.issue]: issueId, [discussionKeys.discussion]: "main" };
 }
 function stableId(...parts: string[]) { return createHash("sha256").update(JSON.stringify(parts)).digest("hex"); }
 
@@ -145,7 +146,7 @@ export class SidebarSynchronizer {
     let cursor: string | undefined;
     const cursors = new Set<string>();
     for (;;) {
-      const page = await this.host!.fetchAgents({ filter: { labels: { "multica.connection": connectionKey, "multica.issue": issueId }, includeArchived: true }, page: { limit: 100, cursor } });
+      const page = await this.host!.fetchAgents({ filter: { labels: { [discussionKeys.connection]: connectionKey, [discussionKeys.issue]: issueId }, includeArchived: true }, page: { limit: 100, cursor } });
       activeAgents.push(...page.entries.filter(item => item.agent.workspaceId === issue.workspaceId && !item.agent.archivedAt).map(item => item.agent.id));
       if (!page.pageInfo.hasMore) break;
       const next = page.pageInfo.nextCursor;
