@@ -9,7 +9,7 @@ import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
 /** These are the real low-level SDK methods, including explicit project placement. */
 export type NativeHost = Pick<DaemonClient, "listHosts" | "addProject" | "renameProject" | "listProjects" | "removeProject" | "fetchWorkspaces" |
   "createWorkspace" | "setWorkspaceTitle" | "fetchAgents" | "importAgent" | "updateAgent" | "close" |
-  "archiveWorkspace" | "restoreWorkspace" | "fetchAgent" | "archiveAgent" | "refreshAgent" | "fetchAgentTimeline">;
+  "archiveWorkspace" | "restoreWorkspace" | "fetchAgent" | "archiveAgent" | "refreshAgent" | "fetchAgentTimeline" | "listCommands">;
 
 /** Directory filters are hints; prove the complete stable identity locally.
  * An incomplete/cyclic directory is never evidence that import is needed. */

@@ -25,6 +25,7 @@ import { CommentDelivery } from "./delivery.js";
 import { deliveryList, deliveryRead, deliveryTargets, deliveryMentions, deliveryVerify, deliveryResend } from "../shared/delivery.js";
 import { issueHistoryList, issueHistoryRead } from "../shared/access.js";
 import { AskUsers } from "./askuser.js";
+import { AskuserWakeups } from "./askuser-wakeup.js";
 import { askuserObserve, askuserRead, askuserReopen, askuserSkip } from "../shared/askuser.js";
 import { IssueHistory } from "./access.js";
 
@@ -86,7 +87,16 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     server.handle(issueHistoryList, () => history.list());
     server.handle(issueHistoryRead, input => history.read(input));
     const lifecycle = new DiscussionLifecycle();
-    server.handle(askuserReopen, input => askusers.reopen(input, lifecycle));
+    const wakeups = new AskuserWakeups(store, askusers, lifecycle, dependencies.now);
+    server.handle(askuserReopen, async (input, context) => {
+      const card = await askusers.reopen(input, lifecycle);
+      await synchronizer.withNativeHost(context.paseo, async host => {
+        const current = await connection();
+        if (current.connectionKey !== input.connectionKey) throw new Error("登录身份已变化；请连接原 Multica 身份。");
+        await wakeups.reopen(current, card, host);
+      });
+      return card;
+    });
     const hiding = new ManualHiding(store, lifecycle);
     server.addHook("agent.archive.after", async ({ agent }) => { await hiding.archivedAgent(agent); });
     server.addHook("workspace.archive.after", async ({ workspace }) => { await hiding.archivedWorkspace(workspace.id); });
@@ -147,6 +157,7 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
         await deliveries.reconcile(connection, workspace, issueId);
         await threads.discover(connection, workspace, issueId, host);
         await runs.discover(connection, workspace, issueId);
+        await wakeups.discover(connection, issueId, host);
       },
       connectHost: () => (dependencies.connectHost ?? connectNativeHost)(owningHome), intervalMs: dependencies.syncIntervalMs ?? 15_000 });
     server.handle(hiddenRestore, async (input, context) => {
