@@ -1,11 +1,11 @@
 import { createServer } from "node:http";
-import { mkdtemp, mkdir, writeFile, rm, rename, readFile } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, rm, rename, readFile, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import type { PaseoApi } from "@getpaseo/client";
 import { createServerContribution } from "../server/contribute.js";
-import { connectionStatus, multicaSettings, workspaceList } from "../shared/contracts.js";
+import { connectionStatus, multicaSettings, profileList, workspaceList } from "../shared/contracts.js";
 import { FakeServer } from "./support/fake-server.js";
 
 const cleanup: Array<() => void | Promise<void>> = [];
@@ -33,8 +33,127 @@ async function fixture(profile = "", environment: NodeJS.ProcessEnv = {}) {
   const server = new FakeServer();
   const dispose = createServerContribution({ homeDirectory: home, environment, workingDirectory: home })(server.context);
   cleanup.push(dispose);
-  return { home, requests, remote, apiUrl, path, server, read: () => server.rpc(connectionStatus, {}, {} as PaseoApi) };
+  return { home, requests, remote, apiUrl, path, server, read: () => server.rpc(connectionStatus, {}, {} as PaseoApi),
+    list: () => server.rpc(profileList, {}, {} as PaseoApi) };
 }
+
+it("lists CLI files safely without exposing credentials or making network requests", async () => {
+  const f = await fixture();
+  const root = join(f.home, ".multica", "profiles");
+  const configs = {
+    office: JSON.stringify({ server_url: " wss://office.example.test:8443/ws?secret=url-secret#fragment ", token: " office-secret " }),
+    logout: JSON.stringify({ server_url: "https://logout.example.test" }),
+    blank: JSON.stringify({ server_url: f.apiUrl, token: " \n " }),
+    "blank-server": JSON.stringify({ server_url: " \n ", token: "blank-server-secret" }),
+    corrupt: "{corrupt-secret",
+    invalid: JSON.stringify({ server_url: f.apiUrl, token: 42 }),
+    "invalid-url": JSON.stringify({ server_url: "not a URL", token: "invalid-url-secret" }),
+    "bad\\name": JSON.stringify({ server_url: f.apiUrl, token: "unsafe-secret" }),
+    "bad\u001fname": JSON.stringify({ server_url: f.apiUrl, token: "control-secret" }),
+    ["x".repeat(129)]: JSON.stringify({ server_url: f.apiUrl, token: "long-name-secret" }),
+    " office ": JSON.stringify({ server_url: f.apiUrl, token: "trimmed-name-secret" }),
+  };
+  for (const [name, config] of Object.entries(configs)) {
+    await mkdir(join(root, name), { recursive: true });
+    await writeFile(join(root, name, "config.json"), config);
+  }
+  await mkdir(join(root, "missing"));
+  await mkdir(join(root, "unreadable", "config.json"), { recursive: true });
+  await writeFile(join(root, "file-entry"), "not a directory");
+  await symlink(join(root, "office"), join(root, "symlink-entry"));
+  const result = await f.list();
+  expect(result).toEqual({ profiles: [
+    { name: "", loggedIn: true, apiHost: new URL(f.apiUrl).host },
+    { name: "blank", loggedIn: false, apiHost: new URL(f.apiUrl).host },
+    { name: "blank-server", loggedIn: false },
+    { name: "corrupt", loggedIn: false },
+    { name: "invalid", loggedIn: false },
+    { name: "invalid-url", loggedIn: false },
+    { name: "logout", loggedIn: false, apiHost: "logout.example.test" },
+    { name: "office", loggedIn: true, apiHost: "office.example.test:8443" },
+    { name: "unreadable", loggedIn: false },
+  ], overridden: false, isolated: false });
+  expect(f.requests).toEqual([]);
+  const serialized = JSON.stringify(result);
+  expect(serialized).not.toContain("opaque-existing-credential");
+  expect(serialized).not.toContain("secret");
+  expect(serialized).not.toContain('"token"');
+});
+
+it("listing other profiles leaves the active connection's identity verification cached", async () => {
+  const f = await fixture();
+  await mkdir(join(f.home, ".multica", "profiles", "other"), { recursive: true });
+  await writeFile(join(f.home, ".multica", "profiles", "other", "config.json"), JSON.stringify({ server_url: f.apiUrl, token: "other-secret" }));
+  const original = await f.read();
+  expect(original.status).toBe("ready");
+  expect(f.requests).toHaveLength(1);
+  expect((await f.list()).profiles).toHaveLength(2);
+  expect(f.requests).toHaveLength(1);
+  expect(await f.read()).toEqual(original);
+  expect(f.requests).toHaveLength(1);
+});
+
+it("missing default config and profiles directory are ordinary logged-out listings", async () => {
+  const f = await fixture();
+  await rm(f.path);
+  expect(await f.list()).toEqual({ profiles: [{ name: "", loggedIn: false }], overridden: false, isolated: false });
+  expect(f.requests).toEqual([]);
+});
+
+it("lists only the absolute MULTICA_TASK_CONFIG_ROOT when configured", async () => {
+  const environment: NodeJS.ProcessEnv = {};
+  const f = await fixture("owner", environment);
+  const root = join(f.home, "task-private");
+  environment.MULTICA_TASK_CONFIG_ROOT = ` ${root} `;
+  await mkdir(join(root, "profiles", "task"), { recursive: true });
+  await writeFile(join(root, "config.json"), JSON.stringify({ server_url: "ws://private.example.test:8080/ws", token: "private-root-secret" }));
+  await writeFile(join(root, "profiles", "task", "config.json"), JSON.stringify({ server_url: "https://task.example.test", token: "private-task-secret" }));
+  expect(await f.list()).toEqual({ profiles: [
+    { name: "", loggedIn: true, apiHost: "private.example.test:8080" }, { name: "task", loggedIn: true, apiHost: "task.example.test" },
+  ], overridden: false, isolated: false });
+  environment.MULTICA_TASK_CONFIG_ROOT = "relative/path";
+  await expect(f.list()).rejects.toThrow("MULTICA_TASK_CONFIG_ROOT 必须是绝对路径");
+  expect(f.requests).toEqual([]);
+});
+
+it.each(["MULTICA_TOKEN", "MULTICA_SERVER_URL"])("reports a nonempty %s override without exposing it", async key => {
+  const environment: NodeJS.ProcessEnv = { [key]: " \n " };
+  const f = await fixture("", environment);
+  expect((await f.list()).overridden).toBe(false);
+  environment[key] = " environment-secret ";
+  const result = await f.list();
+  expect(result.overridden).toBe(true);
+  expect(JSON.stringify(result)).not.toContain("environment-secret");
+  expect(f.requests).toEqual([]);
+});
+
+it.each(["MULTICA_AGENT_ID", "MULTICA_TASK_ID", "MULTICA_DAEMON_PORT"])("isolation from %s hides owner profiles and hosts without authenticating", async key => {
+  const environment: NodeJS.ProcessEnv = { [key]: "task" };
+  const f = await fixture("owner", environment);
+  expect(await f.list()).toEqual({ profiles: [], overridden: false, isolated: true });
+  environment.MULTICA_TASK_CONFIG_ROOT = join(f.home, ".multica");
+  expect(await f.list()).toEqual({ profiles: [], overridden: false, isolated: true });
+  environment.MULTICA_TASK_CONFIG_ROOT = "relative/path";
+  environment.MULTICA_TOKEN = "injected-secret";
+  expect(await f.list()).toEqual({ profiles: [], overridden: true, isolated: true });
+  expect(f.requests).toEqual([]);
+});
+
+it("shares task marker detection with connection resolution, including ancestor markers", async () => {
+  const f = await fixture("owner");
+  await mkdir(join(f.home, "nested", "workspace"), { recursive: true });
+  const server = new FakeServer();
+  cleanup.push(createServerContribution({ homeDirectory: f.home, workingDirectory: join(f.home, "nested", "workspace"), environment: {} })(server.context));
+  const marker = join(f.home, ".multica", "daemon_task_context.json");
+  for (const contents of ["{broken", JSON.stringify({ managed_by: "foreign" })]) {
+    await writeFile(marker, contents);
+    expect((await server.rpc(profileList, {}, {} as PaseoApi)).isolated).toBe(false);
+  }
+  await writeFile(marker, JSON.stringify({ managed_by: "multica-daemon-task" }));
+  expect(await server.rpc(profileList, {}, {} as PaseoApi)).toEqual({ profiles: [], overridden: false, isolated: true });
+  expect(await server.rpc(connectionStatus, {}, {} as PaseoApi)).toMatchObject({ status: "isolated_context" });
+  expect(f.requests).toEqual([]);
+});
 
 it("the public contribution verifies the default CLI connection without exposing its credential", async () => {
   const f = await fixture();

@@ -1,13 +1,13 @@
 import { useEffect, useState } from "react";
 import { Text, View } from "react-native";
 import { useRpc, useSettings, type PluginSurfaceProps } from "@getpaseo/plugin/client";
-import { copyText, SettingsAction, SettingsCard, SettingsInput, SettingsRow, SettingsSection } from "@getpaseo/plugin/client/ui";
-import { connectionStatus, multicaSettings, workspaceList, type ConnectionStatus, type SyncStatus } from "../shared/contracts.js";
+import { copyText, Modal, SettingsAction, SettingsCard, SettingsRow, SettingsSection, SettingsSelect } from "@getpaseo/plugin/client/ui";
+import { connectionStatus, multicaSettings, profileList, workspaceList, type ConnectionStatus, type ProfileList, type SyncStatus } from "../shared/contracts.js";
 import { describeSync } from "./sync-status.js";
 import { WorkspaceList, type Workspace } from "./workspace-list.js";
 import type { HiddenObject } from "../shared/hiding.js";
 import { HiddenObjects } from "./hidden-objects.js";
-import { HeaderAction } from "./ui-kit.js";
+import { HeaderAction, RuleButton } from "./ui-kit.js";
 
 const labels: Record<ConnectionStatus["status"], string> = {
   ready: "已连接", missing_config: "未配置 CLI", unreadable_config: "配置无法读取", invalid_config: "配置无效",
@@ -17,6 +17,7 @@ const labels: Record<ConnectionStatus["status"], string> = {
 export function ConnectionScreen({ host, theme }: PluginSurfaceProps) {
   const settings = useSettings(multicaSettings);
   const readStatus = useRpc(connectionStatus);
+  const readProfiles = useRpc(profileList);
   const listWorkspaces = useRpc(workspaceList);
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
   const [hidden, setHidden] = useState<HiddenObject[]>([]);
@@ -27,14 +28,25 @@ export function ConnectionScreen({ host, theme }: PluginSurfaceProps) {
   const [status, setStatus] = useState<ConnectionStatus | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
-  const [draft, setDraft] = useState("");
+  const [profileRefresh, setProfileRefresh] = useState(0);
+  const [profileState, setProfileState] = useState<{ key: string; value?: ProfileList; error?: string } | null>(null);
   const [profileError, setProfileError] = useState<string | null>(null);
+  const [pendingProfile, setPendingProfile] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState(false);
   const [copied, setCopied] = useState<"done" | "failed" | null>(null);
   const configuredProfile = settings.status === "ready" ? settings.values.profile : undefined;
+  const profileKey = JSON.stringify([host.id, profileRefresh]);
+  const profiles = profileState?.key === profileKey ? profileState : null;
 
-  useEffect(() => { if (configuredProfile !== undefined) setDraft(configuredProfile); }, [configuredProfile]);
+  useEffect(() => {
+    let active = true;
+    void readProfiles({}).then(value => { if (active) setProfileState({ key: profileKey, value }); },
+      () => { if (active) setProfileState({ key: profileKey, error: "无法读取此主机的 CLI profile，请点击刷新重试。" }); });
+    return () => { active = false; };
+  }, [readProfiles, profileKey]);
   // Another host or profile may be another identity: never keep showing the previous one's status or rules.
   useEffect(() => {
+    setPendingProfile(null);
     setStatus(null);
     setHidden([]);
     setWorkspaces([]);
@@ -71,19 +83,32 @@ export function ConnectionScreen({ host, theme }: PluginSurfaceProps) {
     return () => { active = false; if (timer) clearTimeout(timer); };
   }, [readStatus, listWorkspaces, attempt, configuredProfile, host.id]);
 
-  async function saveProfile() {
-    if (settings.status !== "ready") return;
-    const parsed = multicaSettings.schema.safeParse({ profile: draft });
+  const purging = syncStatus?.stage === "purging" && syncStatus.status === "syncing";
+  function selectProfile(profile: string) {
+    if (settings.status !== "ready" || settings.saving || purging || !profiles || profiles.value?.isolated || profile === configuredProfile) return;
+    const parsed = multicaSettings.schema.safeParse({ profile });
     if (!parsed.success) { setProfileError("Profile 必须是单个名称，不能包含路径分隔符或 .. 路径。"); return; }
     setProfileError(null);
-    if (await settings.save(parsed.data, settings.revision)) setAttempt(value => value + 1);
+    setPendingProfile(parsed.data.profile);
+  }
+  async function confirmProfile() {
+    if (pendingProfile === null || settings.status !== "ready" || settings.saving || confirming || purging) return;
+    setConfirming(true);
+    setProfileError(null);
+    try {
+      if (await settings.save({ profile: pendingProfile }, settings.revision)) {
+        setPendingProfile(null);
+        setAttempt(value => value + 1);
+      } else setProfileError("无法保存 profile，请重试。");
+    } catch { setProfileError("无法保存 profile，请重试。"); }
+    finally { setConfirming(false); }
   }
 
   async function copyLogin(command: string) {
     try { await copyText(command); setCopied("done"); } catch { setCopied("failed"); }
   }
 
-  const refresh = () => { void settings.reload(); setAttempt(value => value + 1); };
+  const refresh = () => { void settings.reload(); setAttempt(value => value + 1); setProfileRefresh(value => value + 1); };
   const text = { color: theme.colors.foreground };
   const statusColor = (value: ConnectionStatus["status"]) => value === "ready" ? theme.colors.statusSuccess
     : value === "offline" || value === "isolated_context" ? theme.colors.statusWarning : theme.colors.statusDanger;
@@ -93,6 +118,12 @@ export function ConnectionScreen({ host, theme }: PluginSurfaceProps) {
   const scopeKey = JSON.stringify([host.id, configuredProfile, status?.connectionKey]);
   const workspacesRead = workspaceScope === scopeKey;
   const current = workspacesRead ? workspaces.filter(workspace => workspace.connectionKey === status?.connectionKey) : [];
+  const availableProfiles = profiles?.value?.profiles.filter(profile => profile.loggedIn || profile.name === configuredProfile) ?? [];
+  if (configuredProfile !== undefined && !availableProfiles.some(profile => profile.name === configuredProfile)) availableProfiles.push({ name: configuredProfile, loggedIn: false });
+  const profileOptions = availableProfiles.map(profile => ({ value: profile.name,
+    label: `${profile.name || "默认"}${profile.apiHost ? ` · ${profile.apiHost}` : ""}${profile.loggedIn ? "" : "（未登录）"}` }));
+  const profileHint = [profiles?.value?.isolated ? "任务上下文不能使用拥有者的 profile。" : "",
+    profiles?.value?.overridden ? "环境变量覆盖 CLI 凭据，切换 profile 不会改变账号。" : ""].filter(Boolean).join(" ") || "仅列出已在 daemon 主机登录的 profile。";
 
   const connection = <SettingsSection title="Multica 连接" trailing={<HeaderAction theme={theme} label="刷新" onPress={refresh} />}
     info={`复用 daemon 主机 ${host.label} 上的 Multica CLI 登录。`}>
@@ -111,13 +142,10 @@ export function ConnectionScreen({ host, theme }: PluginSurfaceProps) {
       <SettingsRow label="同步" hint={syncHint}><Text style={{ color: syncColor }}>{sync.short}</Text></SettingsRow>
     </SettingsCard>
     <SettingsCard>
-      {settings.status === "ready" ? [
-        <SettingsInput key={`profile:${configuredProfile}`} label="CLI profile" initialValue={draft} placeholder="默认" disabled={settings.saving}
-          hint="留空使用 CLI 默认 profile。" error={profileError ?? settings.saveError}
-          onChangeText={value => { setDraft(value); setProfileError(null); }} />,
-        <SettingsAction key="save" label="应用 profile" hint="保存后以此 profile 重新验证连接。" actionLabel={settings.saving ? "正在保存…" : "保存 profile"}
-          disabled={settings.saving || draft.trim() === configuredProfile} onPress={() => { void saveProfile(); }} />,
-      ] : settings.status === "invalid" ? <SettingsAction label="CLI profile" hint={`已保存的插件设置无效：${settings.error}`} actionLabel="重置为默认 profile"
+      {settings.status === "ready" ? <SettingsSelect label="CLI profile" value={settings.values.profile} options={profileOptions}
+        disabled={settings.saving || purging || !profiles || profiles.value?.isolated} hint={profileHint} error={settings.saveError ?? profileError ?? profiles?.error}
+        onValueChange={selectProfile} />
+        : settings.status === "invalid" ? <SettingsAction label="CLI profile" hint={`已保存的插件设置无效：${settings.error}`} actionLabel="重置为默认 profile"
         disabled={settings.saving} onPress={() => { void settings.reset().then(saved => { if (saved) setAttempt(value => value + 1); }); }} />
         : <SettingsRow label="CLI profile" hint={settings.status === "loading" ? "正在读取设置…" : "无法读取插件设置，请点击刷新。"}>
           {status ? <Text selectable style={text}>{status.profile || "默认"}</Text> : null}
@@ -138,6 +166,22 @@ export function ConnectionScreen({ host, theme }: PluginSurfaceProps) {
 
   return <View>
     {connection}
+    {syncStatus?.retainedProjects?.length ? <SettingsSection title="保留的 Project" info="以下 Project 包含用户自建工作区，已保留 Project 和占位目录；插件工作区已归档，插件讨论已删除。">
+      <SettingsCard>{syncStatus.retainedProjects.map(project => <SettingsRow key={project.cwd} label={project.name}><Text selectable style={text}>{project.cwd}</Text></SettingsRow>)}</SettingsCard>
+    </SettingsSection> : null}
+    {pendingProfile !== null ? <Modal title="确认切换 CLI profile" open onOpenChange={open => { if (!open && !confirming && !settings.saving) setPendingProfile(null); }}>
+      <Modal.Content>
+        <Text style={text}>切换到 profile：{pendingProfile || "默认"}</Text>
+        <Text style={text}>当前本地数据：Project {status?.localData?.projects ?? 0} · 任务 {status?.localData?.issues ?? 0} · 讨论 {status?.localData?.discussions ?? 0}</Text>
+        <Text style={text}>将清理上一 profile 的全部本地规则、映射、缓存、讨论、插件 Project 和占位目录。含用户自建工作区的 Project 将保留。</Text>
+        <Text style={text}>不影响 Multica 远端数据（不会取消远端 Run 或删除评论）</Text>
+        {settings.saveError ?? profileError ? <Text style={{ color: theme.colors.statusDanger }}>{settings.saveError ?? profileError}</Text> : null}
+        <View style={{ flexDirection: "row", justifyContent: "flex-end", gap: 8 }}>
+          <RuleButton theme={theme} disabled={confirming || settings.saving} onPress={() => setPendingProfile(null)}>取消</RuleButton>
+          <RuleButton theme={theme} tone="danger" disabled={confirming || settings.saving || purging} onPress={() => { void confirmProfile(); }}>{confirming ? "正在保存…" : "确认切换"}</RuleButton>
+        </View>
+      </Modal.Content>
+    </Modal> : null}
     {rules}
     <HiddenObjects theme={theme} objects={hidden} onRefresh={refresh} />
   </View>;

@@ -46,3 +46,7 @@ AskUser 卡片同样移除只读快照集成与 inaccessible 二次取证；完�
 ## 修订：保留原生时间线完整核对（OPT-10）
 
 评估过移除恢复时的全量回扫，核对 Paseo 0.17.4 的 plugin-provider / timeline-projection 实现后保留。普通消息的 item ID 去重仅存在于每个 provider 会话的内存中，不保证跨重启去重；持久投影的稳定身份合并仅覆盖工具和插件条目，自身输入另按 clientMessageId 关联回声。因此仍需完整分页核对原生原文，避免缓存已保存而宿主尚未落盘时漏消息，或无差别重放造成重复。
+
+## 修订：切换 CLI profile 时删除旧缓存（ADR 0010）
+
+[ADR 0010](./0010-clear-local-data-on-profile-switch.md) 变更了跨 profile 保留缓存的约定：同一 profile 下 CLI 离线、登出或换账号时已读缓存仍可读，但切换 CLI profile 后，前一 profile 的本地状态缓存与原生讨论一并删除，不再在切回后继续阅读旧缓存。

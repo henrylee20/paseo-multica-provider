@@ -7,6 +7,12 @@ export const multicaSettings = defineSettings({
   schema: z.object({ profile: z.string().trim().max(128).refine(value => value !== "." && value !== ".." && !/[\\/\u0000-\u001f]/.test(value), "Profile must be a single safe name").default("") }),
 });
 
+export const profileList = defineRpc({ name: "profile.list", input: z.object({}), output: z.object({
+  profiles: z.array(z.object({ name: z.string(), loggedIn: z.boolean(), apiHost: z.string().optional() })),
+  overridden: z.boolean(), isolated: z.boolean(),
+}) });
+export type ProfileList = z.output<typeof profileList.output>;
+
 export const connectionStatusSchema = z.object({
   status: z.enum(["ready", "missing_config", "unreadable_config", "invalid_config", "not_logged_in", "authentication_failed", "offline", "isolated_context", "invalid_settings"]),
   profile: z.string(),
@@ -18,13 +24,15 @@ export const connectionStatusSchema = z.object({
   connectionKey: z.string().optional(),
   message: z.string(),
   loginCommand: z.string(),
+  localData: z.object({ projects: z.number().int().nonnegative(), issues: z.number().int().nonnegative(), discussions: z.number().int().nonnegative() }).optional(),
 });
 export type ConnectionStatus = z.output<typeof connectionStatusSchema>;
 
 export const syncStatusSchema = z.object({
   status: z.enum(["idle", "syncing", "ready", "unavailable"]),
-  stage: z.enum(["idle", "connection", "workspaces", "issues", "history", "archiving"]),
+  stage: z.enum(["idle", "connection", "workspaces", "issues", "history", "archiving", "purging"]),
   connectionKey: z.string().optional(), lastSuccessAt: z.string().optional(),
+  retainedProjects: z.array(z.object({ name: z.string(), cwd: z.string() })).optional(),
   completedWorkspaces: z.number().int().nonnegative(), enabledWorkspaces: z.number().int().nonnegative(),
   completedArchives: z.number().int().nonnegative().optional(), pendingArchives: z.number().int().nonnegative().optional(),
   message: z.string().optional(),

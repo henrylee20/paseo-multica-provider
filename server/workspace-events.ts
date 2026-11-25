@@ -69,5 +69,6 @@ export class WorkspaceEvents {
       void connect();
     }
   }
-  close() { this.closed = true; for (const subscription of this.subscriptions.values()) subscription.close(); this.subscriptions.clear(); }
+  disconnect() { for (const subscription of this.subscriptions.values()) subscription.close(); this.subscriptions.clear(); }
+  close() { this.closed = true; this.disconnect(); }
 }

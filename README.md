@@ -41,13 +41,13 @@ multica setup self-host --server-url https://api.example.com --app-url https://a
 
 已有配置只需 `multica login`。命名 profile 使用 `multica --profile work setup self-host --server-url https://api.example.com --app-url https://app.example.com` 或 `multica --profile work login`。示例地址需要替换为自己的服务；插件不修改 CLI 配置，也不自动开始登录。
 
-打开 Paseo 设置中的 **Multica**。设置页包含 **Multica 连接**、**Multica 工作区与筛选规则**，有隐藏对象时才显示 **人工隐藏**。Profile 留空使用 `~/.multica/config.json`；填写 `work` 使用 `~/.multica/profiles/work/config.json`，然后点击 **保存 profile**。连接摘要显示 API 地址、已验证用户及同步状态；连接异常时显示 daemon 主机、配置来源和登录命令，可点 **复制命令**。
+打开 Paseo 设置中的 **Multica**。设置页包含 **Multica 连接**、**Multica 工作区与筛选规则**，有隐藏对象或切换 profile 保留的 Project 时才显示对应区块。**CLI profile** 下拉框列出 daemon 主机上已登录的默认配置（`~/.multica/config.json`）及命名 profile（`~/.multica/profiles/<name>/config.json`），仅显示名称与服务主机；当前已选项即使已登出也会保留显示。选择新 profile 时会先弹窗确认本机 Project、任务和讨论数量，确认后再保存设置并清理前一 profile 的本地数据；环境变量覆盖凭据时提示切换不改变账号，任务隔离上下文会禁用选择。连接摘要显示 API 地址、已验证用户及同步／清理状态；连接异常时显示 daemon 主机、配置来源和登录命令，可点 **复制命令**。
 
 登录范围是 **daemon 主机及其运行用户**。另一个设备上的 Paseo 客户端、另一用户的 CLI 或浏览器登录不会自动共享。API 的 `server_url` 与页面的 `app_url` 分别使用，保留自部署端口；没有硬编码云地址兜底。
 
-沿用 daemon 进程已有的 `MULTICA_SERVER_URL`、`MULTICA_TOKEN`、`MULTICA_APP_URL`／`FRONTEND_ORIGIN` 覆盖，勿把凭据填入插件设置。修改启动环境后需按部署方式重启 daemon；CLI 文件的原子替换、重新登录和登出则会重新读取。`MULTICA_TASK_CONFIG_ROOT` 指定任务私有根目录；任务 ID、daemon 端口环境或目录标记触发隔离时，缺少必要注入便拒绝借用拥有者登录。有效凭据移除后不沿用旧缓存。
+沿用 daemon 进程已有的 `MULTICA_SERVER_URL`、`MULTICA_TOKEN`、`MULTICA_APP_URL`／`FRONTEND_ORIGIN` 覆盖，勿把凭据填入插件设置。修改启动环境后需按部署方式重启 daemon；CLI 文件的原子替换、重新登录和登出则会重新读取。`MULTICA_TASK_CONFIG_ROOT` 指定任务私有根目录；任务 ID、daemon 端口环境或目录标记触发隔离时，缺少必要注入便拒绝借用拥有者登录，也不枚举拥有者 profile。有效凭据移除后不沿用旧缓存。
 
-同服务同账号换 Token 或切换到指向同身份的 profile 会续用原映射；更换服务或账号建立独立连接，从空规则开始。旧历史、原作者角色与人工隐藏保留在原连接；通过 CLI 和 profile 切回后继续使用原映射。旧连接不能借用新登录发表评论或取消 Run。
+同一 profile 下同服务同账号换 Token 会续用原映射；同一 profile 下经 CLI 更换服务或账号建立独立连接、从空规则开始，旧连接不自动删除，旧连接不能借用新登录发表评论或取消 Run。切换 CLI profile 时（即使新旧 profile 指向同一账号），插件会清空前一 profile 在本机留下的全部规则、映射、缓存、人工隐藏、原生讨论、插件 Project 与占位目录，并从空规则重新开始；若某个插件 Project 内存在用户自建活跃工作区，则保留该 Project 和占位目录（仅删除插件讨论、归档插件工作区）并在设置页提示。切换清理不影响 Multica 远端数据与 CLI 配置，也不会取消远端 Run。
 
 ## 筛选与本地目录
 
@@ -57,7 +57,7 @@ multica setup self-host --server-url https://api.example.com --app-url https://a
 
 匹配任务动态进入原生项目树；退出筛选自动归档，重新匹配恢复原 ID 与历史。关闭已启用卡片的开关后，需在弹窗点击 **停用** 确认归档此 Multica 工作区已导入的任务，并移除已无活跃工作区的插件 Paseo 项目；若其中有用户自建的活跃工作区，则保留 Project。重新启用时可重建 Project 和任务的本地 Paseo 工作区外壳，Multica 任务、原讨论 ID、占位目录、评论与执行历史保持，人工隐藏继续有效。停用规则和归档整个 Paseo 工作区不取消远端 Run。关闭 tab 或手动归档 Paseo 工作区会持久人工隐藏，自动同步不会重新打开；在设置页 **人工隐藏** 点 **恢复 Paseo 工作区** 或 **恢复讨论**；恢复工作区不会解除其中讨论的隐藏，恢复指定讨论也保留其他隐藏。
 
-每项任务有独立非 Git 占位目录；它**不是远端代码仓库**。原生文件和终端功能指向占位目录，Multica 执行仍在远端。状态和目录位于拥有者 daemon 的 `PASEO_HOME/multica-provider`，按服务／用户与稳定远端 ID 隔离。目录在归档后保留；删除本地状态会失去原映射、隐藏意愿与已读缓存，不能当作日常恢复手段。
+每项任务有独立非 Git 占位目录；它**不是远端代码仓库**。原生文件和终端功能指向占位目录，Multica 执行仍在远端。状态和目录位于拥有者 daemon 的 `PASEO_HOME/multica-provider`，按服务／用户与稳定远端 ID 隔离。目录在归档后保留，仅在切换 CLI profile 清理时随旧数据删除（含用户自建活跃工作区的 Project 及其占位目录除外）；手动删除本地状态会失去当前 profile 的映射、隐藏意愿与已读缓存，不能当作日常恢复手段。
 
 ## 讨论、执行与停止
 
@@ -107,6 +107,6 @@ multica setup self-host --server-url https://api.example.com --app-url https://a
 - [AskUser 验收与手动清单](docs/askuser-acceptance.md)、[主动加载与通知边界](docs/askuser-wakeup.md)。
 - [当前规格](docs/spec.md)：包含精简后行为与取消的保证。
 - [术语表](GLOSSARY.md)、[设计与原始证据](docs/design.md)、[实现上下文](CONTEXT.md)。
-- [架构决定](docs/adr)：[Thread](docs/adr/0001-thread-as-paseo-session.md)、[目录](docs/adr/0002-use-existing-paseo-with-placeholder-directories.md)、[Run 归属](docs/adr/0003-unique-run-display-ownership.md)、[Stop](docs/adr/0004-native-interrupt-stops-remote-run.md)、[历史](docs/adr/0005-preserve-native-comment-history.md)、[身份](docs/adr/0006-isolate-connection-identities.md)、[评论重试](docs/adr/0007-retry-comments-only-with-deduplication.md)、[CLI 登录](docs/adr/0008-reuse-multica-cli-authentication.md)、[提及选择器](docs/adr/0009-composer-mention-picker.md)。
+- [架构决定](docs/adr)：[Thread](docs/adr/0001-thread-as-paseo-session.md)、[目录](docs/adr/0002-use-existing-paseo-with-placeholder-directories.md)、[Run 归属](docs/adr/0003-unique-run-display-ownership.md)、[Stop](docs/adr/0004-native-interrupt-stops-remote-run.md)、[历史](docs/adr/0005-preserve-native-comment-history.md)、[身份](docs/adr/0006-isolate-connection-identities.md)、[评论重试](docs/adr/0007-retry-comments-only-with-deduplication.md)、[CLI 登录](docs/adr/0008-reuse-multica-cli-authentication.md)、[提及选择器](docs/adr/0009-composer-mention-picker.md)、[切换 profile 清理](docs/adr/0010-clear-local-data-on-profile-switch.md)。
 
 CLI 兼容依据为 Multica CLI 0.6.3 固定提交 [`18fa9f7`](https://github.com/multica-ai/multica/tree/18fa9f728a9e25f2465df2789631edb2a75442ad)。开发检查使用真实锁定 SDK、临时 CLI 配置、隔离 HTTP/WebSocket 和公开贡献／provider／RPC 边界；这些测试覆盖故障与竞态，但不能代替真实宿主或真实服务验收。构建后 `dist` 中的副本不进入类型检查或测试发现。

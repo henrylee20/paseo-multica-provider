@@ -39,7 +39,7 @@ export async function restoreWorkspacePreservingHidden(host: NativeHost, lifecyc
 /** Native hooks carry no bulk-archive cause. Preserve every explicit tab hide;
  * a workspace restore therefore leaves its discussions available for separate restore. */
 export class ManualHiding {
-  constructor(private readonly store: StateStore, private readonly lifecycle: DiscussionLifecycle, private readonly metadata: DiscussionMetadata) {}
+  constructor(private readonly store: StateStore, private readonly lifecycle: DiscussionLifecycle, private readonly metadata: DiscussionMetadata, private readonly purgePending: () => Promise<boolean> = async () => false) {}
   async archivedAgent(agent: PluginHookAgent) {
     if (agent.provider !== "multica") return;
     await this.store.update(state => {
@@ -58,6 +58,7 @@ export class ManualHiding {
     });
   }
   async list() {
+    if (await this.purgePending()) return { objects: [] };
     const state = await this.store.read();
     return { objects: Object.entries(state.connections).flatMap(([connectionKey, connection]) => Object.entries(connection.issues).flatMap(([issueId, issue]) => {
       const address = { connectionKey, issueId, workspaceId: issue.workspaceId, cwd: issue.cwd };

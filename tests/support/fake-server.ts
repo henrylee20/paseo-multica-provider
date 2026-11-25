@@ -12,6 +12,7 @@ import type { input, output, ZodType } from "zod";
 export class FakeServer {
   readonly providers = new Map<string, ProviderRegistration>();
   readonly settings = new Map<string, SettingsDefinition>();
+  private readonly settingsListeners = new Map<string, Set<() => void>>();
   private readonly settingsValues = new Map<string, unknown>();
   private readonly handlers = new Map<string, (input: unknown, paseo: PaseoApi) => Promise<unknown>>();
   private readonly hooks = new Map<keyof PluginHooks, Array<(payload: never, context: PluginHookContext) => Promise<unknown>>>();
@@ -21,14 +22,18 @@ export class FakeServer {
     registerUsageSource: () => { throw new Error("Usage source not implemented by fake"); },
     registerSettings: <Schema extends ZodType>(definition: SettingsDefinition<Schema>) => {
       this.settings.set(definition.id, definition);
-      return {
-        read: async (): Promise<PluginSettingsState<Schema>> => {
-          const parsed = definition.schema.safeParse(this.settingsValues.get(definition.id) ?? {});
-          return parsed.success ? { status: "ready", revision: "1", values: parsed.data }
-            : { status: "invalid", revision: "1", error: "Settings validation failed" };
-        },
-        subscribe: () => () => {},
+      const read = async (): Promise<PluginSettingsState<Schema>> => {
+        const parsed = definition.schema.safeParse(this.settingsValues.get(definition.id) ?? {});
+        return parsed.success ? { status: "ready", revision: "1", values: parsed.data }
+          : { status: "invalid", revision: "1", error: "Settings validation failed" };
       };
+      return { read, subscribe: (listener: (state: PluginSettingsState<Schema>) => void | Promise<void>) => {
+        const listeners = this.settingsListeners.get(definition.id) ?? new Set();
+        this.settingsListeners.set(definition.id, listeners);
+        const notify = () => { void read().then(listener); };
+        listeners.add(notify);
+        return () => { listeners.delete(notify); };
+      } };
     },
     handle: (contract, handler) => {
       this.handlers.set(contract.name, async (value, paseo) =>
@@ -45,7 +50,7 @@ export class FakeServer {
     before: () => { throw new Error("Use SDK addHook in tests"); },
   };
 
-  setSettings(id: string, values: unknown) { this.settingsValues.set(id, values); }
+  setSettings(id: string, values: unknown) { this.settingsValues.set(id, values); for (const notify of this.settingsListeners.get(id) ?? []) notify(); }
 
   async rpc<I extends ZodType, O extends ZodType>(contract: PluginRpcContract<I, O>, value: input<I>, paseo: PaseoApi): Promise<output<O>> {
     const handler = this.handlers.get(contract.name);

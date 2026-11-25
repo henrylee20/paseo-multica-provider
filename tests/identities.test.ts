@@ -4,15 +4,18 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, mkdir, writeFile, readFile, rm, rename } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import type { PaseoApi } from "@getpaseo/client";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { ProviderConnection, ProviderEvent } from "@getpaseo/plugin/server/provider";
-import { workspaceEnable, syncBootstrap, connectionStatus, multicaSettings, workspaceList } from "../shared/contracts.js";
+import { workspaceEnable, syncBootstrap, connectionStatus, multicaSettings, workspaceList, workspaceRule, taskRuleSchema } from "../shared/contracts.js";
 import { deliveryMentions } from "../shared/delivery.js";
 import { threadOpen } from "../shared/threads.js";
 import { createServerContribution } from "../server/contribute.js";
-import { FakeServer, hiddenObjects } from "./support/fake-server.js";
+import type { LocalState } from "../server/state.js";
+import { FakeServer, hiddenObjects, waitForSync } from "./support/fake-server.js";
+import { askuserObserve, askuserReopen } from "../shared/askuser.js";
+import { hiddenRestore } from "../shared/hiding.js";
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 
@@ -25,7 +28,7 @@ const pause = () => {
   return { release, waiting, handler: async () => { reached(); await blocked; } };
 };
 
-async function fixture() {
+async function fixture(options: { askuser?: boolean; empty?: boolean } = {}) {
   const home = await mkdtemp(join(tmpdir(), "multica-identities-"));
   cleanup.push(() => rm(home, { recursive: true, force: true }));
   // Ephemeral opaque fixture credentials are compared only as booleans, never
@@ -52,7 +55,10 @@ async function fixture() {
       else if (url.pathname === "/api/issues/issue/task-runs")
         body = [{ id: "run", issue_id: "issue", agent_id: "agent", status: "running", trigger_comment_id: "root" }];
       else if (url.pathname === "/api/issues/issue/comments")
-        body = [{ id: "root", issue_id: "issue", parent_id: null, content: "Original Lin comment", author_id: "me", author_type: "member", type: "comment", created_at: "2026-11-24T10:00:00Z", updated_at: "2026-11-24T10:00:00Z", attachments: [] }];
+        body = [{ id: "root", issue_id: "issue", parent_id: null, content: "Original Lin comment", author_id: "me", author_type: "member", type: "comment", created_at: "2026-11-24T10:00:00Z", updated_at: "2026-11-24T10:00:00Z", attachments: options.askuser ? [{ id: "question", filename: "askuser.json", content_type: "application/json", download_url: "/api/attachments/question/download" }] : [] }];
+      else if (url.pathname === "/api/attachments/question/download") body = { version: "1", title: "发布确认", questions: [{ id: "reason", type: "text", title: "理由" }] };
+      else if (url.pathname === "/api/issues/issue") body = { id: "issue", workspace_id: "workspace" };
+      else if (url.pathname === "/api/issues/issue/timeline") body = [];
       else if (url.pathname === "/api/agents") body = [{ id: "agent", name: "Agent" }];
       else if (url.pathname.endsWith("/members")) body = [{ user_id: "me", name: "Lin" }];
       else { response.statusCode = 404; body = {}; }
@@ -79,11 +85,11 @@ async function fixture() {
   };
   await login(0);
   const events: ProviderEvent[] = [];
-  const projects: Array<{ projectId: string; cwd: string }> = [];
-  const workspaces: Array<{ id: string }> = [];
-  const agents: Array<{ id: string; workspaceId: string; cwd: string; labels: Record<string, string>; archivedAt?: string }> = [];
+  const projects: Array<{ projectId: string; cwd: string; projectRootPath: string; projectKind: string }> = [];
+  const workspaces: Array<{ id: string; projectId: string; archived?: boolean }> = [];
+  const agents: Array<{ provider: string; id: string; workspaceId: string; cwd: string; labels: Record<string, string>; archivedAt?: string }> = [];
   let provider: ProviderConnection | undefined;
-  const server = new FakeServer();
+  let server = new FakeServer();
   const connect = async () => {
     if (!provider) {
       provider = await server.providers.get("multica")!.connect({ versions: [1], capabilities: ["session.persistence", "prompt.message", "prompt.steer", "timeline.plugin"] });
@@ -93,42 +99,59 @@ async function fixture() {
     }
     return provider;
   };
+  let nextProject = 0, nextAgent = 0;
   const host = {
     listHosts: async () => ({ self: { serverId: "daemon" } }),
-    listProjects: async () => ({ projects: [] }),
+    listProjects: vi.fn(async () => ({ projects })),
     addProject: async (cwd: string) => {
       let project = projects.find(value => value.cwd === cwd);
       if (!project) {
-        project = { projectId: `project-${projects.length}`, cwd };
+        project = { projectId: `project-${nextProject++}`, cwd, projectRootPath: cwd, projectKind: "non_git" };
         projects.push(project);
       }
       return { project: { ...project, projectKind: "non_git" } };
     },
-    renameProject: async () => {}, fetchWorkspaces: async () => ({ entries: workspaces, pageInfo: { hasMore: false } }),
-    createWorkspace: async (input: { workspaceId: string }) => {
-      const workspace = { id: input.workspaceId };
+    removeProject: vi.fn(async (id: string) => {
+      projects.splice(projects.findIndex(project => project.projectId === id), 1);
+      for (const workspace of workspaces) if (workspace.projectId === id) workspace.archived = true;
+    }),
+    archiveWorkspace: vi.fn(async (id: string) => { workspaces.find(workspace => workspace.id === id)!.archived = true; return { error: null as string | null }; }),
+    renameProject: async () => {}, fetchWorkspaces: vi.fn(async (_input?: unknown) => ({ entries: workspaces.filter(workspace => !workspace.archived), pageInfo: { hasMore: false, nextCursor: undefined as string | undefined } })),
+    createWorkspace: async (input: { workspaceId: string; source: { projectId: string } }) => {
+      const workspace = { id: input.workspaceId, projectId: input.source.projectId };
       workspaces.push(workspace);
       return { workspace };
     }, setWorkspaceTitle: async () => {},
-    fetchAgents: async () => ({ entries: agents.map(agent => ({ agent: { provider: "multica", ...agent } })), pageInfo: { hasMore: false } }),
-    fetchAgent: async (id: string) => ({ agent: agents.find(agent => agent.id === id)! }),
+    fetchAgents: vi.fn(async (_input?: unknown) => ({ entries: agents.map(agent => ({ agent })), pageInfo: { hasMore: false, nextCursor: undefined as string | undefined } })),
+    deleteAgent: vi.fn(async (id: string) => { const index = agents.findIndex(agent => agent.id === id); if (index >= 0) agents.splice(index, 1); }),
+    fetchAgent: vi.fn(async (id: string) => ({ agent: agents.find(agent => agent.id === id) })),
     fetchAgentTimeline: async (agentId: string) => ({ agentId, epoch: "epoch", entries: [], hasOlder: false, hasNewer: false }),
     importAgent: async (input: { workspaceId: string; cwd: string; labels: Record<string, string>; providerHandleId: string }) => {
-      const agent = { id: `native-${agents.length}`, workspaceId: input.workspaceId, cwd: input.cwd, labels: input.labels }; agents.push(agent);
+      const agent = { provider: "multica", id: `native-${nextAgent++}`, workspaceId: input.workspaceId, cwd: input.cwd, labels: input.labels }; agents.push(agent);
       await (await connect()).send({ type: "session.open", requestId: agent.id, sessionId: agent.id, history: "replay", persistence: JSON.parse(input.providerHandleId.slice(7)), config: { cwd: agent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
       return agent;
     }, updateAgent: async () => {}, close: async () => {},
-  } as unknown as DaemonClient;
+  };
   const paseo = { agents: { ref: () => ({}) }, hosts: { list: async () => ({ self: { serverId: "daemon" } }) } } as unknown as PaseoApi;
-  const dispose = createServerContribution({ homeDirectory: home, stateDirectory: join(home, "state"), workingDirectory: home, environment: { PASEO_HOME: home }, connectHost: async () => host, syncIntervalMs: 60_000 })(server.context);
-  cleanup.push(dispose); cleanup.push(async () => { await provider?.close(); });
-  await server.syncRpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, paseo);
+  const start = () => createServerContribution({ homeDirectory: home, stateDirectory: join(home, "state"), workingDirectory: home, environment: { PASEO_HOME: home }, connectHost: async () => host as unknown as DaemonClient, syncIntervalMs: 60_000 })(server.context);
+  let dispose = start();
+  cleanup.push(() => dispose()); cleanup.push(async () => { await provider?.close(); });
+  if (!options.empty) await server.syncRpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, paseo);
   const address = (connectionKey = agents[0].labels["multica.connection"]) => ({ connectionKey, issueId: "issue", rootId: "root" });
   const send = async (clientMessageId: string) => {
     const agent = agents.find(agent => agent.labels["multica.connection"] === address().connectionKey && agent.labels["multica.discussion"] === "root")!;
     await (await connect()).send({ type: "session.prompt", sessionId: agent.id, prompt: { clientMessageId, delivery: "steer", input: { type: "message", content: [{ type: "text", text: "Preserve original input" }] } } });
   };
-  return { home, server, paseo, events, projects, workspaces, agents, posts, requests, address, send, login, primary, secondary, connect,
+  return { home, get server() { return server; }, host, paseo,
+    restart: async (legacy = false) => {
+      await provider?.close(); provider = undefined; await dispose();
+      if (legacy) {
+        const state = JSON.parse(await readFile(join(home, "state/state.json"), "utf8"));
+        delete state.owner;
+        await writeFile(join(home, "state/state.json"), JSON.stringify(state));
+      }
+      server = new FakeServer(); dispose = start();
+    }, events, projects, workspaces, agents, posts, requests, address, send, login, primary, secondary, connect,
     historyReader: () => {
       const server = new FakeServer();
       cleanup.push(createServerContribution({ homeDirectory: home, stateDirectory: join(home, "state"), workingDirectory: home, environment: { PASEO_HOME: home } })(server.context));
@@ -161,67 +184,57 @@ it("logout retires the authenticated workspace socket and leaves no old-cache re
   expect(f.requests.length).toBe(before);
 });
 
-it("credential rotation reuses history while account and service switches isolate mappings, roles, hiding and pending work", async () => {
+it("same-profile token rotation reuses data and CLI account changes keep both connections until a profile switch", async () => {
   const f = await fixture();
   const original = f.address();
-  const originalThread = f.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
-  await f.server.rpc(threadOpen, original, f.paseo);
-  await (await f.connect()).send({ type: "session.interrupt", requestId: "stop-original", sessionId: originalThread.id });
-  originalThread.archivedAt = "2026-11-24T10:05:00Z";
-  await f.server.hook("agent.archive.after", { agent: { id: originalThread.id, provider: "multica", workspaceId: originalThread.workspaceId, cwd: originalThread.cwd, parentAgentId: null, title: null }, archivedAt: originalThread.archivedAt }, f.paseo);
-  const hidden = await hiddenObjects(f.server, f.paseo);
-  const originalIds = { projects: f.projects.map(value => value.projectId), workspaces: f.workspaces.map(value => value.id), agents: f.agents.map(value => value.id) };
-
+  const ids = f.agents.map(agent => agent.id);
   await f.login(1);
   expect(await f.server.rpc(connectionStatus, {}, f.paseo)).toMatchObject({ connectionKey: original.connectionKey });
   await f.server.syncRpc(syncBootstrap, {}, f.paseo);
-  expect({ projects: f.projects.map(value => value.projectId), workspaces: f.workspaces.map(value => value.id), agents: f.agents.map(value => value.id) }).toEqual(originalIds);
-  expect(await hiddenObjects(f.server, f.paseo)).toEqual(hidden);
-  await f.login(1, f.primary.apiUrl, "same-account");
-  f.server.setSettings(multicaSettings.id, { profile: "same-account" });
-  await f.server.syncRpc(syncBootstrap, {}, f.paseo);
-  expect((await f.server.rpc(connectionStatus, {}, f.paseo)).connectionKey).toBe(original.connectionKey);
-  expect(f.agents.map(value => value.id)).toEqual(originalIds.agents);
-
-  await f.login(2, f.primary.apiUrl, "office");
-  f.server.setSettings(multicaSettings.id, { profile: "office" });
+  expect(f.agents.map(agent => agent.id)).toEqual(ids);
+  await f.login(2);
   const other = await f.server.rpc(connectionStatus, {}, f.paseo);
   expect(other.connectionKey).not.toBe(original.connectionKey);
   expect((await f.server.rpc(workspaceList, {}, f.paseo)).workspaces[0].enabled).toBe(false);
   await f.server.syncRpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, f.paseo);
-  const otherThread = f.agents.find(agent => agent.labels["multica.connection"] === other.connectionKey && agent.labels["multica.discussion"] === "root")!;
-  expect(otherThread.workspaceId).not.toBe(originalThread.workspaceId);
-  await f.server.rpc(threadOpen, f.address(other.connectionKey), f.paseo);
-  expect(f.events).toContainEqual(expect.objectContaining({ type: "timeline.item", sessionId: otherThread.id, item: expect.objectContaining({ type: "assistant_message", text: "Lin: \n\nOriginal Lin comment" }) }));
-  const beforeRetry = f.posts.length;
-  await f.send("old-tab-new-account");
-  await expect.poll(() => f.events.some(event => event.type === "timeline.item" && event.item.type === "error")).toBe(true);
-  expect(f.posts.length).toBe(beforeRetry);
-
-  f.server.setSettings(multicaSettings.id, { profile: "" });
-  await f.login(0, f.secondary.apiUrl);
-  const otherService = await f.server.rpc(connectionStatus, {}, f.paseo);
-  expect(otherService.connectionKey).not.toBe(original.connectionKey);
-  expect(otherService.connectionKey).not.toBe(other.connectionKey);
-  expect((await f.server.rpc(workspaceList, {}, f.paseo)).workspaces[0].enabled).toBe(false);
-  await f.server.syncRpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, f.paseo);
-  expect(f.projects).toHaveLength(3);
-  expect(f.workspaces).toHaveLength(3);
-  expect(f.agents).toHaveLength(6);
-
-  // Replaying the original namespace while another service is current keeps
-  // both native author semantics and the original Run owner.
-  await (await f.connect()).send({ type: "session.open", requestId: "old-replay", sessionId: "old-replay", history: "replay", persistence: { version: 1, data: { connectionKey: original.connectionKey, issueId: "issue", discussion: "thread", rootId: "root" } }, config: { cwd: originalThread.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
-  expect(f.events).toContainEqual(expect.objectContaining({ type: "timeline.item", sessionId: "old-replay", item: expect.objectContaining({ type: "user_message", messageId: "root", text: "Original Lin comment" }) }));
-  expect(f.events).toContainEqual(expect.objectContaining({ type: "timeline.item", sessionId: "old-replay", item: expect.objectContaining({ type: "plugin", kind: "run-summary", data: expect.objectContaining({ ...original, runId: "run" }) }) }));
-  expect(await hiddenObjects(f.server, f.paseo)).toEqual(hidden);
-
-  await f.login(1);
-  await f.server.syncRpc(syncBootstrap, {}, f.paseo);
-  expect((await f.server.rpc(connectionStatus, {}, f.paseo)).connectionKey).toBe(original.connectionKey);
-  expect(f.agents).toHaveLength(6);
-  expect(originalThread.archivedAt).toBeTruthy();
+  expect(Object.keys(JSON.parse(await f.persisted()).connections)).toHaveLength(2);
+  const allIds = f.agents.map(agent => agent.id);
+  await f.login(1, f.primary.apiUrl, "office");
+  f.server.setSettings(multicaSettings.id, { profile: "office" });
+  expect((await waitForSync(f.server, f.paseo)).status).toBe("ready");
+  expect(f.host.deleteAgent.mock.calls.map(([id]) => id).sort()).toEqual(allIds.sort());
+  expect(f.host.removeProject).toHaveBeenCalledTimes(2);
+  expect(JSON.parse(await f.persisted())).toMatchObject({ owner: { profile: "office" }, connections: {} });
+  expect(f.posts).toEqual([]);
   expect(f.secretAbsent([f.events, await f.persisted()])).toBe(true);
+});
+
+it("same-account profile switches and switching back purge discussions, rules, hidden data, AskUser caches and directories without cancelling an active Run", async () => {
+  const f = await fixture({ askuser: true });
+  const original = f.address();
+  const card = { connectionKey: original.connectionKey, issueId: "issue", commentId: "root", attachmentId: "question" };
+  expect(await f.server.rpc(askuserObserve, card, f.paseo)).toMatchObject({ status: "pending", readOnly: false });
+  const thread = f.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
+  await f.server.hook("agent.archive.after", { agent: { ...thread, parentAgentId: null, title: null }, archivedAt: "2026-11-24T10:05:00Z" }, f.paseo);
+  expect((await hiddenObjects(f.server, f.paseo)).length).toBe(1);
+  expect((await f.server.rpc(connectionStatus, {}, f.paseo)).localData).toEqual({ projects: 1, issues: 1, discussions: 2 });
+  await f.login(1, f.primary.apiUrl, "same-account");
+  f.server.setSettings(multicaSettings.id, { profile: "same-account" });
+  expect((await waitForSync(f.server, f.paseo)).status).toBe("ready");
+  expect(f.agents).toEqual([]); expect(f.projects).toEqual([]);
+  await expect(readFile(join(f.home, "state/placeholders"))).rejects.toMatchObject({ code: "ENOENT" });
+  expect(await hiddenObjects(f.server, f.paseo)).toEqual([]);
+  await expect(f.server.rpc(askuserObserve, card, f.paseo)).rejects.toThrow();
+  expect((await f.server.rpc(workspaceList, {}, f.paseo)).workspaces[0]).toMatchObject({ enabled: false, importedCount: 0 });
+  await f.server.syncRpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, f.paseo);
+  // Reusing this connectionKey must rediscover the card rather than keep stale per-card permissions.
+  expect(await f.server.rpc(askuserObserve, card, f.paseo)).toMatchObject({ status: "pending", readOnly: false, collapsed: false });
+  f.server.setSettings(multicaSettings.id, { profile: "" });
+  await f.server.syncRpc(syncBootstrap, {}, f.paseo);
+  expect(JSON.parse(await f.persisted())).toEqual({ version: 1, owner: { profile: "" }, connections: {} });
+  expect(f.host.deleteAgent).toHaveBeenCalledTimes(4);
+  expect(f.posts).toEqual([]);
+  expect(f.events.some(event => event.type === "session.closed")).toBe(true);
 });
 
 it("an account switch during Stop setup fails without sending an old cancellation", async () => {
@@ -242,4 +255,205 @@ it("a settings action opened under an old account cannot enable rules for a newl
   const enable = defineRpc({ name: "workspace.enable", input: workspaceEnable.input.extend({ connectionKey: z.string() }), output: workspaceEnable.output });
   expect(await f.server.syncRpc(enable, { workspaceId: "workspace", enabled: true, connectionKey: original }, f.paseo)).toMatchObject({ status: "unavailable" });
   expect((await f.server.rpc(workspaceList, {}, f.paseo)).workspaces[0].enabled).toBe(false);
+});
+
+it("retains Projects with user-created active workspaces, archives plugin workspaces and reports retained paths", async () => {
+  const f = await fixture();
+  const project = f.projects[0], pluginWorkspace = f.workspaces[0];
+  f.workspaces.push({ id: "user-workspace", projectId: project.projectId });
+  await writeFile(join(project.cwd, "user-file"), "preserved");
+  const obsolete = join(f.home, "state/placeholders/obsolete/child");
+  await mkdir(obsolete, { recursive: true });
+  await f.login(1, f.primary.apiUrl, "office");
+  f.server.setSettings(multicaSettings.id, { profile: "office" });
+  await waitForSync(f.server, f.paseo);
+  expect(f.host.removeProject).not.toHaveBeenCalled();
+  expect(f.host.archiveWorkspace).toHaveBeenCalledExactlyOnceWith(pluginWorkspace.id);
+  expect(f.workspaces.find(workspace => workspace.id === "user-workspace")?.archived).toBeUndefined();
+  expect(f.agents).toEqual([]);
+  expect(await readFile(join(project.cwd, "user-file"), "utf8")).toBe("preserved");
+  await expect(readFile(obsolete)).rejects.toMatchObject({ code: "ENOENT" });
+  expect(await f.server.rpc(connectionStatus, {}, f.paseo)).toMatchObject({
+    sync: { status: "ready", retainedProjects: [{ name: "Product", cwd: project.cwd }] }, localData: { projects: 0, issues: 0, discussions: 0 },
+  });
+});
+
+it("a failed partial purge preserves its owner, blocks synchronization, restores and rule writes, then resumes on bootstrap", async () => {
+  const f = await fixture({ askuser: true });
+  const original = f.address();
+  const oldIds = f.agents.map(agent => agent.id);
+  const remove = f.host.deleteAgent.getMockImplementation()!;
+  let attempts = 0;
+  f.host.deleteAgent.mockImplementation(async id => { if (++attempts > 1) throw new Error("native storage unavailable"); await remove(id); });
+  await f.login(1, f.primary.apiUrl, "office");
+  const reads = f.requests.filter(request => request.path === "/api/issues").length;
+  f.server.setSettings(multicaSettings.id, { profile: "office" });
+  expect(await waitForSync(f.server, f.paseo)).toMatchObject({ status: "unavailable", stage: "purging", message: expect.stringContaining("清理旧 profile 本地数据失败") });
+  expect(JSON.parse(await f.persisted()).owner).toEqual({ profile: "" });
+  expect(f.agents).toHaveLength(1);
+  expect((await f.server.rpc(workspaceList, {}, f.paseo)).workspaces[0]).toMatchObject({ enabled: false, importedCount: 0 });
+  expect(await hiddenObjects(f.server, f.paseo)).toEqual([]);
+  expect(await f.server.rpc(workspaceRule, { workspaceId: "workspace", rule: taskRuleSchema.parse({}) }, f.paseo)).toMatchObject({ status: "unavailable" });
+  expect(await f.server.rpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, f.paseo)).toMatchObject({ status: "unavailable" });
+  expect(await f.server.rpc(hiddenRestore, original, f.paseo)).toMatchObject({ status: "unavailable" });
+  await expect(f.server.rpc(askuserReopen, { ...original, commentId: "root", attachmentId: "question" }, f.paseo)).rejects.toThrow("正在清理");
+  expect(f.requests.filter(request => request.path === "/api/issues")).toHaveLength(reads);
+  expect(JSON.parse(await f.persisted()).owner).toEqual({ profile: "" });
+  f.host.deleteAgent.mockImplementation(remove);
+  await f.server.syncRpc(syncBootstrap, {}, f.paseo);
+  expect(JSON.parse(await f.persisted())).toEqual({ version: 1, owner: { profile: "office" }, connections: {} });
+  expect(f.host.deleteAgent.mock.calls.map(([id]) => id)).toEqual(expect.arrayContaining(oldIds));
+  expect(f.agents).toEqual([]); expect(f.projects).toEqual([]); expect(f.posts).toEqual([]);
+});
+
+it("legacy state adopts the first ready profile without deleting any connections, then purges on its first switch", async () => {
+  const f = await fixture();
+  await f.login(2);
+  await f.server.syncRpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, f.paseo);
+  await f.restart(true);
+  expect(JSON.parse(await f.persisted()).owner).toBeUndefined();
+  await f.server.rpc(connectionStatus, {}, f.paseo);
+  expect(JSON.parse(await f.persisted()).owner).toEqual({ profile: "" });
+  expect(Object.keys(JSON.parse(await f.persisted()).connections)).toHaveLength(2);
+  expect(f.host.deleteAgent).not.toHaveBeenCalled();
+  await f.login(1, f.primary.apiUrl, "office");
+  f.server.setSettings(multicaSettings.id, { profile: "office" });
+  await f.server.syncRpc(syncBootstrap, {}, f.paseo);
+  expect(f.host.deleteAgent).toHaveBeenCalledTimes(4);
+  expect(f.host.removeProject).toHaveBeenCalledTimes(2);
+  expect(JSON.parse(await f.persisted())).toMatchObject({ owner: { profile: "office" }, connections: {} });
+});
+
+it("read-only status and bootstrap on an empty state do not create state.json, and invalid settings never purge", async () => {
+  const f = await fixture({ empty: true });
+  await f.server.rpc(connectionStatus, {}, f.paseo);
+  await f.server.syncRpc(syncBootstrap, {}, f.paseo);
+  await expect(f.persisted()).rejects.toMatchObject({ code: "ENOENT" });
+  await f.server.syncRpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, f.paseo);
+  f.server.setSettings(multicaSettings.id, { profile: "../invalid" });
+  expect(await f.server.rpc(connectionStatus, {}, f.paseo)).toMatchObject({ status: "invalid_settings" });
+  await f.server.syncRpc(syncBootstrap, {}, f.paseo);
+  expect(f.host.deleteAgent).not.toHaveBeenCalled();
+  expect(JSON.parse(await f.persisted()).owner).toEqual({ profile: "" });
+});
+
+it("purges mapped discussions omitted from the directory and archives plugin workspaces whose Project is already absent", async () => {
+  const f = await fixture();
+  f.projects.length = 0;
+  f.host.fetchAgents.mockResolvedValue({ entries: [], pageInfo: { hasMore: false, nextCursor: undefined } });
+  await f.login(1, f.primary.apiUrl, "office");
+  f.server.setSettings(multicaSettings.id, { profile: "office" });
+  await waitForSync(f.server, f.paseo);
+  expect(f.host.deleteAgent).toHaveBeenCalledTimes(2);
+  expect(f.host.archiveWorkspace).toHaveBeenCalledExactlyOnceWith(f.workspaces[0].id);
+  expect(JSON.parse(await f.persisted())).toMatchObject({ owner: { profile: "office" }, connections: {} });
+});
+
+it.each(["agents", "workspaces"])("cyclic %s pagination keeps ownership and can be retried without incomplete cleanup", async directory => {
+  const f = await fixture();
+  const method = directory === "agents" ? f.host.fetchAgents : f.host.fetchWorkspaces;
+  const original = method.getMockImplementation()!;
+  method.mockImplementation(async () => ({ entries: [], pageInfo: { hasMore: true, nextCursor: "cycle" } }));
+  await f.login(1, f.primary.apiUrl, "office");
+  f.server.setSettings(multicaSettings.id, { profile: "office" });
+  expect(await waitForSync(f.server, f.paseo)).toMatchObject({ status: "unavailable", stage: "purging" });
+  expect(JSON.parse(await f.persisted()).owner).toEqual({ profile: "" });
+  expect(f.host.removeProject).not.toHaveBeenCalled();
+  method.mockImplementation(original as never);
+  await f.server.syncRpc(syncBootstrap, {}, f.paseo);
+  expect(JSON.parse(await f.persisted())).toMatchObject({ owner: { profile: "office" }, connections: {} });
+});
+
+it("scans every native page, deletes only matching Multica discussions and holds them throughout deletion", async () => {
+  const f = await fixture();
+  const original = f.address();
+  const pluginAgents = [...f.agents];
+  const otherProvider = { ...pluginAgents[0], id: "user-agent", provider: "codex" };
+  const otherConnection = { ...pluginAgents[0], id: "foreign-agent", labels: { ...pluginAgents[0].labels, "multica.connection": "foreign" } };
+  f.agents.push(otherProvider, otherConnection);
+  f.host.fetchAgents.mockImplementation(async input => {
+    const cursor = (input as { page: { cursor?: string } }).page.cursor;
+    return { entries: (cursor ? [pluginAgents[1]] : [pluginAgents[0], otherProvider, otherConnection]).map(agent => ({ agent })),
+      pageInfo: { hasMore: !cursor, nextCursor: cursor ? undefined : "second" } };
+  });
+  const userWorkspace = { id: "user-workspace", projectId: f.projects[0].projectId };
+  f.workspaces.push(userWorkspace);
+  const pluginWorkspace = f.workspaces[0];
+  f.host.fetchWorkspaces.mockImplementation(async input => {
+    const cursor = (input as { page: { cursor?: string } }).page.cursor;
+    return { entries: cursor ? [userWorkspace] : [pluginWorkspace], pageInfo: { hasMore: !cursor, nextCursor: cursor ? undefined : "second" } };
+  });
+  const remove = f.host.deleteAgent.getMockImplementation()!;
+  f.host.deleteAgent.mockImplementation(async id => {
+    const agent = pluginAgents.find(agent => agent.id === id)!;
+    await (await f.connect()).send({ type: "session.open", requestId: "racing-purge-open", sessionId: `racing-${id}`, history: "replay",
+      persistence: { version: 1, data: { ...original, discussion: "thread" } }, config: { cwd: agent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
+    await remove(id);
+  });
+  await f.login(1, f.primary.apiUrl, "office");
+  f.server.setSettings(multicaSettings.id, { profile: "office" });
+  await waitForSync(f.server, f.paseo);
+  expect(f.host.deleteAgent.mock.calls.map(([id]) => id)).toEqual(pluginAgents.map(agent => agent.id));
+  expect(f.agents.map(agent => agent.id)).toEqual([otherProvider.id, otherConnection.id]);
+  expect(f.events).toContainEqual(expect.objectContaining({ type: "request.failed", requestId: "racing-purge-open", error: expect.objectContaining({ code: "discussion_unavailable" }) }));
+  expect(f.host.removeProject).not.toHaveBeenCalled();
+  expect(f.host.archiveWorkspace).toHaveBeenCalledExactlyOnceWith(pluginWorkspace.id);
+  expect(f.posts).toEqual([]);
+});
+
+it("an archive failure retains ownership and the user Project directory until bootstrap can retry", async () => {
+  const f = await fixture();
+  const project = f.projects[0];
+  f.workspaces.push({ id: "user-workspace", projectId: project.projectId });
+  f.host.archiveWorkspace.mockResolvedValueOnce({ error: "native archive failed" });
+  await f.login(1, f.primary.apiUrl, "office");
+  f.server.setSettings(multicaSettings.id, { profile: "office" });
+  expect(await waitForSync(f.server, f.paseo)).toMatchObject({ status: "unavailable", stage: "purging" });
+  expect(JSON.parse(await f.persisted()).owner).toEqual({ profile: "" });
+  await writeFile(join(project.cwd, "user-file"), "preserved");
+  await f.server.syncRpc(syncBootstrap, {}, f.paseo);
+  expect(JSON.parse(await f.persisted()).owner).toEqual({ profile: "office" });
+  expect(await readFile(join(project.cwd, "user-file"), "utf8")).toBe("preserved");
+  expect((await f.server.rpc(connectionStatus, {}, f.paseo)).sync.retainedProjects).toEqual([{ name: "Product", cwd: project.cwd }]);
+});
+
+it("cleans the old profile before attempting to authenticate an unavailable target profile", async () => {
+  const f = await fixture();
+  f.server.setSettings(multicaSettings.id, { profile: "missing" });
+  expect(await waitForSync(f.server, f.paseo)).toMatchObject({ status: "unavailable", stage: "connection" });
+  expect(JSON.parse(await f.persisted())).toEqual({ version: 1, owner: { profile: "missing" }, connections: {} });
+  expect(f.host.deleteAgent).toHaveBeenCalledTimes(2);
+  expect(f.host.removeProject).toHaveBeenCalledTimes(1);
+  expect(f.posts).toEqual([]);
+});
+
+it("excludes previously removed Projects from the confirmation counts", async () => {
+  const f = await fixture();
+  await f.server.syncRpc(workspaceEnable, { workspaceId: "workspace", enabled: false }, f.paseo);
+  expect(f.host.removeProject).toHaveBeenCalledTimes(1);
+  expect((await f.server.rpc(connectionStatus, {}, f.paseo)).localData?.projects).toBe(0);
+});
+
+it.each(["different root", "git", "missing project IDs"])("archives plugin workspaces when Project removal is skipped for %s", async reason => {
+  const f = await fixture();
+  const project = f.projects[0], workspace = f.workspaces[0];
+  f.workspaces.push({ id: "user-workspace", projectId: project.projectId });
+  if (reason === "different root") project.projectRootPath = join(f.home, "user-project");
+  else if (reason === "git") project.projectKind = "git";
+  else {
+    const state = JSON.parse(await f.persisted()) as LocalState;
+    for (const conn of Object.values(state.connections)) {
+      for (const project of Object.values(conn.projects)) delete project.projectId;
+      for (const issue of Object.values(conn.issues)) delete issue.projectId;
+    }
+    await writeFile(join(f.home, "state/state.json"), JSON.stringify(state));
+    await f.restart();
+  }
+  await f.login(1, f.primary.apiUrl, "office");
+  f.server.setSettings(multicaSettings.id, { profile: "office" });
+  expect(await f.server.syncRpc(syncBootstrap, {}, f.paseo)).toEqual({ status: "ready" });
+  expect(f.host.removeProject).not.toHaveBeenCalled();
+  expect(f.host.archiveWorkspace).toHaveBeenCalledExactlyOnceWith(workspace.id);
+  expect(f.workspaces.find(workspace => workspace.id === "user-workspace")?.archived).toBeUndefined();
+  expect(JSON.parse(await f.persisted()).connections).toEqual({});
 });

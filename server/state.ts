@@ -32,7 +32,7 @@ const connectionSchema = z.object({
   rules: z.record(z.string(), taskRuleSchema.extend({ enabled: z.boolean() })),
   projects: z.record(z.string(), projectSchema), issues: z.record(z.string(), issueSchema),
 });
-const stateSchema = z.object({ version: z.literal(1), connections: z.record(z.string(), connectionSchema) });
+const stateSchema = z.object({ version: z.literal(1), owner: z.object({ profile: z.string() }).optional(), connections: z.record(z.string(), connectionSchema) });
 export type LocalState = z.infer<typeof stateSchema>;
 export type ConnectionState = z.infer<typeof connectionSchema>;
 export type IssueMapping = z.infer<typeof issueSchema>;
@@ -43,7 +43,15 @@ export class StateStore {
   private readonly listeners = new Set<(state: LocalState) => void>();
   subscribe(listener: (state: LocalState) => void) { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
   private cached?: Promise<LocalState>;
+  private profile?: string;
   constructor(readonly directory: string) {}
+  /** Legacy data acquires an owner on first observation, without creating an empty file. */
+  async observeProfile(profile: string | undefined) {
+    this.profile = profile;
+    if (profile === undefined) return;
+    const state = await this.read();
+    if (!state.owner && Object.keys(state.connections).length) await this.update(state => { state.owner ??= { profile }; });
+  }
   /** Shared read-only snapshot; all changes must go through update(). */
   async read(): Promise<LocalState> {
     await this.pending;
@@ -58,9 +66,11 @@ export class StateStore {
     }
   }
   update(change: (state: LocalState) => void): Promise<void> {
+    const profile = this.profile;
     const operation = this.pending.then(async () => {
       const state = structuredClone(await (this.cached ??= this.load()));
       change(state);
+      if (profile !== undefined) state.owner ??= { profile };
       const validated = stateSchema.parse(state);
       await mkdir(this.directory, { recursive: true, mode: 0o700 });
       const temporary = join(this.directory, "state.json.next");
