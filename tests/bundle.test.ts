@@ -699,12 +699,47 @@ it("the profile dropdown lists logged-in choices and retains logged-out or missi
     expect(h.settingsSave).not.toHaveBeenCalled();
     const statusReads = h.calls.filter(call => call.name === "connection.status").length;
     h.selects[0].onValueChange("office");
+    h.render();
+    expect(h.settingsSave).not.toHaveBeenCalled();
+    h.press("确认切换");
     await vi.waitFor(() => { h.render(); expect(h.calls.filter(call => call.name === "connection.status").length).toBeGreaterThan(statusReads); });
     expect(h.settingsSave).toHaveBeenCalledExactlyOnceWith({ profile: "office" }, "1");
     expect(h.selects[0].value).toBe("office");
     expect(h.render()).not.toContain("Profile 必须是单个名称");
     expect(h.calls.filter(call => call.name === "profile.list")).toHaveLength(1);
     expect(h.modals).toHaveLength(0);
+  } finally { h.dispose(); }
+});
+
+it("profile confirmation shows local counts and remote safety, and cancel never saves", async () => {
+  const h = await settingsHarness((name, input) => name === "profile.list"
+    ? { profiles: [{ name: "office", loggedIn: true }], overridden: false, isolated: false }
+    : name === "connection.status" ? { ...readyStatus, localData: { projects: 2, issues: 7, discussions: 19 } } : empty(name, input));
+  try {
+    await vi.waitFor(() => { h.render(); expect(h.selects[0].disabled).toBe(false); });
+    h.selects[0].onValueChange("office");
+    const modal = h.render();
+    for (const text of ["确认切换 CLI profile", "office", "Project 2", "任务 7", "讨论 19", "本地规则、映射、缓存、讨论", "不影响 Multica 远端数据（不会取消远端 Run 或删除评论）"]) expect(modal).toContain(text);
+    h.press("取消"); h.render();
+    expect(h.modals).toHaveLength(0);
+    expect(h.settingsSave).not.toHaveBeenCalled();
+    expect(h.selects[0].value).toBe("");
+  } finally { h.dispose(); }
+});
+
+it("purging disables profile selection and retained Projects explain why their paths remain", async () => {
+  const h = await settingsHarness((name, input) => name === "connection.status" ? { ...readyStatus,
+    sync: { status: "syncing", stage: "purging", completedWorkspaces: 0, enabledWorkspaces: 0,
+      retainedProjects: [{ name: "Product", cwd: "/state/placeholders/old/product" }] } } : empty(name, input));
+  try {
+    await vi.waitFor(() => {
+      const page = h.render();
+      for (const text of ["清理旧 profile 数据", "正在清理旧 profile 本地数据…", "用户自建工作区", "Product", "/state/placeholders/old/product"]) expect(page).toContain(text);
+      expect(h.selects[0].disabled).toBe(true);
+    });
+    h.selects[0].onValueChange("office"); h.render();
+    expect(h.modals).toHaveLength(0);
+    expect(h.settingsSave).not.toHaveBeenCalled();
   } finally { h.dispose(); }
 });
 
@@ -764,7 +799,9 @@ it.each([
     if (flags.overridden) expect(h.selects[0].hint).toContain("切换 profile 不会改变账号");
     expect(h.selects[0].disabled).toBe(flags.isolated);
     h.selects[0].onValueChange("office");
-    expect(h.settingsSave).toHaveBeenCalledTimes(flags.isolated ? 0 : 1);
+    h.render();
+    if (!flags.isolated) { h.press("确认切换"); await vi.waitFor(() => expect(h.settingsSave).toHaveBeenCalledTimes(1)); }
+    else expect(h.settingsSave).not.toHaveBeenCalled();
   } finally { h.dispose(); }
 });
 
@@ -781,7 +818,14 @@ it("disables profile selection while saving and displays save failures without c
     h.settingsSave.mockImplementation(async () => { h.settings.saveError = "无法保存 profile"; return false; });
     const statusReads = h.calls.filter(call => call.name === "connection.status").length;
     h.render(); h.selects[0].onValueChange("office");
-    await vi.waitFor(() => expect(h.render()).toContain("无法保存 profile"));
+    h.render(); h.press("确认切换");
+    await vi.waitFor(() => {
+      const page = h.render();
+      expect(h.selects[0].error).toBe("无法保存 profile");
+      expect(page).toContain("无法保存 profile");
+      expect(page).not.toContain("无法保存 profile，请重试。");
+    });
+    expect(h.modals).toHaveLength(1);
     expect(h.selects[0].value).toBe("");
     expect(h.calls.filter(call => call.name === "connection.status")).toHaveLength(statusReads);
   } finally { h.dispose(); }

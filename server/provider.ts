@@ -155,8 +155,6 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
               projectPermission(card, announceFresh);
             };
             session.subscriptions.push(askusers.subscribe(address, projectAskuser));
-            for (const item of await askusers.rows(address)) emit({ type: "timeline.item", sessionId: input.sessionId, item });
-            for (const card of await askusers.cards(address)) projectPermission(card);
             session.subscriptions.push(lifecycle.subscribe(address, async () => {
               // A Stop accepted before this resource began closing retains its
               // result before session.closed rejects outstanding host requests.
@@ -169,6 +167,12 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
               releaseSession(input.sessionId);
               emit({ type: "session.closed", sessionId: input.sessionId });
             }));
+            const rows = await askusers.rows(address);
+            if (sessions.get(input.sessionId) !== session || lifecycle.unavailable(address)) return;
+            for (const item of rows) emit({ type: "timeline.item", sessionId: input.sessionId, item });
+            const cards = await askusers.cards(address);
+            if (sessions.get(input.sessionId) !== session || lifecycle.unavailable(address)) return;
+            for (const card of cards) projectPermission(card);
             const projected = new Map<string, string>();
             let currentRuns: typeof issue.runs = {};
             const projectRuns = (owned: typeof issue.runs, activity = true) => {

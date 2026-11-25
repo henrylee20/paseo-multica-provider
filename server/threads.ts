@@ -283,5 +283,6 @@ export class ThreadSynchronizer {
     this.pending.set(id, operation);
     return operation.finally(() => { if (this.pending.get(id) === operation) this.pending.delete(id); });
   }
+  async reset() { await Promise.allSettled(this.pending.values()); this.opened.clear(); }
   async close() { this.opened.clear(); this.listeners.clear(); await Promise.allSettled(this.pending.values()); }
 }

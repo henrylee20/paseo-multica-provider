@@ -16,6 +16,8 @@ export class AskuserWakeups {
   constructor(private readonly store: StateStore, private readonly askusers: AskUsers,
     private readonly lifecycle: DiscussionLifecycle, private readonly now: () => Date = () => new Date()) {}
 
+  async reset() { await Promise.allSettled(this.pending.values()); this.attemptedAt.clear(); }
+
   async discover(connection: AuthenticatedConnection, issueId: string, host: NativeHost) {
     const issue = (await this.store.read()).connections[connection.connectionKey]?.issues[issueId];
     for (const rootId of Object.keys(issue?.threads ?? {})) {

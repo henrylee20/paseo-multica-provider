@@ -408,5 +408,10 @@ export class AskUsers {
     const end = Math.min(text.length, address.offset + 8192);
     return { text: text.slice(address.offset, end), nextOffset: end < text.length ? end : null };
   }
+  async reset() {
+    await Promise.allSettled([...this.pending.values(), ...[...this.actions.values()].map(action => action.operation)]);
+    await this.connectionChanged();
+    this.fresh.clear(); this.deliveries.clear(); this.userIds.clear(); this.availability.clear();
+  }
   async close() { this.unsubscribe(); await Promise.allSettled([...this.pending.values(), ...[...this.actions.values()].map(action => action.operation)]); this.listeners.clear(); this.fresh.clear(); this.deliveries.clear(); }
 }

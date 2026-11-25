@@ -43,8 +43,14 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     const resolve = createConnectionResolver(connectionDependencies);
     server.handle(profileList, () => listProfiles(connectionDependencies));
     server.handle(connectionStatus, async () => {
-      const details = { sync: synchronizer.status(), hidden: (await hiding.list()).objects };
       const state = await settings.read();
+      await store.observeProfile(state.status === "ready" ? state.values.profile : undefined);
+      const local = await store.read();
+      const connections = Object.values(local.connections);
+      const issues = connections.flatMap(conn => Object.values(conn.issues));
+      const details = { sync: synchronizer.status(), hidden: (await hiding.list()).objects,
+        localData: { projects: connections.reduce((count, conn) => count + Object.values(conn.projects).filter(project => !project.removed).length, 0), issues: issues.length,
+          discussions: issues.reduce((count, issue) => count + (issue.mainAgentId ? 1 : 0) + Object.values(issue.threads).filter(thread => thread.agentId).length, 0) } };
       if (state.status !== "ready") {
         resolve.invalidate();
         await askusers.connectionChanged();
@@ -53,9 +59,11 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       }
       return { ...await resolveStatus(state.values.profile), ...details };
     });
-    async function connection(notifyIdentity = true) {
+    async function connection(notifyIdentity = true, allowPendingPurge = false) {
       const state = await settings.read();
       if (state.status !== "ready") { resolve.invalidate(); if (notifyIdentity) await askusers.connectionChanged(); throw new Error("Multica settings unavailable"); }
+      await store.observeProfile(state.values.profile);
+      if (!allowPendingPurge) await synchronizer.assertNoPurge();
       let authenticated: AuthenticatedConnection | undefined;
       await (notifyIdentity ? resolveStatus : resolve)(state.values.profile, value => { authenticated = value; });
       if (!authenticated) throw new Error("Multica connection unavailable");
@@ -64,6 +72,12 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     const environment = dependencies.environment ?? process.env;
     const owningHome = environment.PASEO_HOME ?? "";
     const store = new StateStore(dependencies.stateDirectory ?? join(owningHome || join(dependencies.homeDirectory ?? homedir(), ".paseo"), "multica-provider"));
+    async function currentProfile() {
+      const state = await settings.read();
+      const profile = state.status === "ready" ? state.values.profile : undefined;
+      await store.observeProfile(profile);
+      return profile;
+    }
     const watchedConnections = new WeakSet<AbortSignal>();
     const identityRefreshes = new Set<Promise<unknown>>();
     let resolvingIdentity = 0;
@@ -87,7 +101,7 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
           void refresh.finally(() => { identityRefreshes.delete(refresh); });
         }, { once: true });
       }
-      await askusers.connectionChanged(status.status === "ready" && status.connectionKey && status.user ? { connectionKey: status.connectionKey, userId: status.user.id } : undefined);
+      await askusers.connectionChanged(status.status === "ready" && status.connectionKey && status.user && !await synchronizer.purgePending() ? { connectionKey: status.connectionKey, userId: status.user.id } : undefined);
       return status;
     }
     const lifecycle = new DiscussionLifecycle();
@@ -98,6 +112,7 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     const threads = new ThreadSynchronizer(store, connection, metadata, askusers);
     const wakeups = new AskuserWakeups(store, askusers, lifecycle, dependencies.now);
     server.handle(askuserReopen, async (input, context) => {
+      await synchronizer.assertNoPurge();
       const card = await askusers.reopen(input, lifecycle);
       await synchronizer.withNativeHost(context.paseo, async host => {
         const current = await connection();
@@ -106,7 +121,7 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       });
       return card;
     });
-    const hiding = new ManualHiding(store, lifecycle, metadata);
+    const hiding = new ManualHiding(store, lifecycle, metadata, () => synchronizer.purgePending());
     server.addHook("agent.archive.after", async ({ agent }) => { await hiding.archivedAgent(agent); });
     server.addHook("workspace.archive.after", async ({ workspace }) => { await hiding.archivedWorkspace(workspace.id); });
     const runs = new RunSynchronizer(store);
@@ -135,7 +150,16 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       if (!row) throw new Error("Comment event unavailable");
       return { text: row.text };
     });
-    const synchronizer = new SidebarSynchronizer({ store, connection, lifecycle, metadata,
+    const synchronizer = new SidebarSynchronizer({ store, connection, lifecycle, metadata, currentProfile,
+      invalidateConnection: () => resolve.invalidate(),
+      drain: async () => {
+        await deliveries.waitForPosts();
+        await stops.close();
+        await runDetails.close();
+        await threads.reset();
+        await wakeups.reset();
+        await askusers.reset();
+      },
       onCached: host => threads.reconcile(host),
       onIssue: async (connection, workspace, issueId, host) => {
         await descriptions.observe({ connectionKey: connection.connectionKey, issueId });
@@ -144,8 +168,22 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
         await wakeups.discover(connection, issueId, host);
       },
       connectHost: () => (dependencies.connectHost ?? connectNativeHost)(owningHome), intervalMs: dependencies.syncIntervalMs ?? 15_000 });
+    let observedProfile: string | undefined;
+    const unsubscribeSettings = settings.subscribe(async state => {
+      if (shuttingDown) return;
+      resolve.invalidate();
+      if (state.status !== "ready") { await store.observeProfile(undefined); await askusers.connectionChanged(); return; }
+      const changed = observedProfile !== state.values.profile;
+      observedProfile = state.values.profile;
+      await store.observeProfile(state.values.profile);
+      if (changed) synchronizer.settingsChanged();
+    });
     server.handle(hiddenRestore, async (input, context) => {
-      try { await synchronizer.withNativeHost(context.paseo, host => hiding.restore(input, host)); return { status: "ready" as const }; }
+      try {
+        await synchronizer.assertNoPurge();
+        await synchronizer.withNativeHost(context.paseo, host => hiding.restore(input, host));
+        return { status: "ready" as const };
+      }
       catch (error) { return { status: "unavailable" as const, message: error instanceof Error ? error.message : "隐藏对象恢复失败，请重试。" }; }
     });
     server.handle(syncBootstrap, async (_, context) => {
@@ -155,9 +193,9 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       catch { return { status: "unavailable" as const, message: "Multica 同步暂不可用，请检查 CLI 连接和 daemon。" }; }
     });
     server.handle(workspaceList, async () => {
-      const context = await connection();
+      const context = await connection(true, true);
       const workspaces = await synchronizer.workspaces(context);
-      const local = (await store.read()).connections[context.connectionKey];
+      const local = await synchronizer.purgePending() ? undefined : (await store.read()).connections[context.connectionKey];
       return { connectionKey: context.connectionKey, workspaces: workspaces.map(workspace => ({
         id: workspace.id, name: workspace.name, enabled: local?.rules[workspace.id]?.enabled ?? false,
         rule: taskRuleSchema.parse(local?.rules[workspace.id] ?? {}), importedCount: importedIssues(local, workspace.id).length
@@ -181,6 +219,7 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     });
     return async () => {
       shuttingDown = true;
+      unsubscribeSettings();
       await Promise.allSettled(identityRefreshes);
       await deliveries.close();
       await synchronizer.close();

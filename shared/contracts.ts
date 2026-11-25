@@ -24,13 +24,15 @@ export const connectionStatusSchema = z.object({
   connectionKey: z.string().optional(),
   message: z.string(),
   loginCommand: z.string(),
+  localData: z.object({ projects: z.number().int().nonnegative(), issues: z.number().int().nonnegative(), discussions: z.number().int().nonnegative() }).optional(),
 });
 export type ConnectionStatus = z.output<typeof connectionStatusSchema>;
 
 export const syncStatusSchema = z.object({
   status: z.enum(["idle", "syncing", "ready", "unavailable"]),
-  stage: z.enum(["idle", "connection", "workspaces", "issues", "history", "archiving"]),
+  stage: z.enum(["idle", "connection", "workspaces", "issues", "history", "archiving", "purging"]),
   connectionKey: z.string().optional(), lastSuccessAt: z.string().optional(),
+  retainedProjects: z.array(z.object({ name: z.string(), cwd: z.string() })).optional(),
   completedWorkspaces: z.number().int().nonnegative(), enabledWorkspaces: z.number().int().nonnegative(),
   completedArchives: z.number().int().nonnegative().optional(), pendingArchives: z.number().int().nonnegative().optional(),
   message: z.string().optional(),

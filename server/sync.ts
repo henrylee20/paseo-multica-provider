@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { mkdir } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readdir, rm, rmdir } from "node:fs/promises";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { PaseoApi } from "@getpaseo/client";
 import { z } from "zod";
 import { taskRuleSchema, type TaskRule, type SyncStatus } from "../shared/contracts.js";
@@ -87,6 +87,7 @@ export class SidebarSynchronizer {
   constructor(private readonly options: {
     store: StateStore; connection: (notifyIdentity?: boolean) => Promise<AuthenticatedConnection>; lifecycle: DiscussionLifecycle; metadata: DiscussionMetadata;
     connectHost: () => Promise<NativeHost>; intervalMs: number; onRemoteEvent?: (event: WorkspaceEvent) => void;
+    currentProfile: () => Promise<string | undefined>; invalidateConnection: () => void; drain: () => Promise<void>;
     onCached?: (host: NativeHost) => Promise<void>;
     onIssue?: (connection: AuthenticatedConnection, workspace: RemoteWorkspace, issueId: string, host: NativeHost) => Promise<void>;
   }) {}
@@ -136,8 +137,19 @@ export class SidebarSynchronizer {
   async bootstrap(paseo: PaseoApi, force = false): Promise<void> {
     await this.assertOwningDaemon(paseo);
     this.startTimer();
-    if (force || this.syncState.status !== "ready") void this.requestSync().catch(() => {});
+    if (force || await this.purgePending() || this.syncState.status !== "ready") void this.requestSync().catch(() => {});
   }
+  settingsChanged() {
+    this.ruleVersion++;
+    this.events.disconnect();
+    if (this.expectedServerId) void this.triggerSync().catch(() => {});
+  }
+  async purgePending() {
+    const profile = await this.options.currentProfile();
+    const state = await this.options.store.read();
+    return profile !== undefined && !!state.owner && state.owner.profile !== profile;
+  }
+  async assertNoPurge() { if (await this.purgePending()) throw new Error("正在清理旧 profile 本地数据，请稍后重试。"); }
   private requestSync(): Promise<void> { return this.syncPending ?? this.triggerSync(); }
   private triggerSync(): Promise<void> {
     if (this.closed) return Promise.resolve();
@@ -158,7 +170,7 @@ export class SidebarSynchronizer {
             // between the last pass and clearing syncPending.
             if (this.syncDirty || this.ruleVersion !== version) { this.syncDirty = true; continue; }
             this.syncState = failed
-              ? { ...this.syncState, status: "unavailable", message: "同步失败；已保存的规则与开关不受影响，daemon 将继续重试。" }
+              ? { ...this.syncState, status: "unavailable", message: this.syncState.stage === "purging" ? "清理旧 profile 本地数据失败；同步和规则写入已暂停，请重新引导以重试。" : "同步失败；已保存的规则与开关不受影响，daemon 将继续重试。" }
               : { ...this.syncState, status: "ready", stage: "idle", pendingArchives: 0, lastSuccessAt: new Date().toISOString() };
           }
         } finally { this.syncPending = undefined; }
@@ -171,6 +183,7 @@ export class SidebarSynchronizer {
       await this.assertOwningDaemon(paseo);
       if (!this.host) this.host = await this.options.connectHost();
       await this.assertOwningDaemon();
+      await this.assertNoPurge();
       await operation(this.host);
     });
   }
@@ -179,6 +192,7 @@ export class SidebarSynchronizer {
   enable(paseo: PaseoApi, workspaceId: string, enabled: boolean, expectedConnectionKey?: string): Promise<void> {
     return this.mutate(async () => {
       await this.assertOwningDaemon(paseo);
+      if (await this.purgePending()) await this.serialize(() => this.purge());
       const connection = await this.options.connection();
       if (expectedConnectionKey && connection.connectionKey !== expectedConnectionKey) throw new Error("Connection identity changed");
       const local = (await this.options.store.read()).connections[connection.connectionKey];
@@ -195,6 +209,7 @@ export class SidebarSynchronizer {
   rule(paseo: PaseoApi, workspaceId: string, rule: TaskRule, expectedConnectionKey?: string): Promise<void> {
     return this.mutate(async () => {
       await this.assertOwningDaemon(paseo);
+      if (await this.purgePending()) await this.serialize(() => this.purge());
       const connection = await this.options.connection();
       if (expectedConnectionKey && connection.connectionKey !== expectedConnectionKey) throw new Error("Connection identity changed");
       if (!(await this.workspaces(connection)).some(item => item.id === workspaceId)) throw new Error("Multica workspace unavailable");
@@ -284,9 +299,127 @@ export class SidebarSynchronizer {
     this.pending = result.catch(() => {});
     return result;
   }
+  /** Runs only inside serialize: retain the durable owner until every local step succeeds. */
+  private async purge() {
+    const targetProfile = await this.options.currentProfile();
+    let state = await this.options.store.read();
+    if (targetProfile === undefined || !state.owner || state.owner.profile === targetProfile) return;
+    this.syncState = { status: "syncing", stage: "purging", completedWorkspaces: 0, enabledWorkspaces: 0 };
+    this.options.invalidateConnection();
+    this.events.disconnect();
+    const releases: Array<() => void> = [];
+    try {
+      // Close mapped sessions first and reject competing opens while draining writers.
+      releases.push(await this.options.lifecycle.hold(Object.entries(state.connections).flatMap(([connectionKey, conn]) =>
+        Object.entries(conn.issues).flatMap(([issueId, issue]) => ["main", ...Object.keys(issue.threads)].map(rootId => ({ connectionKey, issueId, rootId }))))));
+      await this.options.drain();
+      state = await this.options.store.read();
+      if (!this.host) this.host = await this.options.connectHost();
+      await this.assertOwningDaemon();
+      const host = this.host;
+      const discussions = new Set<string>();
+      const addresses: Array<{ connectionKey: string; issueId: string; rootId: string }> = [];
+      for (const [connectionKey, conn] of Object.entries(state.connections)) {
+        let cursor: string | undefined;
+        const cursors = new Set<string>();
+        for (;;) {
+          const page = await host.fetchAgents({ filter: { labels: { [discussionKeys.connection]: connectionKey }, includeArchived: true }, page: { limit: 100, cursor } });
+          for (const { agent } of page.entries) {
+            if (agent.provider !== "multica" || agent.labels[discussionKeys.connection] !== connectionKey) continue;
+            discussions.add(agent.id);
+            const issueId = agent.labels[discussionKeys.issue], rootId = agent.labels[discussionKeys.discussion];
+            if (issueId && rootId) addresses.push({ connectionKey, issueId, rootId });
+          }
+          if (!page.pageInfo.hasMore) break;
+          const next = page.pageInfo.nextCursor;
+          if (!next || cursors.has(next)) throw new Error("Incomplete native discussion pagination");
+          cursors.add(next); cursor = next;
+        }
+        for (const issue of Object.values(conn.issues)) {
+          for (const agentId of [issue.mainAgentId, ...Object.values(issue.threads).map(thread => thread.agentId)]) {
+            if (!agentId || discussions.has(agentId)) continue;
+            const agent = (await host.fetchAgent(agentId))?.agent;
+            if (agent?.provider === "multica" && (agent.labels[discussionKeys.connection] === connectionKey || agent.cwd === issue.cwd)) {
+              discussions.add(agentId);
+              const issueId = agent.labels[discussionKeys.issue], rootId = agent.labels[discussionKeys.discussion];
+              if (issueId && rootId) addresses.push({ connectionKey, issueId, rootId });
+            }
+          }
+        }
+      }
+      releases.push(await this.options.lifecycle.hold(addresses));
+      for (const agentId of discussions) await host.deleteAgent(agentId);
+
+      const projects = (await host.listProjects()).projects;
+      const active: Awaited<ReturnType<NativeHost["fetchWorkspaces"]>>["entries"] = [];
+      let cursor: string | undefined;
+      const cursors = new Set<string>();
+      for (;;) {
+        const page = await host.fetchWorkspaces({ page: { limit: 100, cursor } });
+        active.push(...page.entries);
+        if (!page.pageInfo.hasMore) break;
+        const next = page.pageInfo.nextCursor;
+        if (!next || cursors.has(next)) throw new Error("Incomplete native workspace pagination");
+        cursors.add(next); cursor = next;
+      }
+      const knownWorkspaces = new Set(Object.values(state.connections).flatMap(conn => Object.values(conn.issues).map(issue => issue.workspaceId)));
+      const candidates = new Map<string, { cwd: string; name: string }>();
+      for (const conn of Object.values(state.connections)) {
+        for (const project of Object.values(conn.projects)) if (project.projectId) candidates.set(project.projectId, project);
+        for (const issue of Object.values(conn.issues)) if (issue.projectId && !candidates.has(issue.projectId)) {
+          const project = conn.projects[issue.remoteWorkspaceId];
+          candidates.set(issue.projectId, { cwd: project?.cwd ?? resolve(issue.cwd, ".."), name: project?.name ?? issue.title });
+        }
+      }
+      const retainedProjects: Array<{ name: string; cwd: string }> = [];
+      const removedProjects = new Set<string>();
+      const archivedWorkspaces = new Set<string>();
+      const archive = async (id: string) => {
+        if ((await host.archiveWorkspace(id)).error) throw new Error("Native workspace archive failed");
+        archivedWorkspaces.add(id);
+      };
+      for (const [projectId, cached] of candidates) {
+        const project = projects.find(project => project.projectId === projectId);
+        if (!project || project.projectRootPath !== cached.cwd || project.projectKind !== "non_git") continue;
+        const workspaces = active.filter(workspace => workspace.projectId === projectId);
+        if (workspaces.some(workspace => !knownWorkspaces.has(workspace.id))) {
+          retainedProjects.push({ name: cached.name, cwd: cached.cwd });
+          for (const workspace of workspaces) if (knownWorkspaces.has(workspace.id)) await archive(workspace.id);
+        } else {
+          await host.removeProject(projectId);
+          removedProjects.add(projectId);
+        }
+      }
+      for (const workspace of active) if (knownWorkspaces.has(workspace.id) && !removedProjects.has(workspace.projectId) && !archivedWorkspaces.has(workspace.id)) await archive(workspace.id);
+
+      const root = resolve(this.options.store.directory, "placeholders");
+      const inside = (target: string) => { const path = relative(root, resolve(target)); return !!path && !path.startsWith("..") && !isAbsolute(path); };
+      const preserved = retainedProjects.map(project => resolve(project.cwd));
+      const clean = async (directory: string) => {
+        if (preserved.includes(directory)) return;
+        for (const entry of await readdir(directory, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return []; throw error; })) {
+          const target = resolve(directory, entry.name);
+          if (!inside(target)) throw new Error("Unsafe placeholder removal target");
+          if (preserved.includes(target)) continue;
+          if (entry.isDirectory() && preserved.some(path => path.startsWith(target + sep))) {
+            await clean(target);
+          } else await rm(target, { recursive: true, force: true });
+        }
+        await rmdir(directory).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT" && error.code !== "ENOTEMPTY") throw error; });
+      };
+      await clean(root);
+      await this.options.store.update(state => { state.connections = {}; state.owner = { profile: targetProfile }; });
+      this.syncState.retainedProjects = retainedProjects.length ? retainedProjects : undefined;
+    } catch (error) {
+      this.syncState = { ...this.syncState, status: "unavailable", stage: "purging", message: "清理旧 profile 本地数据失败；同步和规则写入已暂停，请重新引导以重试。" };
+      throw error;
+    } finally { for (const release of releases.reverse()) release(); }
+  }
   private async sync(version: number) {
+    await this.purge();
     if (!this.host) this.host = await this.options.connectHost();
     await this.assertOwningDaemon();
+    if (version !== this.ruleVersion) return;
     this.syncState.stage = "history";
     await this.options.onCached?.(this.host);
     this.syncState.stage = "connection";
