@@ -914,13 +914,15 @@ it("compiled cache-only history renders a complete askuser card without requesti
     if (name === "issue.history.list") return { issues: [{ connectionKey: "old", issueId: "issue", workspaceId: "workspace", title: "History", status: "inaccessible", revision: "history-v1" }] };
     if (name === "issue.history.read") return { text: JSON.stringify({ title: "History", description: "", discussions: [], runs: [], deliveries: [], stops: [], askuserCards: [
       { connectionKey: "old", issueId: "issue", rootId: "root", commentId: "card", attachmentId: "file", revision: "v1", title: "历史提问", description: "完整历史警示说明", questions: [{ id: "reason", title: "说明原因", type: "text" }], status: "answered", readOnly: true, offline: true, truncated: false, answer: { commentId: "answer", actorId: "original-user", content: "已确认完整回答" } },
+      { connectionKey: "old", issueId: "issue", rootId: "root", commentId: "skipped", attachmentId: "skipped-file", revision: "v1", title: "历史跳过卡片", description: "跳过前的完整警示", questions: [{ id: "scope", title: "历史范围", type: "single", options: [{ id: "canary", label: "仅灰度" }] }], status: "skipped", skippedBy: "skip-operator", readOnly: true, offline: true, truncated: false },
+      { connectionKey: "old", issueId: "issue", rootId: "root", commentId: "pending", attachmentId: "pending-file", revision: "v1", title: "历史待答卡片", description: "待答完整警示", questions: [{ id: "reason", title: "补充理由", type: "text", required: false }], status: "pending", collapsed: true, readOnly: true, offline: true, truncated: false },
     ] }), nextOffset: null };
     return empty(name, input) ?? { status: "offline", message: "offline", profile: "", source: { api: "none", credentials: "none", app: "none" }, loginCommand: "multica login" };
   });
   try {
     await vi.waitFor(() => expect(h.render()).toContain("History")); h.action("读取缓存历史").onPress();
     await vi.waitFor(() => expect(h.render()).toContain("历史提问"));
-    for (const text of ["完整历史警示说明", "说明原因", "只读", "离线缓存", "original-user", "已确认完整回答"]) expect(h.render()).toContain(text);
+    for (const text of ["完整历史警示说明", "说明原因", "只读", "离线缓存", "original-user", "已确认完整回答", "历史跳过卡片", "跳过前的完整警示", "历史范围", "仅灰度", "已跳过", "skip-operator", "历史待答卡片", "待答完整警示", "补充理由", "已在本地收起"]) expect(h.render()).toContain(text);
     expect(h.calls.some(call => call.name.startsWith("askuser."))).toBe(false);
   } finally { h.dispose(); }
 });

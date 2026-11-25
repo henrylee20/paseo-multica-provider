@@ -44,13 +44,13 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       currentProfile: async () => { const state = await settings.read(); return state.status === "ready" ? state.values.profile : undefined; } });
     server.handle(connectionStatus, async (): Promise<ConnectionStatus> => {
       const state = await settings.read();
-      if (state.status !== "ready") { resolve.invalidate(); return { status: "invalid_settings", profile: "", source: { api: "none", credentials: "none", app: "none" },
+      if (state.status !== "ready") { resolve.invalidate(); await askusers.connectionChanged(); return { status: "invalid_settings", profile: "", source: { api: "none", credentials: "none", app: "none" },
         message: "Multica 插件设置无效，请重新选择 CLI profile。", loginCommand: "multica login" }; }
       return resolveStatus(state.values.profile);
     });
     async function connection() {
       const state = await settings.read();
-      if (state.status !== "ready") { resolve.invalidate(); throw new Error("Multica settings unavailable"); }
+      if (state.status !== "ready") { resolve.invalidate(); await askusers.connectionChanged(); throw new Error("Multica settings unavailable"); }
       let authenticated: AuthenticatedConnection | undefined;
       await resolveStatus(state.values.profile, value => { authenticated = value; });
       if (!authenticated) throw new Error("Multica connection unavailable");
@@ -59,8 +59,30 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     const environment = dependencies.environment ?? process.env;
     const owningHome = environment.PASEO_HOME ?? "";
     const store = new StateStore(dependencies.stateDirectory ?? join(owningHome || join(dependencies.homeDirectory ?? homedir(), ".paseo"), "multica-provider"));
+    const watchedConnections = new WeakSet<AbortSignal>();
+    const identityRefreshes = new Set<Promise<unknown>>();
+    let resolvingIdentity = 0;
+    let reconciledIdentity = 0;
+    let shuttingDown = false;
     async function resolveStatus(profile: string, authenticated?: (connection: AuthenticatedConnection) => void) {
-      const status = await resolve(profile, authenticated);
+      const generation = ++resolvingIdentity;
+      let context: AuthenticatedConnection | undefined;
+      const status = await resolve(profile, value => { context = value; authenticated?.(value); });
+      if (generation < reconciledIdentity || shuttingDown) return status;
+      reconciledIdentity = generation;
+      if (context?.signal && !watchedConnections.has(context.signal)) {
+        const signal = context.signal;
+        watchedConnections.add(signal);
+        signal.addEventListener("abort", () => {
+          if (shuttingDown) return;
+          // Revocation also happens for same-account token rotation. Verify the
+          // replacement identity before changing card permissions or collapse.
+          const refresh = Promise.resolve().then(() => connection()).catch(() => {});
+          identityRefreshes.add(refresh);
+          void refresh.finally(() => { identityRefreshes.delete(refresh); });
+        }, { once: true });
+      }
+      await askusers.connectionChanged(status.status === "ready" && status.connectionKey && status.user ? { connectionKey: status.connectionKey, userId: status.user.id } : undefined);
       if (status.status === "ready" && status.connectionKey && status.apiUrl && status.user) {
         const { connectionKey, apiUrl, appUrl, user } = status;
         await store.update(state => {
@@ -78,7 +100,8 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
         pendingDeliveryCount: issues.reduce((count, issue) => count + Object.values(issue.deliveries).filter(record => record.status === "received" || record.status === "pending_verification").length, 0),
         stopWarningCount: issues.reduce((count, issue) => count + Object.values(issue.stopRecords).filter(record => record.retryable || record.cleanup === "pending" || record.cleanup === "unconfirmed").length, 0) };
     }) }));
-    const askusers = new AskUsers(store, connection);
+    const lifecycle = new DiscussionLifecycle();
+    const askusers = new AskUsers(store, connection, lifecycle);
     server.handle(askuserObserve, input => askusers.observe(input));
     server.handle(askuserRead, input => askusers.read(input));
     const threads = new ThreadSynchronizer(store, connection, askusers);
@@ -86,7 +109,6 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     const history = new IssueHistory(store);
     server.handle(issueHistoryList, () => history.list());
     server.handle(issueHistoryRead, input => history.read(input));
-    const lifecycle = new DiscussionLifecycle();
     const wakeups = new AskuserWakeups(store, askusers, lifecycle, dependencies.now);
     server.handle(askuserReopen, async (input, context) => {
       const card = await askusers.reopen(input, lifecycle);
@@ -105,7 +127,7 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     const runDetails = new RunDetails(store, connection);
     const stops = new StopCoordinator(store, connection, runs);
     server.handle(askuserSkip, input => askusers.skip(input, stops, lifecycle));
-    const deliveries = new CommentDelivery(store, connection, stops, () => synchronizer.reconcile(), dependencies.now, record => askusers.deliveryChanged(record));
+    const deliveries = new CommentDelivery(store, connection, stops, () => synchronizer.reconcile(), dependencies.now, record => askusers.deliveryChanged(record), lifecycle);
     threads.coordinateDeliveries(() => deliveries.waitForPosts());
     server.handle(deliveryVerify, async input => deliveries.verify(input));
     server.handle(deliveryResend, async input => deliveries.resend(input));
@@ -193,6 +215,6 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       try { await synchronizer.rule(context.paseo, input.workspaceId, input.rule, input.connectionKey); return { status: "ready" as const }; }
       catch { return { status: "unavailable" as const, message: "筛选规则保存或同步失败，请检查连接后重试。" }; }
     });
-    return async () => { await deliveries.close(); await synchronizer.close(); await metadata.close(); await stops.close(); await threads.close(); await askusers.close(); await runDetails.close(); runs.close(); descriptions.close(); };
+    return async () => { shuttingDown = true; await Promise.allSettled(identityRefreshes); await deliveries.close(); await synchronizer.close(); await metadata.close(); await stops.close(); await threads.close(); await askusers.close(); await runDetails.close(); runs.close(); descriptions.close(); };
   };
 }

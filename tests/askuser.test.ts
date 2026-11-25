@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
@@ -9,7 +9,7 @@ import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { ProviderConnection, ProviderTimelineItem, ProviderEvent } from "@getpaseo/plugin/server/provider";
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
-import { workspaceEnable, syncBootstrap } from "../shared/contracts.js";
+import { workspaceEnable, syncBootstrap, connectionStatus } from "../shared/contracts.js";
 import { issueHistoryList, issueHistoryRead, cachedIssueSnapshot } from "../shared/access.js";
 import { deliveryList, deliveryVerify, deliveryResend } from "../shared/delivery.js";
 import { hiddenRestore } from "../shared/hiding.js";
@@ -37,7 +37,7 @@ async function fixture() {
   let clock = new Date(stamp);
   const documents = new Map<string, unknown>();
   const requests: Array<{ path: string; slug?: string; authorization?: string }> = [];
-  const remote = { status: 200, contentType: "application/json", redirect: false, chunked: false, issueStatus: 200, userId: "me", objectChecksUntilDeny: -1, postStatus: 200, loseResponse: false, skipStatus: 204, loseSkipResponse: false, beforeSkip: undefined as (() => Promise<void>) | undefined, beforeIssueCheck: undefined as (() => Promise<void>) | undefined, beforePost: undefined as (() => Promise<void>) | undefined, beforeDownload: undefined as (() => Promise<void>) | undefined };
+  const remote = { visible: true, status: 200, contentType: "application/json", redirect: false, chunked: false, issueStatus: 200, meStatus: 200, userId: "me", objectChecksUntilDeny: -1, postStatus: 200, loseResponse: false, skipStatus: 204, loseSkipResponse: false, beforeTimeline: undefined as (() => Promise<void>) | undefined, beforeWorkspaces: undefined as (() => Promise<void>) | undefined, beforeMe: undefined as (() => Promise<void>) | undefined, beforeSkip: undefined as (() => Promise<void>) | undefined, beforeIssueCheck: undefined as (() => Promise<void>) | undefined, beforePost: undefined as (() => Promise<void>) | undefined, beforeDownload: undefined as (() => Promise<void>) | undefined };
   const http = createServer(async (request, response) => {
     requests.push({ path: request.url!, slug: request.headers["x-workspace-slug"] as string, authorization: request.headers.authorization });
     const url = new URL(request.url!, "http://localhost");
@@ -63,13 +63,13 @@ async function fixture() {
       if (receipt) { response.setHeader("Idempotent-Replayed", "true"); body = receipt; }
       else { response.statusCode = 404; body = { error: "no comment has been posted with this Idempotency-Key" }; }
     }
-    else if (url.pathname === "/api/me") body = { id: remote.userId, name: "Lin" };
-    else if (url.pathname === "/api/workspaces") body = [{ id: "workspace", name: "Product", slug: "product" }];
+    else if (url.pathname === "/api/me") { await remote.beforeMe?.(); response.statusCode = remote.meStatus; body = { id: remote.userId, name: "Lin" }; }
+    else if (url.pathname === "/api/workspaces") { await remote.beforeWorkspaces?.(); body = [{ id: "workspace", name: "Product", slug: "product" }]; }
     else if (url.pathname === "/api/agents") body = [{ id: "agent", name: "Builder" }];
-    else if (url.pathname === "/api/issues") body = { issues: [{ id: "issue", workspace_id: "workspace", title: "Task", description: "Description", status: "todo" }], total: 1 };
-    else if (url.pathname === "/api/issues/issue") { await remote.beforeIssueCheck?.(); response.statusCode = remote.objectChecksUntilDeny === 0 ? 403 : remote.issueStatus; if (remote.objectChecksUntilDeny > 0) remote.objectChecksUntilDeny--; body = { id: "issue", workspace_id: "workspace", title: "Task", status: "todo" }; }
+    else if (url.pathname === "/api/issues") body = { issues: remote.visible ? [{ id: "issue", workspace_id: "workspace", title: "Task", description: "Description", status: "todo" }] : [], total: remote.visible ? 1 : 0 };
+    else if (url.pathname === "/api/issues/issue") { await remote.beforeIssueCheck?.(); response.statusCode = remote.objectChecksUntilDeny === 0 ? 403 : remote.issueStatus; if (remote.objectChecksUntilDeny > 0) remote.objectChecksUntilDeny--; body = response.statusCode === 200 ? { id: "issue", workspace_id: "workspace", title: "Task", status: "todo" } : { error: response.statusCode === 404 ? "issue not found" : "issue permission denied" }; }
     else if (url.pathname === "/api/issues/issue/comments") body = comments.map(c => url.searchParams.has("summary") ? { ...c, content: [...c.content].slice(0, 200).join(""), content_truncated: [...c.content].length > 200 } : c);
-    else if (url.pathname === "/api/issues/issue/timeline") body = timeline;
+    else if (url.pathname === "/api/issues/issue/timeline") { await remote.beforeTimeline?.(); body = timeline; }
     else if (url.pathname === "/api/issues/issue/task-runs") body = runs;
     else if (url.pathname.startsWith("/api/attachments/")) {
       await remote.beforeDownload?.();
@@ -685,4 +685,255 @@ it("clears a retained form when an explicit answer resend becomes uncertain, wit
   await f.server.rpc(deliveryResend, { ...original, requestId: "uncertain-explicit", acknowledgeDuplicateRisk: true }, f.paseo);
   await expect.poll(() => f.events.filter(event => event.type === "session.permission_resolved")).toHaveLength(1);
   expect(f.cards()[0].data).toMatchObject({ delivery: { status: "pending_verification" }, readOnly: true });
+});
+
+
+it("Stop resolves pending native cards locally and preserves a reopen entry without remote skip", async () => {
+  const f = await fixture(); f.comments[0].attachments = [attachment("stop-local")]; f.documents.set("stop-local", card); await f.sync();
+  const permission = pendingQuestion(f).request;
+  await (await f.connect()).send({ type: "session.interrupt", requestId: "stop-card", sessionId: f.agents[1].id });
+  expect(f.events).toContainEqual({ type: "session.permission_resolved", sessionId: f.agents[1].id, permissionId: permission.id });
+  expect(f.cards()[0].data).toMatchObject({ status: "pending", collapsed: true, readOnly: false });
+  await f.sync();
+  expect(f.events.filter(event => event.type === "session.permission")).toHaveLength(1);
+  await f.server.rpc(defineRpc({ name: "askuser.reopen", input: z.any(), output: z.any() }), { ...f.address(), commentId: "root", attachmentId: "stop-local" }, f.paseo);
+  expect(f.events.filter(event => event.type === "session.permission")).toHaveLength(2);
+  expect(f.posts).toEqual([]); expect(f.skips).toEqual([]);
+});
+
+
+it("fences an answer received before Stop while its identity preflight is still waiting", async () => {
+  const f = await fixture(); f.comments[0].attachments = [attachment("stopped-answer")]; f.documents.set("stopped-answer", card); await f.sync();
+  let entered!: () => void; let release!: () => void;
+  const arrived = new Promise<void>(resolve => { entered = resolve; }); const blocked = new Promise<void>(resolve => { release = resolve; });
+  f.remote.beforeMe = async () => { entered(); await blocked; };
+  const submitted = answer(f, ["停止前收到的回答"]).then(value => ({ value }), error => ({ error }));
+  await arrived;
+  await (await f.connect()).send({ type: "session.interrupt", requestId: "stop-answer", sessionId: f.agents[1].id });
+  release();
+  expect(await submitted).toMatchObject({ error: expect.objectContaining({ message: "Delivery was stopped" }) });
+  expect(f.posts).toEqual([]); expect(f.skips).toEqual([]);
+  expect((await f.server.rpc(deliveryList, {}, f.paseo)).records).toMatchObject([{ status: "failed", body: expect.stringContaining("停止前收到的回答") }]);
+});
+
+
+it.each(["thread hide", "workspace hide", "forbidden", "not found", "rule disabled", "filter exit"])("immediately resolves every live permission after %s while preserving cached cards", async reason => {
+  const f = await fixture(); f.comments[0].attachments = [attachment("unavailable")]; f.documents.set("unavailable", card); await f.sync();
+  const agent = f.agents[1];
+  await (await f.connect()).send({ type: "session.open", requestId: "second", sessionId: "second", history: "replay", persistence: JSON.parse(agent.handle.slice(7)), config: { cwd: agent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
+  if (reason === "thread hide") await f.server.hook("agent.archive.after", { agent: { ...agent, provider: "multica" } } as never, f.paseo);
+  if (reason === "workspace hide") await f.server.hook("workspace.archive.after", { workspace: { id: agent.workspaceId } } as never, f.paseo);
+  if (reason === "forbidden" || reason === "not found") { f.remote.issueStatus = reason === "forbidden" ? 403 : 404; await f.sync(); }
+  if (reason === "filter exit") { f.remote.visible = false; await f.sync(); }
+  if (reason === "rule disabled") await f.server.rpc(workspaceEnable, { workspaceId: "workspace", enabled: false }, f.paseo);
+  expect(f.events.filter(event => event.type === "session.permission_resolved").map(event => event.sessionId).sort()).toEqual([agent.id, "second"].sort());
+  expect(f.cards()[0].data).toMatchObject({ status: "pending", readOnly: true, questions: card.questions });
+  expect(f.skips).toEqual([]); expect(f.posts).toEqual([]);
+});
+
+
+it.each(["account switch", "logout", "global auth failure", "offline"])("resolves previous connection permissions immediately on %s without touching cached attachments", async reason => {
+  const f = await fixture(); f.comments[0].attachments = [attachment("identity")]; f.documents.set("identity", { ...card, answer_user_id: "me" }); await f.sync();
+  const before = f.requests.filter(request => request.path.startsWith("/api/attachments/")).length;
+  if (reason === "account switch") f.remote.userId = "other";
+  if (reason === "logout") await writeFile(f.configPath, "{}");
+  if (reason === "global auth failure") f.remote.meStatus = 401;
+  if (reason === "offline") f.remote.meStatus = 503;
+  await f.server.rpc(connectionStatus, {}, f.paseo);
+  expect(f.events).toContainEqual({ type: "session.permission_resolved", sessionId: f.agents[1].id, permissionId: "multica:askuser:root:identity" });
+  expect(f.cards()[0].data).toMatchObject({ title: card.title, questions: card.questions, readOnly: true, offline: true });
+  await expect(answer(f, ["wrong identity"])).rejects.toThrow();
+  expect(f.posts).toEqual([]); expect(f.skips).toEqual([]);
+  expect(f.requests.filter(request => request.path.startsWith("/api/attachments/"))).toHaveLength(before);
+});
+
+
+it("clears native permissions when an in-flight access read detects CLI logout", async () => {
+  const f = await fixture(); f.comments[0].attachments = [attachment("revoked")]; f.documents.set("revoked", card); await f.sync();
+  f.remote.beforeIssueCheck = async () => { await writeFile(f.configPath, "{}"); };
+  await expect(f.server.rpc(skipCard, { ...f.address(), commentId: "root", attachmentId: "revoked", confirmed: true }, f.paseo)).rejects.toThrow();
+  await expect.poll(() => f.events.filter(event => event.type === "session.permission_resolved")).toHaveLength(1);
+  expect(f.cards()[0].data).toMatchObject({ readOnly: true, offline: true });
+  expect(f.skips).toEqual([]); expect(f.posts).toEqual([]);
+});
+
+
+it("does not download a newly discovered attachment if the Thread is hidden during its access preflight", async () => {
+  const f = await fixture(); f.comments[0].attachments = [attachment("hidden-preflight")]; f.documents.set("hidden-preflight", card);
+  let entered!: () => void; let release!: () => void; let checks = 0;
+  const arrived = new Promise<void>(resolve => { entered = resolve; }); const blocked = new Promise<void>(resolve => { release = resolve; });
+  f.remote.beforeIssueCheck = async () => { if (++checks === 2) { entered(); await blocked; } };
+  const sync = f.sync(); await arrived;
+  await f.server.hook("agent.archive.after", { agent: { ...f.agents[1], provider: "multica" } } as never, f.paseo);
+  release(); await sync;
+  expect(f.requests.filter(request => request.path.startsWith("/api/attachments/"))).toEqual([]);
+  expect(f.cards()).toEqual([]);
+  await f.server.rpc(hiddenRestore, f.address(), f.paseo); await f.sync();
+  expect(f.cards()[0].data).toMatchObject({ status: "pending", title: card.title });
+});
+
+
+it("rejects an answer hidden during workspace preflight and preserves its immutable input", async () => {
+  const f = await fixture(); f.comments[0].attachments = [attachment("hide-answer")]; f.documents.set("hide-answer", card); await f.sync();
+  let entered!: () => void; let release!: () => void;
+  const arrived = new Promise<void>(resolve => { entered = resolve; }); const blocked = new Promise<void>(resolve => { release = resolve; });
+  f.remote.beforeWorkspaces = async () => { entered(); await blocked; };
+  const submitted = answer(f, ["保留原始回答"]).then(value => ({ value }), error => ({ error }));
+  await arrived;
+  await f.server.hook("agent.archive.after", { agent: { ...f.agents[1], provider: "multica" } } as never, f.paseo);
+  release();
+  expect(await submitted).toMatchObject({ error: expect.objectContaining({ message: expect.stringContaining("归档") }) });
+  expect(f.posts).toEqual([]);
+  expect((await f.server.rpc(deliveryList, {}, f.paseo)).records).toMatchObject([{ status: "failed", body: expect.stringContaining("保留原始回答") }]);
+});
+
+
+it.each([false, true])("ordinary chat remains a normal comment when host clearPendingPermissions is %s", async clearPendingPermissions => {
+  const f = await fixture(); f.comments[0].attachments = [attachment("chat")]; f.documents.set("chat", card); await f.sync();
+  const prompt = { clientMessageId: "ordinary-chat", delivery: "auto" as const, input: { type: "message" as const, content: [{ type: "text" as const, text: "这是独立的普通讨论评论" }] }, clearPendingPermissions };
+  await (await f.connect()).send({ type: "session.prompt", sessionId: f.agents[1].id, prompt });
+  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[0]?.status).toBe("saved");
+  expect(f.posts.map(post => post.body)).toEqual([{ type: "comment", content: "这是独立的普通讨论评论", parent_id: "root" }]);
+  expect(f.skips).toEqual([]);
+  expect(f.events.filter(event => event.type === "session.permission_resolved")).toHaveLength(clearPendingPermissions ? 1 : 0);
+  expect(f.cards()[0].data).toMatchObject({ status: "pending", collapsed: clearPendingPermissions });
+  await f.sync(); expect(f.events.filter(event => event.type === "session.permission")).toHaveLength(1);
+});
+
+
+it("isolates the specified stable permission ID by provider session and connection when remote card IDs match", async () => {
+  const f = await fixture(); f.comments[0].attachments = [attachment("same-id")]; f.documents.set("same-id", card); await f.sync();
+  const original = pendingQuestion(f);
+  f.remote.userId = "another-account";
+  await f.server.rpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, f.paseo);
+  const next = pendingQuestion(f);
+  expect(next.sessionId).not.toBe(original.sessionId);
+  expect(next.request.id).toBe(original.request.id);
+  await expect((await f.connect()).send({ type: "session.permission", sessionId: original.sessionId, permissionId: original.request.id, response: { behavior: "deny" } })).rejects.toThrow("不可用");
+  await (await f.connect()).send({ type: "session.permission", sessionId: next.sessionId, permissionId: next.request.id, response: { behavior: "deny" } });
+  const old = await f.server.rpc(observeCard, { ...f.address(), commentId: "root", attachmentId: "same-id" }, f.paseo);
+  expect(old).toMatchObject({ offline: true, readOnly: true, collapsed: false });
+  expect(f.posts).toEqual([]); expect(f.skips).toEqual([]);
+});
+
+
+it("same-account credential rotation during an action preserves cached cards, collapsed state and live permissions", async () => {
+  const f = await fixture(); f.comments[0].attachments = [attachment("rotation-live")]; f.comments.push(comment("child", "root", [attachment("rotation-collapse")]));
+  f.documents.set("rotation-live", card); f.documents.set("rotation-collapse", card); await f.sync();
+  await (await f.connect()).send({ type: "session.permission", sessionId: f.agents[1].id, permissionId: "multica:askuser:child:rotation-collapse", response: { behavior: "deny" } });
+  const before = f.requests.filter(request => request.path.startsWith("/api/attachments/")).length;
+  f.remote.beforeIssueCheck = async () => {
+    f.remote.beforeIssueCheck = undefined;
+    const config = JSON.parse(await readFile(f.configPath, "utf8"));
+    await writeFile(f.configPath, JSON.stringify({ ...config, token: "rotated-synthetic" }));
+  };
+  await expect(f.server.rpc(skipCard, { ...f.address(), commentId: "root", attachmentId: "rotation-live", confirmed: true }, f.paseo)).rejects.toThrow();
+  await f.server.rpc(connectionStatus, {}, f.paseo); await f.sync();
+  expect(f.cards().map(row => row.data)).toMatchObject([{ collapsed: false, readOnly: false, title: card.title }, { collapsed: true, readOnly: false, title: card.title }]);
+  expect(f.events.filter(event => event.type === "session.permission_resolved").map(event => event.permissionId)).toEqual(["multica:askuser:child:rotation-collapse"]);
+  expect(f.events.filter(event => event.type === "session.permission" && event.request.id === "multica:askuser:root:rotation-live")).toHaveLength(1);
+  expect(f.requests.filter(request => request.path.startsWith("/api/attachments/"))).toHaveLength(before);
+  expect(f.posts).toEqual([]); expect(f.skips).toEqual([]);
+});
+
+it.each(["hidden", "rule archived"])("prevents answer recovery and explicit resend after %s without losing the unknown original", async reason => {
+  const f = await fixture(); f.comments[0].attachments = [attachment("proof")]; f.documents.set("proof", card); await f.sync(); await answer(f, ["已保存的能力证明"]);
+  f.comments.push(comment("child", "root", [attachment("archived-retry")])); f.documents.set("archived-retry", card); await f.sync();
+  f.remote.postStatus = 503; await answer(f, ["原始待核实回答"], "multica:askuser:child:archived-retry");
+  const original = (await f.server.rpc(deliveryList, {}, f.paseo)).records[1];
+  if (reason === "hidden") await f.server.hook("agent.archive.after", { agent: { ...f.agents[1], provider: "multica" } } as never, f.paseo);
+  else await f.server.rpc(workspaceEnable, { workspaceId: "workspace", enabled: false }, f.paseo);
+  f.remote.postStatus = 200; await f.sync();
+  await expect(f.server.rpc(deliveryResend, { ...original, requestId: "blocked-resend", acknowledgeDuplicateRisk: true }, f.paseo)).rejects.toThrow("归档");
+  const retained = (await f.server.rpc(deliveryList, {}, f.paseo)).records[1];
+  expect(retained).toMatchObject({ idempotencyKey: original.idempotencyKey, clientMessageId: original.clientMessageId, body: original.body, status: "pending_verification" });
+  expect(f.posts).toHaveLength(2); expect(f.skips).toEqual([]);
+});
+
+
+it("keeps the original live form across same-account token revocation detected by timeline synchronization", async () => {
+  const f = await fixture(); f.comments[0].attachments = [attachment("timeline-rotation")]; f.documents.set("timeline-rotation", card); await f.sync();
+  f.remote.beforeTimeline = async () => {
+    f.remote.beforeTimeline = undefined;
+    const config = JSON.parse(await readFile(f.configPath, "utf8")); await writeFile(f.configPath, JSON.stringify({ ...config, token: "rotated-timeline" }));
+  };
+  await f.sync(); await f.server.rpc(connectionStatus, {}, f.paseo);
+  expect(f.events.filter(event => event.type === "session.permission_resolved")).toEqual([]);
+  expect(f.events.filter(event => event.type === "session.permission")).toHaveLength(1);
+  expect(f.cards()[0].data).toMatchObject({ title: card.title, readOnly: false, collapsed: false });
+});
+
+
+it("reads complete pending, answered and skipped questionnaires from cache after offline, logout and restart without network or native restoration", async () => {
+  const f = await fixture();
+  const warning = "完整风险说明".repeat(1800);
+  const questions = [{ id: "reason", type: "text", title: "理由", description: "完整题目说明" }, { id: "scope", type: "single", title: "范围", options: [{ id: "safe", label: "仅灰度" }] }];
+  f.comments[0].attachments = [attachment("history-pending")];
+  f.comments.push(comment("answered-card", "root", [attachment("history-answered")]), comment("skipped-card", "root", [attachment("history-skipped")]));
+  for (const id of ["history-pending", "history-answered", "history-skipped"]) f.documents.set(id, { ...card, description: warning, questions });
+  const content = "**确认结果**\n\n1. **理由**：完整历史回答\n2. **范围**：仅灰度";
+  f.timeline.push({ id: "historical-answer", type: "comment", parent_id: "answered-card", content, actor_type: "member", actor_id: "me" }, { id: "skipped-card", type: "comment", askuser_skipped_at: stamp, askuser_skipped_by: "operator" });
+  await f.sync();
+  await (await f.connect()).send({ type: "session.permission", sessionId: f.agents[1].id, permissionId: "multica:askuser:root:history-pending", response: { behavior: "deny" } });
+  f.remote.meStatus = 503; await f.server.rpc(connectionStatus, {}, f.paseo);
+  async function readHistory(server: FakeServer) {
+    const count = f.requests.length, nativeCount = f.agents.length;
+    const entry = (await server.rpc(issueHistoryList, {}, f.paseo)).issues[0];
+    let text = ""; let offset: number | null = 0;
+    while (offset !== null) { const page: { text: string; nextOffset: number | null } = await server.rpc(issueHistoryRead, { ...f.address(), revision: entry.revision, offset }, f.paseo); text += page.text; offset = page.nextOffset; }
+    const snapshot = cachedIssueSnapshot.parse(JSON.parse(text));
+    expect(snapshot.askuserCards).toMatchObject([
+      { title: card.title, description: warning, questions, status: "pending", collapsed: true, readOnly: true, offline: true },
+      { title: card.title, description: warning, questions, status: "answered", answer: { content, actorId: "me" }, readOnly: true, offline: true },
+      { title: card.title, description: warning, questions, status: "skipped", skippedAt: stamp, skippedBy: "operator", readOnly: true, offline: true },
+    ]);
+    expect(f.requests).toHaveLength(count); expect(f.agents).toHaveLength(nativeCount);
+  }
+  await readHistory(f.server);
+  await writeFile(f.configPath, "{}"); await readHistory(f.server);
+  await f.dispose(); await f.disconnect(); const restarted = f.start(); f.events.length = 0;
+  await readHistory(restarted.server); expect(f.events).toEqual([]);
+});
+
+
+it.each([403, 404])("immediately resolves native input when an action preflight confirms object HTTP %s", async status => {
+  const f = await fixture(); f.comments[0].attachments = [attachment("denied-action")]; f.documents.set("denied-action", card); await f.sync();
+  f.remote.issueStatus = status;
+  await expect(f.server.rpc(skipCard, { ...f.address(), commentId: "root", attachmentId: "denied-action", confirmed: true }, f.paseo)).rejects.toThrow(`HTTP ${status}`);
+  expect(f.events.filter(event => event.type === "session.permission_resolved")).toMatchObject([{ sessionId: f.agents[1].id, permissionId: "multica:askuser:root:denied-action" }]);
+  expect(f.cards()[0].data).toMatchObject({ readOnly: true, readOnlyReason: expect.stringContaining("不可访问") });
+  expect(f.posts).toEqual([]); expect(f.skips).toEqual([]);
+});
+
+
+it("clears old-service permissions and never borrows a newly selected service to read or write its cached cards", async () => {
+  const f = await fixture(); f.comments[0].attachments = [attachment("old-service")]; f.documents.set("old-service", card); await f.sync();
+  const replacement = await fixture();
+  await writeFile(f.configPath, await readFile(replacement.configPath, "utf8"));
+  await f.server.rpc(connectionStatus, {}, f.paseo);
+  expect(f.events.filter(event => event.type === "session.permission_resolved")).toMatchObject([{ sessionId: f.agents[1].id, permissionId: "multica:askuser:root:old-service" }]);
+  const target = { ...f.address(), commentId: "root", attachmentId: "old-service", confirmed: true };
+  await expect(f.server.rpc(skipCard, target, f.paseo)).rejects.toThrow("身份");
+  await expect(f.server.rpc(defineRpc({ name: "askuser.reopen", input: z.any(), output: z.any() }), target, f.paseo)).rejects.toThrow("身份");
+  await expect(answer(f, ["不能跨服务提交"])).rejects.toThrow();
+  expect((await f.server.rpc(observeCard, target, f.paseo))).toMatchObject({ title: card.title, readOnly: true, offline: true });
+  expect(replacement.requests.filter(request => request.path.startsWith("/api/attachments/"))).toEqual([]);
+  expect(f.posts).toEqual([]); expect(replacement.posts).toEqual([]); expect(replacement.skips).toEqual([]);
+});
+
+
+it("fences an explicit answer resend received before Stop while its workspace preflight waits", async () => {
+  const f = await fixture(); f.comments[0].attachments = [attachment("stop-resend")]; f.documents.set("stop-resend", card); await f.sync();
+  f.remote.postStatus = 403; await expect(answer(f, ["原始回答"])).rejects.toThrow();
+  const original = (await f.server.rpc(deliveryList, {}, f.paseo)).records[0];
+  let entered!: () => void; let release!: () => void;
+  const arrived = new Promise<void>(resolve => { entered = resolve; }); const blocked = new Promise<void>(resolve => { release = resolve; });
+  f.remote.beforeWorkspaces = async () => { entered(); await blocked; };
+  const decision = f.server.rpc(deliveryResend, { ...original, requestId: "stopped-resend", acknowledgeDuplicateRisk: true }, f.paseo);
+  await arrived;
+  await (await f.connect()).send({ type: "session.interrupt", requestId: "stop-resend", sessionId: f.agents[1].id });
+  f.remote.postStatus = 200; release(); await decision;
+  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[1]?.status).toBe("failed");
+  expect((await f.server.rpc(deliveryList, {}, f.paseo)).records[1]).toMatchObject({ body: original.body, message: "Delivery was stopped" });
+  expect(f.posts).toHaveLength(1); expect(f.skips).toEqual([]);
 });

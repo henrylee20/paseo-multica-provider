@@ -46,6 +46,8 @@ export type IssueMapping = z.infer<typeof issueSchema>;
 /** Atomic, daemon-only state. Credentials are deliberately absent from its schema. */
 export class StateStore {
   private pending: Promise<unknown> = Promise.resolve();
+  private readonly listeners = new Set<(state: LocalState) => void>();
+  subscribe(listener: (state: LocalState) => void) { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
   constructor(readonly directory: string) {}
   async read(): Promise<LocalState> {
     await this.pending;
@@ -64,6 +66,7 @@ export class StateStore {
       const temporary = join(this.directory, "state.json.next");
       await writeFile(temporary, JSON.stringify(validated), { mode: 0o600 });
       await rename(temporary, join(this.directory, "state.json"));
+      for (const listener of this.listeners) listener(validated);
     });
     this.pending = operation.catch(() => {});
     return operation;
