@@ -14,7 +14,7 @@ export class DiscussionMetadata {
   mirror(paseo: PaseoApi): Promise<void> {
     if (this.closed || this.unsupported) return Promise.resolve();
     this.paseo ??= paseo;
-    this.pending ??= this.sweep(paseo).catch(() => {});
+    this.pending ??= this.sweep(paseo).catch(() => { this.pending = undefined; });
     return this.pending;
   }
   close(): Promise<void> { this.closed = true; return this.pending ?? Promise.resolve(); }

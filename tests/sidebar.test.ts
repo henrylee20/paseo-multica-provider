@@ -228,7 +228,7 @@ it("a host without agent metadata is read once, and bootstrap stays ready", asyn
   expect(host.writes).toEqual([]);
 });
 
-it("a failed backfill is attempted once per process and disposal waits for an in-flight copy", async () => {
+it("a failed backfill retries on the next bootstrap and disposal waits for an in-flight copy", async () => {
   const f = await fixture();
   await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   const host = metadataHost(f.native.agents);
@@ -238,8 +238,8 @@ it("a failed backfill is attempted once per process and disposal waits for an in
   await new Promise(resolve => setTimeout(resolve, 20));
   expect(host.writes).toEqual([]);
   expect(await f.server.rpc(bootstrap, {}, host.paseo)).toEqual({ status: "ready" });
-  await new Promise(resolve => setTimeout(resolve, 20));
-  expect(host.attempts()).toBe(1);
+  await vi.waitFor(() => expect(host.writes).toHaveLength(2));
+  expect(host.attempts()).toBe(2);
   await f.dispose();
   // Bootstrap answers while the copy is still pending; shutdown does not overtake it.
   host.stored.clear();
@@ -247,14 +247,14 @@ it("a failed backfill is attempted once per process and disposal waits for an in
   host.control.holdWrites = new Promise<void>(resolve => { release = resolve; });
   const restarted = f.start();
   expect(await restarted.server.rpc(bootstrap, {}, host.paseo)).toEqual({ status: "ready" });
-  await vi.waitFor(() => expect(host.attempts()).toBe(2));
+  await vi.waitFor(() => expect(host.attempts()).toBe(3));
   let disposed = false;
   const disposing = Promise.resolve(restarted.dispose()).then(() => { disposed = true; });
   await new Promise(resolve => setTimeout(resolve, 20));
   expect(disposed).toBe(false);
   release();
   await disposing;
-  expect(host.writes).toHaveLength(1);
+  expect(host.writes).toHaveLength(3);
 });
 
 it("disabling a rule removes its empty Project and reenabling preserves tasks, discussion IDs and directories", async () => {
