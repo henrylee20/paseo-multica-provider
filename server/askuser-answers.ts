@@ -1,12 +1,17 @@
 import type { ProviderPermissionRequest } from "@getpaseo/plugin/server/provider";
-import { askuserConditionHint, type AskuserCardData } from "../shared/askuser.js";
+import { askuserConditionHint, isAskuserQuestionRequired, type AskuserCardData } from "../shared/askuser.js";
 
 export const askuserPermissionId = (card: { commentId: string; attachmentId: string }) => `multica:askuser:${card.commentId}:${card.attachmentId}`;
+const submissionHeader = "提交确认";
+const submissionLabel = "确认提交以上非空回答";
+const dismissLabel = "仅本地收起（不跳过）";
+const needsSubmissionConfirmation = (card: AskuserCardData) => card.questions.every(question => question.type === "text" && (question.required === false || !!question.required_when));
 const excerpt = (value: string, length: number) => [...value].slice(0, length).join("");
 export function askuserPermission(card: AskuserCardData): ProviderPermissionRequest {
   return { id: askuserPermissionId(card), name: "askuser", kind: "question", title: excerpt(card.title, 240),
     description: excerpt(card.description?.trim() || `${card.questions.length} 个问题：${card.questions[0].title}`, 800),
-    input: { dismissLabel: "仅本地收起（不跳过）", questions: card.questions.map((question, index) => ({
+    input: { questions: [...card.questions.map((question, index) => ({
+      dismissLabel,
       header: `${index + 1}. ${excerpt(question.title, 40)}`,
       question: [index === 0 ? `**${excerpt(card.title, 240)}**${card.description ? `\n\n${excerpt(card.description, 1600)}` : ""}` : "", question.title, question.description,
         question.type === "text" ? question.required_when ? askuserConditionHint(card.questions, question) : question.required === false ? "选填" : "必填" : "必选",
@@ -15,16 +20,19 @@ export function askuserPermission(card: AskuserCardData): ProviderPermissionRequ
       multiSelect: question.type === "multiple", allowOther: question.type !== "text" && question.other?.enabled === true,
       ...(question.type !== "text" && question.other?.label !== undefined ? { placeholder: question.other.label } : {}),
       allowEmpty: question.type === "text" && (question.required === false || !!question.required_when),
-    })) } };
+    })), ...(needsSubmissionConfirmation(card) ? [{ header: submissionHeader, question: "确认提交以上非空回答。若只想本地收起，请点击收起按钮；远端卡片仍会保持待答。",
+      options: [{ label: submissionLabel }], multiSelect: false, allowOther: false, allowEmpty: false, dismissLabel }] : [])] } };
 }
 
-/** Paseo encodes Dismiss as an empty allow for all optional text questions. */
-export function isEmptyAskuserDismiss(card: AskuserCardData, input: unknown) {
-  const questions = askuserPermission(card).input!.questions as Array<{ header: string; allowEmpty: boolean; options: unknown[] }>;
+/** Older hosts/clients can send ambiguous allows; only explicit nonempty submission is remote. */
+export function isLocalAskuserDismiss(card: AskuserCardData, input: unknown) {
+  if (!needsSubmissionConfirmation(card)) return false;
   const answers = (input as { answers?: unknown } | undefined)?.answers;
-  if (!answers || typeof answers !== "object" || Array.isArray(answers)) return false;
-  return questions.every(question => question.allowEmpty && question.options.length === 0) &&
-    Object.values(answers).every(value => typeof value === "string" && !value.trim());
+  if (!answers || typeof answers !== "object" || Array.isArray(answers)) return true;
+  const values = answers as Record<string, unknown>;
+  const questions = askuserPermission(card).input!.questions as Array<{ header: string }>;
+  return values[submissionHeader] !== submissionLabel || questions.slice(0, card.questions.length).every(question =>
+    values[question.header] === undefined || typeof values[question.header] === "string" && !(values[question.header] as string).trim());
 }
 
 /** Native answers join labels with comma-space, including labels which themselves contain it. */
@@ -62,15 +70,7 @@ export function formatAskuserAnswers(card: AskuserCardData, input: unknown) {
   });
   card.questions.forEach((question, index) => {
     if (question.type !== "text") return;
-    let required = question.required !== false && !question.required_when;
-    if (question.required_when) {
-      const condition = question.required_when;
-      const parentIndex = card.questions.findIndex(item => item.id === condition.question_id);
-      const parent = card.questions[parentIndex];
-      const matches = parent?.type === "single" ? parent.options.filter(option => values[parentIndex] === option.label || values[parentIndex].startsWith(`${option.label}（补充：`)) : [];
-      required = matches.length !== 1 || condition.option_ids.includes(matches[0].id);
-    }
-    if (required && (!values[index] || values[index] === "未回答")) throw new Error(`请填写「${question.title}」${question.required_when ? "（条件必填；自定义或无法确认前置选项时也必填）" : ""}。`);
+    if (isAskuserQuestionRequired(card.questions, question, values) && (!values[index] || values[index] === "未回答")) throw new Error(`请填写「${question.title}」${question.required_when ? "（条件必填；自定义或无法确认前置选项时也必填）" : ""}。`);
   });
   return `**确认结果**\n\n${card.questions.map((question, index) => `${index + 1}. **${question.title}**：${values[index].split("\n").map((line, i) => i === 0 ? line : line ? `> ${line}` : ">").join("\n")}`).join("\n")}`;
 }

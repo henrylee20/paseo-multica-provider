@@ -9,7 +9,7 @@ import { remoteFetch, type AuthenticatedConnection } from "./connection.js";
 import { StateStore, type IssueMapping } from "./state.js";
 import { remoteJson, workspaceSchema, type RemoteWorkspace } from "./sync.js";
 import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
-import { assertAskuserWritable } from "./askuser-policy.js";
+import { askuserUnavailableReason, assertAskuserWritable } from "./askuser-policy.js";
 import type { StopCoordinator } from "./stops.js";
 
 type Address = { connectionKey: string; issueId: string; rootId: string };
@@ -20,6 +20,7 @@ const timelineSchema = z.array(z.object({ id: z.string(), type: z.string(), pare
   askuser_skipped_at: z.string().nullish(), askuser_skipped_by: z.string().nullish(),
 }));
 const cardKey = (commentId: string, attachmentId: string) => JSON.stringify([commentId, attachmentId]);
+const discoveryKey = (address: CardAddress) => JSON.stringify([address.connectionKey, address.issueId, address.commentId, address.attachmentId]);
 const discussionKey = (address: Address) => JSON.stringify([address.connectionKey, address.issueId, address.rootId]);
 const preview = (text: string | undefined, limit: number) => text === undefined ? undefined : [...text].slice(0, limit).join("");
 const bounded = (data: AskuserCardData): AskuserCardData => {
@@ -37,7 +38,7 @@ const bounded = (data: AskuserCardData): AskuserCardData => {
 class DeferredAttachment extends Error {}
 const revision = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
-export function cachedAskuserCard(address: CardAddress, issue: IssueMapping, context: { offline: boolean; userId?: string; unavailable?: boolean } = { offline: true }): AskuserCardData {
+export function cachedAskuserCard(address: CardAddress, issue: IssueMapping, context: { offline: boolean; userId?: string; lifecycle?: DiscussionLifecycle } = { offline: true }): AskuserCardData {
     const record = issue.askuserCards?.[cardKey(address.commentId, address.attachmentId)];
     if (!record) throw new Error("提问卡片缓存不可用。");
     const cached = issue.askuserAttachments?.[record.attachmentId];
@@ -48,10 +49,10 @@ export function cachedAskuserCard(address: CardAddress, issue: IssueMapping, con
     const uncertain = delivery && (delivery.status === "received" || delivery.status === "pending_verification");
     const offline = context.offline;
     const targetUser = document?.answer_user_id;
-    const readOnlyReason = uncertain ? "回答保存结果待核实，请在 Multica 管理页核实原投递或明确重新发送；请勿重复提交。" : issue.access?.status === "inaccessible" ? "任务已不可访问，仅显示缓存。"
-      : context.unavailable || issue.archiveReason || issue.archivePending || issue.manualHidden.workspace || issue.manualHidden.discussions.includes(record.rootId) ? "讨论已归档，仅显示缓存。"
-      : record.deleted ? "原评论已删除，仅显示缓存。" : offline ? "离线缓存，仅供只读。"
-      : targetUser && targetUser !== context.userId ? `仅指定用户 ${targetUser} 可作答；当前为只读。` : undefined;
+    const readOnlyReason = uncertain ? "回答保存结果待核实，请在 Multica 管理页核实原投递或明确重新发送；请勿重复提交。"
+      : askuserUnavailableReason(issue, record.rootId, context.lifecycle, address.connectionKey, address.issueId)
+      ?? (record.deleted ? "原评论已删除，仅显示缓存。" : offline ? "离线缓存，仅供只读。"
+      : targetUser && targetUser !== context.userId ? `仅指定用户 ${targetUser} 可作答；当前为只读。` : undefined);
     return { connectionKey: address.connectionKey, issueId: address.issueId, commentId: address.commentId, attachmentId: address.attachmentId, rootId: record.rootId, revision: revision([record, cached, delivery, offline, readOnlyReason]), title: document?.title ?? "askuser.json 提问卡片", description: document?.description,
       questions: document?.questions ?? [], status: saved && record.status === "pending" ? "answered" : record.status, collapsed: record.status === "pending" && !!record.collapsed, readOnly: !!readOnlyReason || saved || record.status !== "pending",
       delivery: delivery && { status: delivery.status, clientMessageId: delivery.clientMessageId, message: delivery.message }, readOnlyReason, offline, truncated: false, error: cached?.error, statusError: record.statusError, answer: record.answer ?? (saved ? { commentId: delivery.commentId!, content: delivery.body, actorId: delivery.receipt?.authorId, actorType: "member" } : undefined), skippedAt: record.skippedAt, skippedBy: record.skippedBy };
@@ -59,7 +60,8 @@ export function cachedAskuserCard(address: CardAddress, issue: IssueMapping, con
 
 /** Attachment downloads and full timeline observations are independent of ordinary comment projection. */
 export class AskUsers {
-  private listeners = new Map<string, Set<(row: ProviderTimelineItem, card: AskuserCardData) => void>>();
+  private listeners = new Map<string, Set<(row: ProviderTimelineItem, card: AskuserCardData, announceFresh: boolean) => void>>();
+  private readonly fresh = new Map<string, { address: Address; deferred: boolean }>();
   private userIds = new Map<string, string>();
   private pending = new Map<string, Promise<void>>();
   private actions = new Map<string, { kind: string; operation: Promise<unknown> }>();
@@ -79,14 +81,26 @@ export class AskUsers {
       }
     });
   }
-  subscribe(address: Address, listener: (row: ProviderTimelineItem, card: AskuserCardData) => void) {
+  subscribe(address: Address, listener: (row: ProviderTimelineItem, card: AskuserCardData, announceFresh: boolean) => void) {
     const key = discussionKey(address);
     const listeners = this.listeners.get(key) ?? new Set(); listeners.add(listener); this.listeners.set(key, listeners);
     return () => { listeners.delete(listener); if (!listeners.size) this.listeners.delete(key); };
   }
+  isFresh(card: CardAddress) { return this.fresh.has(discoveryKey(card)); }
+  deferFresh(card: AskuserCardData) {
+    const discovery = this.fresh.get(discoveryKey(card));
+    if (discovery) discovery.deferred = true;
+  }
+  hasDeferredFresh(address: Address) {
+    return [...this.fresh.values()].some(discovery => discovery.deferred && discussionKey(discovery.address) === discussionKey(address));
+  }
+  projectedFresh(card: CardAddress) { this.fresh.delete(discoveryKey(card)); }
+  async announceFresh(address: Address) {
+    const issue = (await this.store.read()).connections[address.connectionKey]?.issues[address.issueId];
+    if (issue) this.project(address.connectionKey, address.issueId, issue, address.rootId);
+  }
   private data(address: CardAddress, issue: IssueMapping) {
-    const rootId = issue.askuserCards?.[cardKey(address.commentId, address.attachmentId)]?.rootId;
-    return cachedAskuserCard(address, issue, { offline: !this.online.has(address.connectionKey), userId: this.userIds.get(address.connectionKey), unavailable: !!rootId && this.lifecycle.unavailable({ ...address, rootId }) });
+    return cachedAskuserCard(address, issue, { offline: !this.online.has(address.connectionKey), userId: this.userIds.get(address.connectionKey), lifecycle: this.lifecycle });
   }
   private row(data: AskuserCardData): ProviderTimelineItem {
     return { type: "plugin", id: `multica:askuser:${data.commentId}:${data.attachmentId}`, pluginId: "multica", kind: "askuser", version: 1, data: bounded(data) };
@@ -104,12 +118,12 @@ export class AskUsers {
     const issue = (await this.store.read()).connections[connectionKey]?.issues[issueId];
     if (issue) this.project(connectionKey, issueId, issue);
   }
-  private project(connectionKey: string, issueId: string, issue: IssueMapping) {
+  private project(connectionKey: string, issueId: string, issue: IssueMapping, announceRoot?: string) {
     for (const card of Object.values(issue.askuserCards ?? {})) {
       const address = { connectionKey, issueId, rootId: card.rootId };
       const data = this.data({ ...address, commentId: card.commentId, attachmentId: card.attachmentId }, issue);
       const row = this.row(data);
-      for (const listener of this.listeners.get(discussionKey(address)) ?? []) listener(row, data);
+      for (const listener of this.listeners.get(discussionKey(address)) ?? []) listener(row, data, announceRoot === card.rootId);
     }
   }
   discover(connection: AuthenticatedConnection, workspace: RemoteWorkspace, issueId: string, comments: AskuserComment[], roots: Map<string, string | undefined>, scope?: string) {
@@ -128,7 +142,7 @@ export class AskUsers {
         const issue = (await this.store.read()).connections[connection.connectionKey].issues[issueId];
         let cached = issue.askuserAttachments?.[attachment.id];
         // Hiding defers discovery; it is not a permanent attachment failure.
-        if (!cached && (issue.manualHidden.workspace || issue.manualHidden.discussions.includes(rootId) || issue.archiveReason || issue.access?.status === "inaccessible")) continue;
+        if (!cached && askuserUnavailableReason(issue, rootId, this.lifecycle, connection.connectionKey, issueId)) continue;
         if (!cached) {
           try { cached = { document: await this.download(connection, workspace, issueId, attachment.download_url, rootId) }; }
           catch (error) { if (error instanceof DeferredAttachment) continue; if (connection.signal?.aborted) await this.checkConnection(connection.connectionKey); cached = { error: error instanceof Error ? error.message.slice(0, 1000) : "附件下载或解析失败。" }; }
@@ -136,7 +150,12 @@ export class AskUsers {
         }
         await this.store.update(state => {
           const cards = state.connections[connection.connectionKey].issues[issueId].askuserCards ??= {};
-          cards[cardKey(comment.id, attachment.id!)] ??= { rootId, commentId: comment.id, attachmentId: attachment.id!, status: cached?.document ? "pending" : "invalid" };
+          const key = cardKey(comment.id, attachment.id!);
+          if (!cards[key]) {
+            cards[key] = { rootId, commentId: comment.id, attachmentId: attachment.id!, status: cached?.document ? "pending" : "invalid" };
+            this.fresh.set(discoveryKey({ connectionKey: connection.connectionKey, issueId, commentId: comment.id, attachmentId: attachment.id! }),
+              { address: { connectionKey: connection.connectionKey, issueId, rootId }, deferred: false });
+          }
         });
       }
     }
@@ -312,7 +331,7 @@ export class AskUsers {
   private actionable(address: CardAddress, issue: IssueMapping | undefined, lifecycle: DiscussionLifecycle) {
     if (!issue) throw new Error("提问卡片不可用。");
     const card = this.data(address, issue);
-    if (lifecycle.unavailable({ ...address, rootId: card.rootId })) throw new Error("讨论正在归档，不能操作提问卡片。");
+    assertAskuserWritable(issue, { ...address, rootId: card.rootId }, lifecycle);
     if (card.status !== "pending" || card.readOnly) throw new Error(card.readOnlyReason || "提问卡片已解决或不可用。");
     return card;
   }
@@ -427,5 +446,5 @@ export class AskUsers {
     const end = Math.min(text.length, address.offset + 8192);
     return { text: text.slice(address.offset, end), nextOffset: end < text.length ? end : null };
   }
-  async close() { this.unsubscribe(); await Promise.allSettled([...this.pending.values(), ...[...this.actions.values()].map(action => action.operation)]); this.listeners.clear(); }
+  async close() { this.unsubscribe(); await Promise.allSettled([...this.pending.values(), ...[...this.actions.values()].map(action => action.operation)]); this.listeners.clear(); this.fresh.clear(); }
 }

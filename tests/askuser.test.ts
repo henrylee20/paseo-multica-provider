@@ -91,6 +91,7 @@ async function fixture() {
   await mkdir(join(home, ".multica"));
   await writeFile(configPath, JSON.stringify({ server_url: `http://127.0.0.1:${(http.address() as { port: number }).port}`, token: "synthetic" }));
   const agents: Array<{ id: string; workspaceId: string; cwd: string; labels: Record<string, string>; handle: string }> = [];
+  const workspaces: Array<{ id: string }> = [];
   const rows = new Map<string, ProviderTimelineItem[]>();
   const events: ProviderEvent[] = [];
   let server: FakeServer;
@@ -115,8 +116,8 @@ async function fixture() {
   const host = {
     listHosts: async () => ({ self: { serverId: "daemon" } }), listProjects: async () => ({ projects: [] }),
     addProject: async () => ({ project: { projectId: "project", projectKind: "non_git" } }), renameProject: async () => {},
-    fetchWorkspaces: async () => ({ entries: [], pageInfo: { hasMore: false } }),
-    createWorkspace: async (input: { workspaceId: string }) => ({ workspace: { id: input.workspaceId } }), setWorkspaceTitle: async () => {},
+    fetchWorkspaces: async () => ({ entries: workspaces, pageInfo: { hasMore: false } }),
+    createWorkspace: async (input: { workspaceId: string }) => { const workspace = { id: input.workspaceId }; workspaces.push(workspace); return { workspace }; }, setWorkspaceTitle: async () => {},
     fetchAgents: async () => ({ entries: agents.map(agent => ({ agent: { provider: "multica", ...agent } })), pageInfo: { hasMore: false } }),
     importAgent: async (input: { workspaceId: string; cwd: string; labels: Record<string, string>; providerHandleId: string }) => {
       const agent = { id: `native-${agents.length}`, workspaceId: input.workspaceId, cwd: input.cwd, labels: input.labels, handle: input.providerHandleId };
@@ -124,7 +125,8 @@ async function fixture() {
       await (await connect()).send({ type: "session.open", requestId: agent.id, sessionId: agent.id, history: "replay", persistence: JSON.parse(agent.handle.slice(7)), config: { cwd: agent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
       return agent;
     }, updateAgent: async () => {}, close: async () => {},
-    fetchAgent: async (id: string) => ({ agent: agents.find(agent => agent.id === id) }), restoreWorkspace: async () => {},
+    fetchAgent: async (id: string) => ({ agent: { provider: "multica", ...agents.find(agent => agent.id === id)! } }), restoreWorkspace: async () => {},
+    listCommands: async (id: string) => ({ agentId: id, commands: [], error: null, requestId: "commands" }),
     fetchAgentTimeline: async () => ({ agentId: "unused", epoch: "epoch", entries: [], hasOlder: false, hasNewer: false }),
   } as unknown as DaemonClient;
   const paseo = { hosts: { list: async () => ({ self: { serverId: "daemon" } }) } } as unknown as PaseoApi;
@@ -403,11 +405,13 @@ it("negotiates native questions with unique headers, all question types and read
   await f.sync();
   const permission = f.events.filter(event => event.type === "session.permission").at(-1) as Extract<ProviderEvent, { type: "session.permission" }>;
   expect(permission).toMatchObject({ sessionId: f.agents[1].id, request: { id: "multica:askuser:root:native", name: "askuser", kind: "question", title: card.title, description: card.description,
-    input: { dismissLabel: "仅本地收起（不跳过）", questions: [
+    input: { questions: [
       { options: [{ label: "全量" }, { label: "灰度" }], multiSelect: false, allowOther: true, placeholder: "其他范围", allowEmpty: false },
       { options: [], allowEmpty: true }, { options: [], allowEmpty: true }, { options: [{ label: "监控" }], multiSelect: true, allowOther: false, allowEmpty: false }, { options: [], allowEmpty: false },
     ] } } });
-  const questions = permission.request.input!.questions as Array<{ header: string; question: string }>;
+  const questions = permission.request.input!.questions as Array<{ header: string; question: string; dismissLabel?: string }>;
+  expect(permission.request.input).not.toHaveProperty("dismissLabel");
+  expect(questions.map(question => question.dismissLabel)).toEqual(Array(5).fill("仅本地收起（不跳过）"));
   expect(questions[0].question).toContain(card.title); expect(questions[0].question).toContain(card.description);
   expect(questions[1].question).toContain("无法确认选项时也必填");
   expect(questions.every(q => q.header.trim())).toBe(true); expect(new Set(questions.map(q => q.header)).size).toBe(5);
@@ -461,14 +465,70 @@ it("Dismiss only collapses a native form locally, persisting across synchronizat
   expect(f.requests.some(request => request.path.includes("askuser-skip"))).toBe(false);
 });
 
-it("protects blank all-optional-text allow responses from the native Dismiss encoding", async () => {
+// Pinned host 0.17.4 question-form-card-core + handleDeny contract, applied to
+// the public provider request. No live native host is involved in these tests.
+type NativeQuestion = { header: string; options: Array<{ label: string }>; allowEmpty: boolean; allowOther: boolean; multiSelect: boolean; dismissLabel?: string };
+function nativeAnswers(questions: NativeQuestion[], texts: string[], selections: number[][] = []) {
+  return Object.fromEntries(questions.flatMap((question, index) => {
+    const text = texts[index]?.trim();
+    const labels = (selections[index] ?? []).map(selected => question.options[selected].label);
+    if ((question.options.length === 0 || question.allowOther) && text) return [[question.header, question.multiSelect ? [...labels, text].join(", ") : text]];
+    if (question.allowEmpty && question.options.length === 0) return [[question.header, ""]];
+    return labels.length ? [[question.header, labels.join(", ")]] : [];
+  }));
+}
+function nativeDismiss(questions: NativeQuestion[], texts: string[], selections: number[][] = []) {
+  return questions.length > 0 && questions.every(question => question.allowEmpty && question.options.length === 0)
+    ? { behavior: "allow" as const, updatedInput: { answers: nativeAnswers(questions, texts, selections) } }
+    : { behavior: "deny" as const, message: "Dismissed by user" };
+}
+
+it("keeps populated optional-text Dismiss local even after selecting its explicit submission acknowledgement", async () => {
+  const f = await fixture(); f.comments[0].attachments = [attachment("populated-dismiss")];
+  f.documents.set("populated-dismiss", { ...card, questions: [{ id: "note", title: "提交确认", type: "text", required: false }, { id: "details", title: "补充", type: "text", required: false }] }); await f.sync();
+  const permission = pendingQuestion(f).request;
+  const questions = permission.input!.questions as NativeQuestion[];
+  const response = nativeDismiss(questions, ["已填写内容", "更多内容"], [[], [], [0]]);
+  expect(response.behavior).toBe("deny");
+  expect(questions).toHaveLength(3);
+  expect(new Set(questions.map(question => question.header)).size).toBe(3);
+  expect(questions.map(question => question.dismissLabel)).toEqual(Array(3).fill("仅本地收起（不跳过）"));
+  expect(questions[2]).toMatchObject({ options: [{ label: "确认提交以上非空回答" }], allowEmpty: false, allowOther: false });
+  await (await f.connect()).send({ type: "session.permission", sessionId: f.agents[1].id, permissionId: permission.id, response });
+  expect(f.cards()[0].data).toMatchObject({ status: "pending", collapsed: true });
+  expect(f.events).toContainEqual({ type: "session.permission_resolved", sessionId: f.agents[1].id, permissionId: permission.id });
+  expect(f.posts).toEqual([]); expect(f.skips).toEqual([]);
+});
+
+it.each(["", "unknown acknowledgement"])("collapses ambiguous populated optional-text allow locally with acknowledgement %j", async acknowledgement => {
+  const f = await fixture(); f.comments[0].attachments = [attachment("ambiguous-allow")];
+  f.documents.set("ambiguous-allow", { ...card, questions: [{ id: "note", title: "备注", type: "text", required: false }] }); await f.sync();
+  await answer(f, ["填写但未确认提交", acknowledgement]);
+  expect(f.cards()[0].data).toMatchObject({ status: "pending", collapsed: true });
+  expect(f.posts).toEqual([]); expect(f.skips).toEqual([]);
+});
+
+it.each(["", "确认提交以上非空回答"])("protects blank all-optional-text allow responses with acknowledgement %j", async acknowledgement => {
   const f = await fixture(); f.comments[0].attachments = [attachment("empty-dismiss")];
   f.documents.set("empty-dismiss", { ...card, questions: [{ id: "note", title: "备注", type: "text", required: false }, { id: "details", title: "补充", type: "text", required: false }] }); await f.sync();
-  await answer(f, [" \n ", "\t"]);
+  await answer(f, [" \n ", "\t", acknowledgement]);
   expect(f.cards()[0].data).toMatchObject({ status: "pending", collapsed: true });
   expect(f.events).toContainEqual({ type: "session.permission_resolved", sessionId: f.agents[1].id, permissionId: pendingQuestion(f).request.id });
   expect(f.posts).toEqual([]);
   expect(f.requests.some(request => request.path.includes("askuser-skip"))).toBe(false);
+});
+
+it("submits optional-text native answers once with explicit acknowledgement and excludes its synthetic question from the remote body", async () => {
+  const f = await fixture(); f.comments[0].attachments = [attachment("optional-submit")];
+  f.documents.set("optional-submit", { ...card, questions: [{ id: "note", title: "备注", type: "text", required: false }, { id: "details", title: "补充", type: "text", required: false }] }); await f.sync();
+  const permission = pendingQuestion(f).request;
+  const questions = permission.input!.questions as NativeQuestion[];
+  const response = { behavior: "allow" as const, updatedInput: { answers: nativeAnswers(questions, ["第一行\n第二行", ""], [[], [], [0]]) } };
+  await (await f.connect()).send({ type: "session.permission", sessionId: f.agents[1].id, permissionId: permission.id, response });
+  await expect((await f.connect()).send({ type: "session.permission", sessionId: f.agents[1].id, permissionId: permission.id, response })).rejects.toThrow("不可用");
+  expect(f.posts.map(post => post.body)).toEqual([{ content: "**确认结果**\n\n1. **备注**：第一行\n> 第二行\n2. **补充**：", type: "comment", parent_id: "root", askuser_answer_to: "root" }]);
+  expect(f.cards()[0].data).toMatchObject({ status: "answered", collapsed: false });
+  expect(f.skips).toEqual([]);
 });
 
 it("explicitly reopening a collapsed card validates the current card and immediately restores its native permission", async () => {
