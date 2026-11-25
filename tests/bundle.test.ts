@@ -1471,3 +1471,67 @@ it("does not announce task archiving when disabling a workspace with no imported
     expect(h.action("启用…").hint).toBeUndefined();
   } finally { h.dispose(); }
 });
+
+it.each(["offline", "missing_config"])("disables data rebuild with a reason while connection is %s", async status => {
+  const h = await settingsHarness(name => name === "connection.status" ? { ...readyStatus, status } : name === "rebuild.status" ? { status: "idle" } : { workspaces: [] });
+  try {
+    await vi.waitFor(() => { h.render(); expect(h.action("重建数据").disabled).toBe(true); });
+    expect(h.render()).toContain("仅连接就绪时可重建数据");
+    expect(h.calls.some(call => call.name === "rebuild.preflight")).toBe(false);
+  } finally { h.dispose(); }
+});
+
+it("rebuild preflight lists blocking discussions and Runs without offering confirmation", async () => {
+  const h = await settingsHarness(name => name === "connection.status" ? readyStatus : name === "workspace.list" ? { connectionKey: "current", workspaces: [] }
+    : name === "rebuild.status" ? { status: "idle" } : name === "rebuild.preflight" ? { projects: 1, workspaces: 2, discussions: 3, blockers: [{ issueId: "issue", rootId: "root", title: "Task", discussion: "Review", runs: [{ runId: "run-active", agentName: "Builder", status: "queued" }] }] } : undefined);
+  try {
+    await vi.waitFor(() => { h.render(); expect(h.action("重建数据").disabled).toBe(false); });
+    h.action("重建数据").onPress();
+    await vi.waitFor(() => expect(h.render()).toContain("run-active"));
+    const page = h.render();
+    expect(page).toContain("Task · Review"); expect(page).toContain("等待结束或先手动 Stop");
+    expect(h.pressables.some(button => button.accessibilityLabel === "确认重建")).toBe(false);
+    expect(h.calls.some(call => call.name === "rebuild.start")).toBe(false);
+  } finally { h.dispose(); }
+});
+
+it("requires a counted second confirmation and shows uncancelable daemon rebuild progress and result", async () => {
+  let progress = { status: "idle", stage: "deleting", step: "", completed: 0, total: 0, message: "" };
+  const h = await settingsHarness(name => name === "connection.status" ? readyStatus : name === "workspace.list" ? { connectionKey: "current", workspaces: [] }
+    : name === "rebuild.status" ? progress : name === "rebuild.preflight" ? { projects: 1, workspaces: 2, discussions: 3, blockers: [] }
+    : name === "rebuild.start" ? { started: true, blockers: [], progress: progress = { ...progress, status: "running", step: "删除讨论" } } : undefined);
+  try {
+    await vi.waitFor(() => { h.render(); expect(h.action("重建数据").disabled).toBe(false); });
+    h.action("重建数据").onPress();
+    await vi.waitFor(() => expect(h.render()).toContain("1 个 Paseo 项目"));
+    expect(h.render()).toContain("2 个插件工作区"); expect(h.render()).toContain("3 个插件讨论");
+    expect(h.render()).toContain("保留筛选规则与启用状态，清除人工隐藏");
+    expect(h.calls.some(call => call.name === "rebuild.start")).toBe(false);
+    h.press("确认重建");
+    await vi.waitFor(() => expect(h.render()).toContain("数据重建进度"));
+    h.modals[0].onOpenChange(false);
+    expect(h.render()).toContain("删除讨论");
+    expect(h.pressables.some(button => ["关闭", "取消"].includes(button.accessibilityLabel ?? ""))).toBe(false);
+    progress = { ...progress, stage: "importing", completed: 1, total: 2 };
+    await vi.waitFor(() => expect(h.render()).toContain("已完成 1 / 共 2 个任务"), { timeout: 3000 });
+    progress = { ...progress, status: "failed", message: "按筛选规则导入失败：网络不可用" };
+    await vi.waitFor(() => expect(h.render()).toContain("按筛选规则导入失败"), { timeout: 3000 });
+    h.press("关闭");
+    expect(h.render()).not.toContain("数据重建进度");
+    expect(h.calls.filter(call => call.name === "rebuild.start")).toEqual([{ name: "rebuild.start", input: { connectionKey: "current" } }]);
+  } finally { h.dispose(); }
+});
+
+it("reopening settings resumes a running rebuild and displays a completed result", async () => {
+  for (const status of ["running", "completed"]) {
+    const h = await settingsHarness(name => name === "connection.status" ? readyStatus : name === "workspace.list" ? { connectionKey: "current", workspaces: [] }
+      : name === "rebuild.status" ? { status, stage: "importing", step: "导入", completed: 2, total: 3, message: status === "completed" ? "重建完成" : undefined } : undefined);
+    try {
+      await vi.waitFor(() => expect(h.render()).toContain("数据重建进度"));
+      expect(h.render()).toContain("已完成 2 / 共 3 个任务");
+      if (status === "running") expect(h.pressables.some(button => button.accessibilityLabel === "关闭")).toBe(false);
+      else expect(h.render()).toContain("重建完成");
+      expect(h.calls.some(call => call.name === "rebuild.start")).toBe(false);
+    } finally { h.dispose(); }
+  }
+});

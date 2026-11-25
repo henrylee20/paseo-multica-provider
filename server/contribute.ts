@@ -1,3 +1,5 @@
+import { DataRebuild } from "./rebuild.js";
+import { rebuildPreflight, rebuildStart, rebuildStatus } from "../shared/rebuild.js";
 import { RunSynchronizer } from "./runs.js";
 import { RunDetails } from "./run-details.js";
 import { homedir } from "node:os";
@@ -175,6 +177,10 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       await store.observeProfile(state.values.profile);
       if (changed) synchronizer.settingsChanged();
     });
+    const rebuild = new DataRebuild(store, connection, synchronizer, lifecycle, runDetails);
+    server.handle(rebuildPreflight, (input, context) => rebuild.preflight(input.connectionKey, context.paseo));
+    server.handle(rebuildStart, (input, context) => rebuild.start(input.connectionKey, context.paseo));
+    server.handle(rebuildStatus, input => rebuild.status(input.connectionKey));
     server.handle(hiddenRestore, async (input, context) => {
       try {
         await synchronizer.assertNoPurge();
@@ -218,6 +224,7 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       shuttingDown = true;
       unsubscribeSettings();
       await Promise.allSettled(identityRefreshes);
+      await rebuild.close();
       await deliveries.close();
       await synchronizer.close();
       await metadata.close();
