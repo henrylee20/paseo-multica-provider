@@ -12,7 +12,6 @@ function snapshot(issue: IssueMapping, connectionKey: string, issueId: string) {
     discussions: [{ rootId: "main", ...issue.mainHistory }, ...Object.entries(issue.threads).map(([rootId, thread]) => ({ rootId, ...thread }))],
     runs: Object.entries(issue.runs).map(([id, run]) => ({ id, ...run, messages: issue.runDetails[id]?.messages })),
     askuserCards: Object.values(issue.askuserCards ?? {}).map(card => cachedAskuserCard({ connectionKey, issueId, commentId: card.commentId, attachmentId: card.attachmentId }, issue)),
-    deliveries: Object.values(issue.deliveries),
   });
 }
 const revision = (text: string) => createHash("sha256").update(text).digest("hex");

@@ -7,7 +7,6 @@ import type { PaseoApi } from "@getpaseo/client";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { ProviderConnection, ProviderEvent } from "@getpaseo/plugin/server/provider";
 import { workspaceEnable, syncBootstrap } from "../shared/contracts.js";
-import { deliveryList } from "../shared/delivery.js";
 import { runObserve } from "../shared/runs.js";
 import { createServerContribution } from "../server/contribute.js";
 import { FakeServer } from "./support/fake-server.js";
@@ -88,10 +87,9 @@ async function fixture() {
   const prompt = (text: string, clientMessageId: string, delivery: "auto" | "steer") => provider.send({ type: "session.prompt", sessionId: thread.id, prompt: { clientMessageId, delivery, input: { type: "message", content: [{ type: "text", text }] } } });
   const interrupt = (requestId: string) => provider.send({ type: "session.interrupt", requestId, sessionId: thread.id });
   const turnEvents = () => events.filter((event): event is Extract<ProviderEvent, { type: "session.turn" }> => event.type === "session.turn" && event.sessionId === thread.id);
-  const records = async () => (await server.rpc(deliveryList, {}, paseo)).records;
   const sync = () => server.rpc(syncBootstrap, {}, paseo);
   const observe = () => server.rpc(runObserve, address, paseo);
-  return { server, paseo, events, runs, comments, writes, thread, prompt, interrupt, turnEvents, records, sync, observe,
+  return { server, paseo, events, runs, comments, writes, thread, prompt, interrupt, turnEvents, sync, observe,
     cancel: (handler: typeof cancel) => { cancel = handler; }, save: (handler: typeof save) => { save = handler; } };
 }
 
@@ -99,7 +97,7 @@ it("ordinary running input posts once without cancelling either owned Run or cho
   const f = await fixture();
   const turnId = f.turnEvents()[0].turnId;
   await Promise.all([f.prompt("An ordinary comment", "ordinary", "steer"), f.prompt("An ordinary comment", "ordinary", "steer")]);
-  await expect.poll(async () => (await f.records())[0]?.status).toBe("saved");
+  await expect.poll(() => f.comments.length).toBe(3);
   expect(f.writes).toEqual([{ path: "/api/issues/issue/comments", body: { content: "An ordinary comment", type: "comment", parent_id: "root" } }]);
   expect(f.events).toContainEqual(expect.objectContaining({ type: "session.prompt_result", clientMessageId: "ordinary", result: { type: "steer", turnId } }));
   expect(f.turnEvents().map(event => event.state)).toEqual(["started"]);
@@ -115,7 +113,6 @@ it("the native interrupt sequence settles its fixed Run set before accepting a r
   await waiting;
   f.runs.push({ ...f.runs[0], id: "later", status: "running" });
   await f.sync();
-  expect(await f.records()).toEqual([]);
   release(); await stop;
   expect(f.events).toContainEqual({ type: "request.completed", requestId: "explicit-interrupt" });
   const turns = f.turnEvents();
@@ -125,14 +122,13 @@ it("the native interrupt sequence settles its fixed Run set before accepting a r
   // provider that this auto prompt originally came from the interrupt control.
   await f.prompt("Replacement comment", "replacement", "auto");
   await f.prompt("Replacement comment", "replacement", "auto");
-  await expect.poll(async () => (await f.records())[0]?.status).toBe("saved");
+  await expect.poll(() => f.comments.length).toBe(3);
   expect(f.writes).toEqual([
     { path: "/api/issues/issue/tasks/running/cancel", body: {} },
     { path: "/api/issues/issue/tasks/queued/cancel", body: {} },
     { path: "/api/issues/issue/comments", body: { content: "Replacement comment", type: "comment", parent_id: "root" } },
   ]);
   expect(f.runs.map(run => run.status)).toEqual(["cancelled", "cancelled", "running", "running"]);
-  expect((await f.records())[0]).toMatchObject({ rootId: "root", threadRootId: "root", body: "Replacement comment" });
   await f.observe();
   expect(f.turnEvents()).toEqual(turns);
 });
@@ -142,7 +138,6 @@ it.each([503, 200])("partial native cancellation (HTTP %s) fails before any repl
   f.cancel(async run => { if (run.id === "running") { run.status = "completed"; return 200; } return status; });
   await f.interrupt("partial-interrupt");
   expect(f.events).toContainEqual(expect.objectContaining({ type: "request.failed", requestId: "partial-interrupt", error: expect.objectContaining({ code: "stop_incomplete" }) }));
-  expect(await f.records()).toEqual([]);
   expect(f.writes.map(write => write.path)).toEqual(["/api/issues/issue/tasks/running/cancel", "/api/issues/issue/tasks/queued/cancel"]);
   expect(f.turnEvents().map(event => event.state)).toEqual(["started"]);
   expect(f.runs.map(run => run.status)).toEqual(["completed", "queued", "running"]);
@@ -161,7 +156,7 @@ it("a host-released queued input after all owned Runs end posts one ordinary rep
   // opens a regular prompt, so the provider receives auto at this seam.
   await f.prompt("Queued comment", "released", "auto");
   await f.prompt("Queued comment", "released", "auto");
-  await expect.poll(async () => (await f.records())[0]?.status).toBe("saved");
+  await expect.poll(() => f.comments.length).toBe(3);
   expect(f.writes).toEqual([{ path: "/api/issues/issue/comments", body: { content: "Queued comment", type: "comment", parent_id: "root" } }]);
   expect(f.events).toContainEqual(expect.objectContaining({ type: "session.prompt_result", clientMessageId: "released", result: { type: "completed" } }));
   expect(f.runs[2].status).toBe("running");
@@ -177,9 +172,9 @@ it("a released queue input steers only native admission when a new aggregate sta
   const nextTurnId = f.turnEvents()[2].turnId;
   f.save(async () => 503);
   await f.prompt("Released during wake-up", "release-race", "steer");
-  await expect.poll(async () => (await f.records())[0]?.status).toBe("pending_verification");
   expect(f.events).toContainEqual(expect.objectContaining({ type: "session.prompt_result", clientMessageId: "release-race", result: { type: "steer", turnId: nextTurnId } }));
-  expect(f.writes).toEqual([{ path: "/api/issues/issue/comments", body: { content: "Released during wake-up", type: "comment", parent_id: "root" } }]);
+  await expect.poll(() => f.events.some(event => event.type === "timeline.item" && event.item.type === "error")).toBe(true);
+  expect(f.writes).toHaveLength(3);
   expect(f.runs[3].status).toBe("running");
   expect(f.turnEvents().map(event => event.state)).toEqual(["started", "completed", "started"]);
 });

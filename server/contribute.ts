@@ -21,7 +21,7 @@ import { ManualHiding } from "./hiding.js";
 import { hiddenList, hiddenRestore } from "../shared/hiding.js";
 import { StopCoordinator } from "./stops.js";
 import { CommentDelivery } from "./delivery.js";
-import { deliveryList, deliveryRead, deliveryTargets, deliveryMentions, deliveryVerify, deliveryResend } from "../shared/delivery.js";
+import { deliveryTargets, deliveryMentions } from "../shared/delivery.js";
 import { issueHistoryList, issueHistoryRead } from "../shared/access.js";
 import { AskUsers } from "./askuser.js";
 import { AskuserWakeups } from "./askuser-wakeup.js";
@@ -96,7 +96,6 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       const issues = Object.values(connection.issues);
       return { ...connection.identity, connectionKey, profiles: connection.identity?.profiles ?? [], projectCount: Object.keys(connection.projects).length, issueCount: issues.length,
         hiddenCount: issues.reduce((count, issue) => count + Number(issue.manualHidden.workspace) + issue.manualHidden.discussions.length, 0),
-        pendingDeliveryCount: issues.reduce((count, issue) => count + Object.values(issue.deliveries).filter(record => record.status === "received" || record.status === "pending_verification").length, 0),
       };
     }) }));
     const lifecycle = new DiscussionLifecycle();
@@ -126,12 +125,8 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     const runDetails = new RunDetails(store, connection);
     const stops = new StopCoordinator(store, connection, runs);
     server.handle(askuserSkip, input => askusers.skip(input, lifecycle));
-    const deliveries = new CommentDelivery(store, connection, () => synchronizer.reconcile(), dependencies.now, record => askusers.deliveryChanged(record), lifecycle);
+    const deliveries = new CommentDelivery(store, connection, () => synchronizer.reconcile(), lifecycle);
     threads.coordinateDeliveries(() => deliveries.waitForPosts());
-    server.handle(deliveryVerify, async input => deliveries.verify(input));
-    server.handle(deliveryResend, async input => deliveries.resend(input));
-    server.handle(deliveryList, async () => deliveries.list());
-    server.handle(deliveryRead, async input => deliveries.read(input));
     server.handle(deliveryTargets, async () => deliveries.targets());
     server.handle(deliveryMentions, async input => deliveries.mentions(input));
     const descriptions = new TaskDescriptions(store);
@@ -167,10 +162,9 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       return { text: row.text };
     });
     const synchronizer = new SidebarSynchronizer({ store, connection, lifecycle,
-      onCached: async host => { await threads.reconcile(host); await deliveries.recover(host); },
+      onCached: host => threads.reconcile(host),
       onIssue: async (connection, workspace, issueId, host) => {
         await descriptions.observe({ connectionKey: connection.connectionKey, issueId });
-        await deliveries.reconcile(connection, workspace, issueId);
         await threads.discover(connection, workspace, issueId, host);
         await runs.discover(connection, workspace, issueId);
         await wakeups.discover(connection, issueId, host);

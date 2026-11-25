@@ -222,7 +222,7 @@ it("a reader can explicitly load every page of a long description from its visib
   } finally { dispose(); }
 });
 
-it.each(["task-description", "comment-delivery"])("the compiled %s reader stops stalled cursors and cancels further pages on unmount", async kind => {
+it.each(["task-description"])("the compiled %s reader stops stalled cursors and cancels further pages on unmount", async kind => {
   vi.useFakeTimers();
   const renderers: Array<{ kind: string; Component: (props: any) => any }> = [];
   const state: unknown[] = [], dependencies: unknown[][] = [];
@@ -305,7 +305,7 @@ it.each(["root", "main"])("the invisible %s thread renderer still opens history 
   dispose();
 });
 
-it("delivery rows show failures and a brief main-discussion Thread hint while hiding successful replies", async () => {
+it("the main-discussion success renderer shows only a brief Thread hint", async () => {
   const renderers: Array<{ kind: string; schema: zod.ZodType; Component: (props: any) => any }> = [];
   const setup = await bundledContribution("../index.client.tsx", {
     "@getpaseo/plugin/client": { useRpc: () => async () => ({}) }, "@getpaseo/plugin/client/ui": {},
@@ -316,13 +316,8 @@ it("delivery rows show failures and a brief main-discussion Thread hint while hi
   try {
     const renderer = renderers.find(renderer => renderer.kind === "comment-delivery");
     expect(renderer).toBeDefined();
-    const base = { connectionKey: "connection", issueId: "issue", rootId: "main", clientMessageId: "input", idempotencyKey: "key", createdAt: "2026-11-24T10:00:00Z", body: "Preserved input" };
-    const render = (status: string, rootId = "main") => renderedText(renderer!.Component({ item: { data: renderer!.schema.parse({ ...base, status, rootId }) }, theme: { colors: { foreground: "black", foregroundMuted: "gray", statusDanger: "red" } } }));
-    expect(render("received")).toBe("");
-    expect(render("saved")).toBe("新 Thread 已建立，可在侧边栏打开。");
-    expect(render("saved", "root")).toBe("");
-    expect(render("pending_verification")).toContain("待核实");
-    expect(render("failed")).toContain("投递失败");
+    const text = renderedText(renderer!.Component({ item: { data: renderer!.schema.parse({}) }, theme: { colors: { foregroundMuted: "gray" } } }));
+    expect(text).toBe("新 Thread 已建立，可在侧边栏打开。");
   } finally { dispose(); }
 });
 
@@ -597,9 +592,6 @@ it("management lists shared hidden objects and offers separate workspace and sel
     if (name === "issue.history.list") return { issues: [{ connectionKey: "old-connection", issueId: "issue", workspaceId: "workspace", title: "Read-only Task", status: "inaccessible", reason: "forbidden", lastSuccessAt: "2026-11-24T10:00:00Z", checkedAt: "2026-11-24T11:00:00Z", revision: "cache-revision" }] };
     if (name === "issue.history.read") return { text: JSON.stringify({ title: "Read-only Task", description: "Preserved goal", discussions: [{ rootId: "root", title: "Original thread", rows: [{ id: "comment", role: "user", text: "Original cached comment" }] }], runs: [{ id: "run", agentName: "Original agent", status: "running", ownerRootId: "root", metadata: { error: "Cached task failure", work_dir: "/remote/cache/../original" }, messages: [{ task_id: "run", issue_id: "issue", seq: 1, type: "text", content: "Preserved output" }] }], deliveries: [], stops: [] }), nextOffset: null };
     if (name === "connection.history") return { connections: [{ connectionKey: "old-connection", apiUrl: "https://original.example.test", user: { id: "original-user", name: "Original account", email: "" }, profiles: ["office"], projectCount: 1, issueCount: 2, hiddenCount: 1, pendingDeliveryCount: 1, stopWarningCount: 1 }] };
-    if (name === "delivery.list") return { records: [{ connectionKey: "old-connection", issueId: "issue", rootId: "main", clientMessageId: "native-input", idempotencyKey: "key", body: "Saved input", createdAt: "2026-11-24T10:00:00Z", status: "saved", threadRootId: "new-root", threadAgentId: "new-thread-agent" }, { connectionKey: "old-connection", issueId: "issue", rootId: "root", clientMessageId: "uncertain-input", idempotencyKey: "uncertain-key", body: "Please verify original", createdAt: "2026-11-24T10:00:00Z", status: "pending_verification" }] };
-    if (name === "delivery.verify") return { status: "pending_verification", message: "Original remains uncertain" };
-    if (name === "delivery.resend") return { clientMessageId: "new-input", idempotencyKey: "new-key" };
     if (name === "delivery.targets") return { issues: [{ connectionKey: "old-connection", issueId: "issue", title: "Task" }] };
     if (name === "delivery.mentions") return { agents: [{ id: "agent-id", name: "Agent A", reference: "[@Agent A](mention://agent/agent-id)" }] };
     if (name === "hidden.list") return { objects };
@@ -611,24 +603,12 @@ it("management lists shared hidden objects and offers separate workspace and sel
   try {
     await vi.waitFor(() => { expect(h.render()).toContain("人工隐藏"); expect(h.render()).toContain("Task · Root"); });
     const page = h.render();
-    for (const text of ["历史连接", "Original account", "https://original.example.test", "待核实输入 1", "新 Thread 已建立", "需要处理 · 1", "只读历史", "Read-only Task", "访问受限"])
+    for (const text of ["历史连接", "Original account", "https://original.example.test", "只读历史", "Read-only Task", "访问受限"])
       expect(page).toContain(text);
     h.action("读取缓存历史").onPress();
     await vi.waitFor(() => expect(h.render()).toContain("Original cached comment"));
     for (const text of ["Preserved output", "Preserved goal", "Cached task failure", "远端目录", "/remote/cache/../original", "运行中"]) expect(h.render()).toContain(text);
     expect(h.calls).toContainEqual({ name: "issue.history.read", input: { connectionKey: "old-connection", issueId: "issue", revision: "cache-revision", offset: 0 } });
-    h.action("核实原投递").onPress();
-    await vi.waitFor(() => expect(h.calls).toContainEqual({ name: "delivery.verify", input: { connectionKey: "old-connection", issueId: "issue", rootId: "root", clientMessageId: "uncertain-input" } }));
-    h.render();
-    h.action("重新发送…").onPress();
-    expect(h.render()).toContain("可能重复触发执行");
-    expect(h.calls.some(call => call.name === "delivery.resend")).toBe(false);
-    h.action("确认另发一次").onPress();
-    await vi.waitFor(() => expect(h.calls).toContainEqual({ name: "delivery.resend", input: expect.objectContaining({ connectionKey: "old-connection", issueId: "issue", rootId: "root", clientMessageId: "uncertain-input", acknowledgeDuplicateRisk: true, requestId: expect.any(String) }) }));
-    h.render();
-    expect(h.navigation).toEqual([]);
-    h.action("继续此 Thread").onPress();
-    expect(h.navigation).toEqual([{ agentId: "new-thread-agent", serverId: "host" }]);
     h.selects.find(select => select.label === "任务")!.onValueChange(JSON.stringify(["old-connection", "issue"]));
     await vi.waitFor(() => expect(h.render()).toContain("Agent A"));
     h.action("复制引用").onPress();
@@ -848,7 +828,7 @@ it("the native discussion shows the same daemon sync failure and cached-history 
 
 it.each([
   ["pending", {}, ["待答"]],
-  ["pending", { delivery: { status: "pending_verification", clientMessageId: "answer", message: "响应无法核实" } }, ["待核实", "响应无法核实", "核实原投递", "重新发送"]],
+  ["pending", { delivery: { status: "failed", clientMessageId: "answer", message: "回答发送失败" } }, ["回答发送失败"]],
   ["answered", { answer: { commentId: "reply", content: "**确认结果**\n\n1. **理由**：已核对", actorId: "reviewer", actorType: "member" } }, ["已答", "reviewer", "已核对"]],
   ["skipped", { skippedAt: "2026-11-24T10:00:00Z", skippedBy: "operator" }, ["已跳过", "operator"]],
   ["invalid", { error: "附件超过 64 KiB 上限。" }, ["不可解析", "64 KiB"]],
@@ -982,13 +962,13 @@ it.each([{ readOnly: true, readOnlyReason: "仅指定用户 other 可作答。" 
   } finally { h.dispose(); }
 });
 
-it("the compiled uncertain-answer card opens delivery management and explains conditions with question titles and labels", async () => {
+it("the compiled failed-answer card reports its error and explains conditions with question titles and labels", async () => {
   const renderers: PluginTimelineRendererContribution[] = [];
   const pressables: Array<{ onPress(): void }> = [];
   const opened: unknown[] = [];
   const tree = componentTree();
   const data = { connectionKey: "connection", issueId: "issue", rootId: "root", commentId: "card", attachmentId: "file", revision: "revision", title: "发布确认", status: "pending", readOnly: true, offline: false, truncated: false,
-    delivery: { status: "pending_verification", clientMessageId: "answer", message: "响应丢失" },
+    delivery: { status: "failed", clientMessageId: "answer", message: "回答发送失败" },
     questions: [{ id: "choice", type: "single", title: "发布范围", options: [{ id: "all", label: "全量" }, { id: "small", label: "灰度" }] }, { id: "detail", type: "text", title: "理由", required_when: { question_id: "choice", option_ids: ["all"] } }] };
   const setup = await bundledContribution("../index.client.tsx", {
     react: tree.react, "@getpaseo/plugin/client": { useRpc: () => async () => data },
@@ -999,7 +979,7 @@ it("the compiled uncertain-answer card opens delivery management and explains co
   try {
     const renderer = renderers.find(value => value.kind === "askuser")!;
     const text = tree.render(createElement(renderer.Component as FunctionComponent<any>, { item: { type: "plugin", kind: "askuser", version: 1, data: renderer.schema.parse(data) }, theme: { colors: {} } }));
-    expect(text).toContain("「发布范围」选择「全量」时必填"); expect(text).toContain("待核实");
-    expect(pressables).toHaveLength(1); pressables[0].onPress(); expect(opened).toEqual([{ screenId: "management" }]);
+    expect(text).toContain("「发布范围」选择「全量」时必填"); expect(text).toContain("回答发送失败");
+    expect(pressables).toHaveLength(0); expect(opened).toEqual([]);
   } finally { tree.unmount(); dispose(); }
 });

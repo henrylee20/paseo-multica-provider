@@ -28,7 +28,7 @@ export const connectionIdentitySchema = z.object({
 export const connectionHistory = defineRpc({ name: "connection.history", input: z.object({}), output: z.object({
   connections: z.array(connectionIdentitySchema.partial().extend({
     connectionKey: z.string(), profiles: z.array(z.string()), projectCount: z.number().int().nonnegative(), issueCount: z.number().int().nonnegative(),
-    hiddenCount: z.number().int().nonnegative(), pendingDeliveryCount: z.number().int().nonnegative(),
+    hiddenCount: z.number().int().nonnegative(),
   })),
 }) });
 

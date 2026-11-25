@@ -13,7 +13,7 @@ import { projectRow, threadPersistence, type ThreadSynchronizer } from "./thread
 import type { StoredRow } from "./thread-state.js";
 import type { StopCoordinator } from "./stops.js";
 import type { RunAddress } from "./runs.js";
-import { deliveryRow, deliveryInput, type CommentDelivery } from "./delivery.js";
+import type { CommentDelivery } from "./delivery.js";
 import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
 
 const persistenceSchema = z.object({ version: z.literal(1), data: z.object({
@@ -37,7 +37,6 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
       const subscriptions = new Map<string, () => void>();
       const permissions = new Map<string, Map<string, AskuserCardData>>();
       const askuserSubscriptions = new Map<string, () => void>();
-      const deliverySubscriptions = new Map<string, () => void>();
       const activeTurns = new Map<string, string>();
       const lifecycleSubscriptions = new Map<string, () => void>();
       const acceptedInterrupts = new Map<string, Set<Promise<void>>>();
@@ -55,7 +54,6 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
         addresses.delete(sessionId);
         activeTurns.delete(sessionId);
         interruptSettlements.delete(sessionId);
-        deliverySubscriptions.get(sessionId)?.(); deliverySubscriptions.delete(sessionId);
         runSubscriptions.get(sessionId)?.(); runSubscriptions.delete(sessionId);
         subscriptions.get(sessionId)?.(); subscriptions.delete(sessionId);
         lifecycleSubscriptions.get(sessionId)?.(); lifecycleSubscriptions.delete(sessionId);
@@ -180,13 +178,6 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
               releaseSession(input.sessionId);
               emit({ type: "session.closed", sessionId: input.sessionId });
             }));
-            const projectDelivery = (record: (typeof issue.deliveries)[string], includeOriginal = false) => {
-              emit({ type: "timeline.item", sessionId: input.sessionId, item: deliveryRow(record) });
-              const row = deliveryInput(record);
-              if (includeOriginal && rememberOriginal(input.sessionId, row)) emit({ type: "timeline.item", sessionId: input.sessionId, item: projectRow(address, row) });
-            };
-            for (const record of Object.values(issue.deliveries).filter(record => record.rootId === address.rootId)) projectDelivery(deliveries.presentation(record), input.history === "replay");
-            deliverySubscriptions.set(input.sessionId, deliveries.subscribe(address, projectDelivery, input.history !== "replay"));
             const projected = new Map<string, string>();
             let activeTurnId: string | undefined;
             let currentRuns: typeof issue.runs = {};
@@ -264,7 +255,7 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
             const target = { connectionKey: address.connectionKey, issueId: address.issueId, commentId: card.commentId, attachmentId: card.attachmentId };
             if (input.response.behavior === "deny" || isLocalAskuserDismiss(card, input.response.updatedInput)) { await askusers.collapse(target); return; }
             const record = await askusers.submit(target, input.response.updatedInput, deliveries);
-            const row = deliveryInput(record);
+            const row = { id: `multica:comment:${record.commentId}`, role: "user" as const, commentId: record.commentId, clientMessageId: record.clientMessageId, text: record.body };
             if (rememberOriginal(input.sessionId, row)) emit({ type: "timeline.item", sessionId: input.sessionId, item: projectRow(address, row) });
             if (permissions.get(input.sessionId)?.delete(input.permissionId)) emit({ type: "session.permission_resolved", sessionId: input.sessionId, permissionId: input.permissionId });
             return;
@@ -277,21 +268,25 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
               const address = addresses.get(input.sessionId);
               if (!address) throw new Error("请在 Multica 管理页启用任务工作区后打开已导入的讨论。");
               if (lifecycle.unavailable(address)) throw new Error("此隐藏讨论正在核对本地归档状态，请稍后重试。");
-              const record = await deliveries.admit(address, input.prompt);
               // Newer hosts may request local permission clearing on chat. This
               // is local collapse only; the prompt remains an ordinary comment.
               if ("clearPendingPermissions" in input.prompt && input.prompt.clearPendingPermissions === true) await askusers.collapsePending(address);
-              emit({ type: "timeline.item", sessionId: input.sessionId, item: projectRow(address, deliveryInput(record)) });
+              void deliveries.send(address, input.prompt).then(() => {
+                if (address.rootId === "main") emit({ type: "timeline.item", sessionId: input.sessionId, item: {
+                  type: "plugin", id: `multica:thread-created:${input.prompt.clientMessageId}`, pluginId: "multica", kind: "comment-delivery", version: 1, data: {},
+                } });
+              }).catch(error => emit({ type: "timeline.item", sessionId: input.sessionId, item: {
+                type: "error", id: `multica:send-error:${input.prompt.clientMessageId}`, message: error instanceof Error ? error.message : "评论发送失败，请重试。",
+              } }));
               emit({ type: "session.prompt_result", sessionId: input.sessionId, clientMessageId: input.prompt.clientMessageId,
                 result: input.prompt.delivery === "steer" && capturedTurnId ? { type: "steer", turnId: capturedTurnId } : { type: "completed" } });
-              deliveries.start(record);
             } catch (error) {
               if (input.prompt.delivery === "steer" && capturedTurnId) {
                 // The installed adapter turns failed into interrupt+replace.
                 // This acknowledgement only keeps the existing host turn; the
                 // explicit error states that no durable admission took place.
                 emit({ type: "timeline.item", sessionId: input.sessionId, item: { type: "error", id: `multica:input-not-received:${input.prompt.clientMessageId}`,
-                  message: `插件未能持久接收此输入；未发送远端评论。${error instanceof Error ? error.message : "请保留原生输入，核实存储或输入格式后重新发送。"}` } });
+                  message: `未发送远端评论。${error instanceof Error ? error.message : "请重试。"}` } });
                 emit({ type: "session.prompt_result", sessionId: input.sessionId, clientMessageId: input.prompt.clientMessageId, result: { type: "steer", turnId: capturedTurnId } });
                 return;
               }

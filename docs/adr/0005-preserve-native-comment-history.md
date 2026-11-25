@@ -24,3 +24,7 @@ Paseo 0.15.3 实际导入时，notification 映射未保留 provider 稳定 ID�
 ## 修订：精简时间线（OPT-01）
 
 不再为每条原生评论追加独立来源卡；来源时间仍保存在缓存和 provider 事件中，更正、删除及系统事件继续显示已有来源时间。Thread 挂载仍读取历史，仅在读取或同步失败时显示提示；主讨论保留触发历史读取的隐藏条目，不再显示冗余的任务事件头卡。成功投递仅在主讨论提示新 Thread 已建立，可从侧边栏打开。
+
+## 修订：评论回声关联（OPT-06）
+
+删除 durable delivery 原输入重放和恢复路径。成功投递只保存 clientMessageId、commentId 与讨论归属；Thread 缓存原文仍携带 clientMessageId，与来源 commentId 共用会话原文去重集合。同步在在途 POST 完成后关联回声，失败输入不另行持久化或重放。

@@ -33,7 +33,7 @@ export function ConnectionHistory({ theme, currentKey }: Pick<PluginSurfaceProps
         hint={[
           connection.apiUrl ?? connection.connectionKey,
           [connection.user ? `用户 ID ${connection.user.id}` : "", `Profiles：${connection.profiles.map(profile => profile || "默认").join("、") || "未知"}`].filter(Boolean).join(" · "),
-          `项目 ${connection.projectCount} · 任务 ${connection.issueCount} · 人工隐藏 ${connection.hiddenCount} · 待核实输入 ${connection.pendingDeliveryCount}`,
+          `项目 ${connection.projectCount} · 任务 ${connection.issueCount} · 人工隐藏 ${connection.hiddenCount}`,
         ].join("\n")} />)}
     </SettingsCard> : null}
   </SettingsSection>;

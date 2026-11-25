@@ -19,13 +19,6 @@ const cleanup: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const dispose of cleanup.splice(0).reverse()) await dispose(); });
 const stamp = "2026-11-24T10:00:00Z";
 const comment = (id: string, parent_id: string | null, content: string) => ({ id, parent_id, content, author_id: "me", author_type: "member", issue_id: "issue", type: "comment", created_at: stamp, updated_at: stamp, attachments: [] });
-const deliveryList = defineRpc({ name: "delivery.list", input: z.object({}), output: z.object({ records: z.array(z.object({
-  connectionKey: z.string(), issueId: z.string(), rootId: z.string(), clientMessageId: z.string(), retryOf: z.string().optional(), idempotencyKey: z.string(), body: z.string(), createdAt: z.string(),
-  status: z.enum(["received", "saved", "failed", "pending_verification"]), commentId: z.string().optional(), threadRootId: z.string().optional(), threadAgentId: z.string().optional(), message: z.string().optional(),
-})) }) });
-const actionAddress = z.object({ connectionKey: z.string(), issueId: z.string(), rootId: z.string(), clientMessageId: z.string() });
-const deliveryVerify = defineRpc({ name: "delivery.verify", input: actionAddress, output: z.object({ status: z.enum(["saved", "pending_verification"]), message: z.string().optional() }) });
-const deliveryResend = defineRpc({ name: "delivery.resend", input: actionAddress.extend({ requestId: z.string(), acknowledgeDuplicateRisk: z.literal(true) }), output: z.object({ clientMessageId: z.string(), idempotencyKey: z.string() }) });
 const deliveryMentions = defineRpc({ name: "delivery.mentions", input: z.object({ connectionKey: z.string(), issueId: z.string() }), output: z.object({ agents: z.array(z.object({ id: z.string(), name: z.string(), reference: z.string() })) }) });
 const historyList = defineRpc({ name: "issue.history.list", input: z.object({}), output: z.object({ issues: z.array(z.object({ connectionKey: z.string(), issueId: z.string(), title: z.string(), workspaceId: z.string(), status: z.string(), reason: z.string().optional(), lastSuccessAt: z.string().optional(), checkedAt: z.string().optional(), revision: z.string() })) }) });
 const historyRead = defineRpc({ name: "issue.history.read", input: z.object({ connectionKey: z.string(), issueId: z.string(), revision: z.string(), offset: z.number() }), output: z.object({ text: z.string(), nextOffset: z.number().nullable() }) });
@@ -189,7 +182,7 @@ it("a verified missing Issue leaves active work and retains original read-only h
   await f.server.rpc(threadOpen, address, f.paseo);
   const originalIds = f.agents.map(agent => agent.id);
   await f.send("root", "Uncertain cached input", "pending");
-  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[0]?.status).toBe("saved");
+  await expect.poll(() => f.comments.some(comment => comment.content === "Uncertain cached input")).toBe(true);
   f.remote.visible = false; f.remote.objectStatus = 404;
   expect(await f.server.rpc(syncBootstrap, {}, f.paseo)).toMatchObject({ status: "ready" });
   const summary = (await f.server.rpc(historyList, {}, f.paseo)).issues[0];
@@ -197,11 +190,11 @@ it("a verified missing Issue leaves active work and retains original read-only h
   expect(summary.lastSuccessAt).toBeDefined(); expect(summary.checkedAt).toBeDefined();
   expect(f.native.archived).toBe(true);
   const cached = await f.server.rpc(historyRead, { ...address, revision: summary.revision, offset: 0 }, f.paseo);
-  expect(cached.text).toContain("Existing root"); expect(cached.text).toContain("Uncertain cached input"); expect(cached.text).toContain('"run"');
+  expect(cached.text).toContain("Existing root"); expect(cached.text).toContain('"run"');
   const before = f.posts.length;
   await f.send("root", "Do not write", "denied");
   expect(f.posts).toHaveLength(before);
-  expect(f.events.some(event => event.type === "session.prompt_result" && event.clientMessageId === "denied" && event.result.type === "failed")).toBe(true);
+  await expect.poll(() => f.events.some(event => event.type === "timeline.item" && event.item.type === "error" && event.item.id === "multica:send-error:denied")).toBe(true);
   await f.dispose(); const restarted = f.start(); f.remote.authStatus = 401;
   expect((await restarted.server.rpc(historyList, {}, f.paseo)).issues[0]).toEqual(summary);
   expect((await restarted.server.rpc(historyRead, { ...address, revision: summary.revision, offset: 0 }, f.paseo)).text).toBe(cached.text);
@@ -248,7 +241,7 @@ it.each(["all", "one"])("reconciles %s host-reopened readonly discussions withou
   // The native prompt route unarchives the agent before the provider can reject it.
   main.archivedAt = null;
   await f.send("main", "Readonly native reopen", "readonly-reopen");
-  expect(f.events).toContainEqual(expect.objectContaining({ type: "session.prompt_result", clientMessageId: "readonly-reopen", result: expect.objectContaining({ type: "failed" }) }));
+  await expect.poll(() => f.events.some(event => event.type === "timeline.item" && event.item.type === "error" && event.item.id === "multica:send-error:readonly-reopen")).toBe(true);
   const history = structuredClone([...f.canonical]);
   f.remote.objectStatus = 200;
   await f.server.rpc(syncBootstrap, {}, f.paseo);
@@ -442,18 +435,14 @@ it("object permission loss keeps cached Run output, failed stops and manual hidi
   expect(output.status).toBe("ready");
   thread.archivedAt = stamp;
   await f.server.hook("agent.archive.after", { agent: { ...thread, provider: "multica" } } as never, f.paseo);
-  f.post(async () => ({ disconnect: true }));
-  await f.send("main", "Unknown result", "pending");
-  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[0]?.status).toBe("pending_verification");
-  const pending = (await f.server.rpc(deliveryList, {}, f.paseo)).records[0];
   f.remote.visible = false; f.remote.objectStatus = 403; f.remote.denial = "issue forbidden";
   await f.server.rpc(syncBootstrap, {}, f.paseo);
   expect((await f.server.rpc(historyList, {}, f.paseo)).issues[0]).toMatchObject({ status: "inaccessible", reason: "forbidden" });
   const count = f.posts.length;
   const beforeReads = f.requests.length;
   await f.send("root", "Blocked active input", "readonly-active", "steer");
+  await expect.poll(() => f.events.some(event => event.type === "timeline.item" && event.item.type === "error")).toBe(true);
   expect(f.events).toContainEqual(expect.objectContaining({ type: "timeline.item", item: expect.objectContaining({ type: "error", message: expect.stringContaining("不可访问") }) }));
-  await expect(f.server.rpc(deliveryResend, { ...address, rootId: "main", clientMessageId: "pending", requestId: "new-attempt", acknowledgeDuplicateRisk: true }, f.paseo)).rejects.toThrow("不可访问");
   expect(await f.server.rpc(threadOpen, address, f.paseo)).toMatchObject({ status: "cached", message: expect.stringContaining("只读") });
   expect(await f.server.rpc(runOpen, { ...address, runId: "run" }, f.paseo)).toMatchObject({ status: "cached", revision: output.revision });
   expect((await f.server.rpc(runRead, { ...address, runId: "run", revision: output.revision!, offset: 0 }, f.paseo)).text).toContain("Cached execution output");
@@ -461,9 +450,7 @@ it("object permission loss keeps cached Run output, failed stops and manual hidi
   expect(await f.server.rpc(hiddenRestore, address, f.paseo)).toMatchObject({ status: "unavailable" });
   expect(f.posts).toHaveLength(count);
   expect(f.requests.slice(beforeReads).some(path => path.includes("/comments?") || path.includes("/messages"))).toBe(false);
-  expect((await f.server.rpc(deliveryList, {}, f.paseo)).records[0]).toMatchObject({ idempotencyKey: pending.idempotencyKey, status: "pending_verification", body: "Unknown result" });
   // A read-only receipt check may prove a prior save, but cannot POST a retry.
-  await f.server.rpc(deliveryVerify, { ...address, rootId: "main", clientMessageId: "pending" }, f.paseo);
   expect(f.posts).toHaveLength(count);
   f.remote.visible = true; f.remote.objectStatus = 200;
   await f.server.rpc(syncBootstrap, {}, f.paseo);
@@ -483,8 +470,6 @@ it("access loss while an accepted send waits prevents its claim and retains the 
     f.remote.visible = false; f.remote.objectStatus = 404;
     await f.server.rpc(syncBootstrap, {}, f.paseo);
   } finally { release(); }
-  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[0]?.status).toBe("failed");
-  const record = (await f.server.rpc(deliveryList, {}, f.paseo)).records[0];
-  expect(record).toMatchObject({ clientMessageId: "racing-input", body: "Accepted before access loss", status: "failed", message: expect.stringContaining("不可访问") });
+  await expect.poll(() => f.events.some(event => event.type === "timeline.item" && event.item.type === "error" && event.item.message.includes("不可访问"))).toBe(true);
   expect(f.posts).toEqual([]);
 });

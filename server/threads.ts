@@ -255,13 +255,10 @@ export class ThreadSynchronizer {
             append({ ...source, id: `multica:comment:${comment.id}`, role: "event", category: "system", text });
           } else {
             const own = comment.author_type === "member" && comment.author_id === connection.userId;
-            const outgoing = own ? Object.values(issue.deliveries).find(record => record.rootId === address.rootId && record.commentId === comment.id) : undefined;
-            // Unknown receipts cannot be identified by body alone. Keep a
-            // potentially matching echo unprojected until receipt recovery.
-            if (own && !outgoing && Object.values(issue.deliveries).some(record => record.rootId === address.rootId && record.claimedAt && (record.status === "received" || record.status === "pending_verification") && record.body === comment.content)) continue;
+            const outgoing = own ? Object.entries(issue.commentInputs).find(([, input]) => input.rootId === address.rootId && input.commentId === comment.id)?.[0] : undefined;
             const name = comment.author_type === "member" ? members.find(member => member.user_id === comment.author_id)?.name ?? `成员 ${comment.author_id}`
               : agents.find(agent => agent.id === comment.author_id)?.name ?? `Agent ${comment.author_id}`;
-            append({ ...source, id: `multica:comment:${comment.id}`, role: own ? "user" : "assistant", text: own ? text : `${name}: \n\n${text}`, ...(outgoing ? { clientMessageId: outgoing.clientMessageId } : {}) });
+            append({ ...source, id: `multica:comment:${comment.id}`, role: own ? "user" : "assistant", text: own ? text : `${name}: \n\n${text}`, ...(outgoing ? { clientMessageId: outgoing } : {}) });
           }
           thread.observed[comment.id] = { fingerprint, deleted, revision: comment.revision, updatedAt: comment.updated_at };
         }

@@ -46,13 +46,7 @@ function SnapshotView({ issue, snapshot, theme }: { issue: Summary; snapshot: Sn
       </View>)}
       {!run.messages ? <Text style={muted}>没有已读执行正文缓存。</Text> : null}
     </View>)}
-    {snapshot.deliveries.length ? <View style={{ gap: 6 }}>
-      <SubHeading theme={theme}>原始输入</SubHeading>
-      {snapshot.deliveries.map(record => <View key={record.idempotencyKey}>
-        <Text selectable style={muted}>输入 {record.clientMessageId} · {formatTime(record.createdAt)} · {record.status}{record.message ? ` · ${record.message}` : ""}</Text>
-        <Markdown>{record.body}</Markdown>
-      </View>)}
-    </View> : null}
+
 
   </View>;
 }

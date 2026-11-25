@@ -1,8 +1,7 @@
 import { askuserPermissionId, formatAskuserAnswers } from "./askuser-answers.js";
 import type { CommentDelivery } from "./delivery.js";
-import type { DeliveryRecord } from "./delivery-state.js";
 import { z } from "zod";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { ProviderTimelineItem } from "@getpaseo/plugin/server/provider";
 import { askuserDocumentSchema, isAskuserReplyValid, type AskuserCardData } from "../shared/askuser.js";
 import { remoteFetch, type AuthenticatedConnection } from "./connection.js";
@@ -37,30 +36,27 @@ const bounded = (data: AskuserCardData): AskuserCardData => {
 class DeferredAttachment extends Error {}
 const revision = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
-export function cachedAskuserCard(address: CardAddress, issue: IssueMapping, context: { offline: boolean; userId?: string; lifecycle?: DiscussionLifecycle } = { offline: true }): AskuserCardData {
+export function cachedAskuserCard(address: CardAddress, issue: IssueMapping, context: { offline: boolean; userId?: string; lifecycle?: DiscussionLifecycle; delivery?: AskuserCardData["delivery"] } = { offline: true }): AskuserCardData {
     const record = issue.askuserCards?.[cardKey(address.commentId, address.attachmentId)];
     if (!record) throw new Error("提问卡片缓存不可用。");
     const cached = issue.askuserAttachments?.[record.attachmentId];
     const document = cached?.document;
-    const deliveries = Object.values(issue.deliveries);
-    const delivery = deliveries.filter(delivery => delivery.clientMessageId.startsWith(`${askuserPermissionId(address)}:answer:`) || delivery.askuserAnswerTo === address.commentId && !!delivery.retryOf).at(-1);
-    const saved = delivery?.status === "saved";
-    const uncertain = delivery && (delivery.status === "received" || delivery.status === "pending_verification");
+    const delivery = context.delivery;
     const offline = context.offline;
     const targetUser = document?.answer_user_id;
-    const readOnlyReason = uncertain ? "回答保存结果待核实，请在 Multica 管理页核实原投递或明确重新发送；请勿重复提交。"
-      : askuserUnavailableReason(issue, record.rootId, context.lifecycle, address.connectionKey, address.issueId)
+    const readOnlyReason = askuserUnavailableReason(issue, record.rootId, context.lifecycle, address.connectionKey, address.issueId)
       ?? (record.deleted ? "原评论已删除，仅显示缓存。" : offline ? "离线缓存，仅供只读。"
       : targetUser && targetUser !== context.userId ? `仅指定用户 ${targetUser} 可作答；当前为只读。` : undefined);
     return { connectionKey: address.connectionKey, issueId: address.issueId, commentId: address.commentId, attachmentId: address.attachmentId, rootId: record.rootId, revision: revision([record, cached, delivery, offline, readOnlyReason]), title: document?.title ?? "askuser.json 提问卡片", description: document?.description,
-      questions: document?.questions ?? [], status: saved && record.status === "pending" ? "answered" : record.status, collapsed: record.status === "pending" && !!record.collapsed, readOnly: !!readOnlyReason || saved || record.status !== "pending",
-      delivery: delivery && { status: delivery.status, clientMessageId: delivery.clientMessageId, message: delivery.message }, readOnlyReason, offline, truncated: false, error: cached?.error, statusError: record.statusError, answer: record.answer ?? (saved ? { commentId: delivery.commentId!, content: delivery.body, actorId: delivery.receipt?.authorId, actorType: "member" } : undefined), skippedAt: record.skippedAt, skippedBy: record.skippedBy };
+      questions: document?.questions ?? [], status: record.status, collapsed: record.status === "pending" && !!record.collapsed, readOnly: !!readOnlyReason || record.status !== "pending",
+      delivery: delivery && { status: delivery.status, clientMessageId: delivery.clientMessageId, message: delivery.message }, readOnlyReason, offline, truncated: false, error: cached?.error, statusError: record.statusError, answer: record.answer, skippedAt: record.skippedAt, skippedBy: record.skippedBy };
   }
 
 /** Attachment downloads and full timeline observations are independent of ordinary comment projection. */
 export class AskUsers {
   private listeners = new Map<string, Set<(row: ProviderTimelineItem, card: AskuserCardData, announceFresh: boolean) => void>>();
   private readonly fresh = new Map<string, { address: Address; deferred: boolean }>();
+  private readonly deliveries = new Map<string, NonNullable<AskuserCardData["delivery"]>>();
   private userIds = new Map<string, string>();
   private pending = new Map<string, Promise<void>>();
   private actions = new Map<string, { kind: string; operation: Promise<unknown> }>();
@@ -99,7 +95,7 @@ export class AskUsers {
     if (issue) this.project(address.connectionKey, address.issueId, issue, address.rootId);
   }
   private data(address: CardAddress, issue: IssueMapping) {
-    return cachedAskuserCard(address, issue, { offline: !this.online.has(address.connectionKey), userId: this.userIds.get(address.connectionKey), lifecycle: this.lifecycle });
+    return cachedAskuserCard(address, issue, { offline: !this.online.has(address.connectionKey), userId: this.userIds.get(address.connectionKey), lifecycle: this.lifecycle, delivery: this.deliveries.get(discoveryKey(address)) });
   }
   private row(data: AskuserCardData): ProviderTimelineItem {
     return { type: "plugin", id: `multica:askuser:${data.commentId}:${data.attachmentId}`, pluginId: "multica", kind: "askuser", version: 1, data: bounded(data) };
@@ -299,9 +295,6 @@ export class AskUsers {
     if (!issue) throw new Error("提问卡片缓存不可用。");
     return bounded(this.data(address, issue));
   }
-  async deliveryChanged(record: DeliveryRecord) {
-    if (record.askuserAnswerTo && (record.status === "saved" || record.status === "pending_verification")) await this.publish(record.connectionKey, record.issueId);
-  }
   private action<T>(address: CardAddress, kind: string, perform: () => Promise<T>): Promise<T> {
     const key = JSON.stringify([address.connectionKey, address.issueId, address.commentId, address.attachmentId]);
     const active = this.actions.get(key);
@@ -406,23 +399,29 @@ export class AskUsers {
     const issue = (await this.store.read()).connections[address.connectionKey]?.issues[address.issueId];
     if (!issue) throw new Error("提问卡片不可用。");
     const card = this.data(address, issue);
-    // Persisted attempts survive permission RPC response loss and daemon restarts.
-    const prefix = `${askuserPermissionId(address)}:answer:`;
-    const attempts = Object.values(issue.deliveries).filter(record => record.clientMessageId.startsWith(prefix));
-    const previous = attempts.at(-1);
-    if ((!previous || previous.status === "failed") && (card.status !== "pending" || card.readOnly)) throw new Error(card.readOnlyReason || "提问卡片已解决。");
-    const body = previous && previous.status !== "failed" ? previous.body : formatAskuserAnswers(card, input);
-    const record = previous && previous.status !== "failed" ? previous : await deliveries.admit({ connectionKey: address.connectionKey, issueId: address.issueId, rootId: card.rootId }, { clientMessageId: `${prefix}${attempts.length}`, delivery: "auto", input: { type: "message", content: [{ type: "text", text: body }] } }, { parentCommentId: address.commentId, askuserAnswerTo: address.commentId });
-    const current = await deliveries.settle(record);
-    if (current.status === "failed") throw new Error(current.message || "回答未保存，请修正后重试。");
-    if (current.status === "saved") await this.store.update(state => {
+    if (card.status !== "pending" || card.readOnly) throw new Error(card.readOnlyReason || "提问卡片已解决。");
+    const body = formatAskuserAnswers(card, input);
+    const clientMessageId = `${askuserPermissionId(address)}:answer:${randomUUID()}`;
+    const id = discoveryKey(address);
+    this.deliveries.set(id, { status: "received", clientMessageId });
+    let commentId: string;
+    try {
+      commentId = await deliveries.send({ ...address, rootId: card.rootId }, { clientMessageId, delivery: "auto", input: { type: "message", content: [{ type: "text", text: body }] } },
+        { parent_id: address.commentId, askuser_answer_to: address.commentId });
+    } catch (error) {
+      this.deliveries.set(id, { status: "failed", clientMessageId, message: error instanceof Error ? error.message : "回答发送失败，请重新回答。" });
+      await this.publish(address.connectionKey, address.issueId);
+      throw error;
+    }
+    this.deliveries.set(id, { status: "saved", clientMessageId });
+    await this.store.update(state => {
       const stored = state.connections[address.connectionKey].issues[address.issueId].askuserCards![cardKey(address.commentId, address.attachmentId)];
       stored.status = "answered";
       delete stored.collapsed;
-      stored.answer = { commentId: current.commentId!, content: current.body, actorId: current.receipt?.authorId, actorType: "member" };
+      stored.answer = { commentId, content: body, actorId: this.userIds.get(address.connectionKey), actorType: "member" };
     });
     await this.publish(address.connectionKey, address.issueId);
-    return current;
+    return { commentId, clientMessageId, body };
   }
   async read(address: CardAddress & { revision: string; offset: number }) {
     const issue = (await this.store.read()).connections[address.connectionKey]?.issues[address.issueId];
@@ -434,5 +433,5 @@ export class AskUsers {
     const end = Math.min(text.length, address.offset + 8192);
     return { text: text.slice(address.offset, end), nextOffset: end < text.length ? end : null };
   }
-  async close() { this.unsubscribe(); await Promise.allSettled([...this.pending.values(), ...[...this.actions.values()].map(action => action.operation)]); this.listeners.clear(); this.fresh.clear(); }
+  async close() { this.unsubscribe(); await Promise.allSettled([...this.pending.values(), ...[...this.actions.values()].map(action => action.operation)]); this.listeners.clear(); this.fresh.clear(); this.deliveries.clear(); }
 }
