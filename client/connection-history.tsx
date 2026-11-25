@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
-import { Text, View } from "react-native";
 import { useRpc, type PluginSurfaceProps } from "@getpaseo/plugin/client";
-import { SettingsCard, SettingsSection } from "@getpaseo/plugin/client/ui";
+import { SettingsCard, SettingsRow, SettingsSection } from "@getpaseo/plugin/client/ui";
 import { connectionHistory } from "../shared/contracts.js";
+import { Notice } from "./ui-kit.js";
 import type { z } from "zod";
 
 type History = z.output<typeof connectionHistory.output>["connections"];
 
+/** Shown only when another identity was used; the current one is already in the connection card. */
 export function ConnectionHistory({ theme, currentKey }: Pick<PluginSurfaceProps, "theme"> & { currentKey?: string }) {
   const read = useRpc(connectionHistory);
   const [connections, setConnections] = useState<History>([]);
@@ -22,18 +23,18 @@ export function ConnectionHistory({ theme, currentKey }: Pick<PluginSurfaceProps
     void update();
     return () => { active = false; if (timer) clearTimeout(timer); };
   }, [read, currentKey]);
-  return <SettingsSection title="历史连接">
-    <Text style={{ color: theme.colors.foregroundMuted }}>各服务与账号分别保留规则、项目、讨论和人工隐藏。请通过 CLI 登录及上方 profile 切回原身份，继续使用原映射。</Text>
-    {connections.map(connection => <SettingsCard key={connection.connectionKey}>
-      <View style={{ gap: 6 }}>
-        <Text selectable style={{ color: theme.colors.foreground }}>{connection.connectionKey === currentKey ? "当前连接" : "保留的历史连接"} · {connection.user?.name || connection.user?.id || "早期连接（尚无身份摘要）"}</Text>
-        <Text selectable style={{ color: theme.colors.foregroundMuted }}>{connection.apiUrl ?? connection.connectionKey}</Text>
-        {connection.user ? <Text selectable style={{ color: theme.colors.foregroundMuted }}>用户 ID：{connection.user.id}</Text> : null}
-        <Text style={{ color: theme.colors.foregroundMuted }}>Profiles：{connection.profiles.map(profile => profile || "默认").join("、") || "未知"}</Text>
-        <Text style={{ color: theme.colors.foregroundMuted }}>项目 {connection.projectCount} · 任务 {connection.issueCount} · 人工隐藏 {connection.hiddenCount} · 待核实输入 {connection.pendingDeliveryCount} · 停止告警 {connection.stopWarningCount}</Text>
-      </View>
-    </SettingsCard>)}
-    {!connections.length ? <Text style={{ color: theme.colors.foregroundMuted }}>尚无已验证的连接历史。</Text> : null}
-    {failure ? <Text accessibilityRole="alert" style={{ color: theme.colors.statusDanger }}>历史连接暂不可读，保留上次已读列表。</Text> : null}
+  if (!connections.some(connection => connection.connectionKey !== currentKey) && !failure) return null;
+  const ordered = [...connections.filter(connection => connection.connectionKey === currentKey), ...connections.filter(connection => connection.connectionKey !== currentKey)];
+  return <SettingsSection title="历史连接" info="各服务与账号分别保留规则、项目、讨论和人工隐藏。通过 CLI 登录及上方 profile 切回原身份后，继续使用原映射。">
+    {failure ? <Notice theme={theme}>历史连接暂不可读，保留上次已读列表。</Notice> : null}
+    {ordered.length ? <SettingsCard>
+      {ordered.map(connection => <SettingsRow key={connection.connectionKey}
+        label={`${connection.user?.name || connection.user?.id || "早期连接（尚无身份摘要）"}${connection.connectionKey === currentKey ? " · 当前连接" : ""}`}
+        hint={[
+          connection.apiUrl ?? connection.connectionKey,
+          [connection.user ? `用户 ID ${connection.user.id}` : "", `Profiles：${connection.profiles.map(profile => profile || "默认").join("、") || "未知"}`].filter(Boolean).join(" · "),
+          `项目 ${connection.projectCount} · 任务 ${connection.issueCount} · 人工隐藏 ${connection.hiddenCount} · 待核实输入 ${connection.pendingDeliveryCount} · 停止告警 ${connection.stopWarningCount}`,
+        ].join("\n")} />)}
+    </SettingsCard> : null}
   </SettingsSection>;
 }

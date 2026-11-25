@@ -28,14 +28,17 @@ export default function contribute(client: PluginClientContext) {
   void bootstrap();
   // Client setup survives reconnects. Keep retrying even when management was never opened.
   const timer = setInterval(() => { void bootstrap(); }, 10_000);
-  const removeSettings = client.addSettingsScreen({ id: "multica", title: "Multica", icon: "MessagesSquare", Component: ConnectionScreen });
-  const removeScreen = client.addScreen({ id: "management", title: "Multica", Component: ConnectionScreen });
+  const openManagement = () => client.openScreen({ screenId: "management" });
+  // Settings configures the connection and rules; the sidebar screen also holds records that need handling.
+  const removeSettings = client.addSettingsScreen({ id: "multica", title: "Multica", icon: "MessagesSquare",
+    Component: props => <ConnectionScreen {...props} scope="settings" openManagement={openManagement} /> });
+  const removeScreen = client.addScreen({ id: "management", title: "Multica", Component: props => <ConnectionScreen {...props} scope="management" /> });
   const removeItem = client.addSidebarHeaderItem({ id: "multica", title: "Multica", Component: MulticaItem });
   const removeDescription = client.addTimelineRenderer({ kind: taskDescriptionKind, version: taskDescriptionVersion,
     schema: taskDescriptionSchema, Component: TaskDescription });
   const removeThread = client.addTimelineRenderer({ kind: "thread", version: 1, schema: threadSummarySchema, Component: ThreadSummary });
   const removeRun = client.addTimelineRenderer({ kind: "run-summary", version: 1, schema: runSummarySchema, Component: RunSummary });
   const removeEvent = client.addTimelineRenderer({ kind: "comment-event", version: 1, schema: commentEventSchema, Component: CommentEvent });
-  const removeDelivery = client.addTimelineRenderer({ kind: "comment-delivery", version: 1, schema: deliverySummary, Component: props => <DeliveryStatus {...props} openManagement={() => client.openScreen({ screenId: "management" })} /> });
+  const removeDelivery = client.addTimelineRenderer({ kind: "comment-delivery", version: 1, schema: deliverySummary, Component: props => <DeliveryStatus {...props} openManagement={openManagement} /> });
   return () => { disposed = true; clearInterval(timer); removeDelivery(); removeRun(); removeEvent(); removeThread(); removeDescription(); removeItem(); removeScreen(); removeSettings(); };
 }

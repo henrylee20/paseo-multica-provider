@@ -1,16 +1,18 @@
-import { SyncState } from "./sync-status.js";
 import { useEffect, useState } from "react";
 import { Text, View } from "react-native";
 import { useRpc, useSettings, type PluginSurfaceProps } from "@getpaseo/plugin/client";
-import { ExternalLink, SettingsAction, SettingsCard, SettingsInput, SettingsRow, SettingsSection } from "@getpaseo/plugin/client/ui";
+import { copyText, ExternalLink, ScrollView, SettingsAction, SettingsCard, SettingsInput, SettingsRow, SettingsSection, SettingsSwitch } from "@getpaseo/plugin/client/ui";
 import { connectionStatus, multicaSettings, workspaceList, workspaceEnable, type ConnectionStatus, type TaskRule } from "../shared/contracts.js";
-
-import { WorkspaceRuleEditor } from "./workspace-rule.js";
+import { useSyncStatus } from "./sync-status.js";
+import { describeRule, WorkspaceRuleEditor } from "./workspace-rule.js";
 import { HiddenObjects } from "./hidden-objects.js";
 import { StopResults } from "./stop-results.js";
-import { DeliveryManagement } from "./delivery-status.js";
+import { DeliveryManagement, MentionReferences } from "./delivery-status.js";
 import { ConnectionHistory } from "./connection-history.js";
 import { ReadonlyHistory } from "./readonly-history.js";
+import { HeaderAction, Notice } from "./ui-kit.js";
+
+type Workspace = { connectionKey: string; id: string; name: string; enabled: boolean; rule: TaskRule };
 
 const labels: Record<ConnectionStatus["status"], string> = {
   ready: "已连接", missing_config: "未配置 CLI", unreadable_config: "配置无法读取", invalid_config: "配置无效",
@@ -18,13 +20,23 @@ const labels: Record<ConnectionStatus["status"], string> = {
 };
 const sourceLabel = { config: "CLI 配置", environment: "daemon 环境变量", none: "未配置" };
 
-export function ConnectionScreen({ host, theme, navigation }: PluginSurfaceProps) {
+export interface ConnectionScreenProps extends PluginSurfaceProps {
+  /** Settings shows what configures the connection; management adds the records that need handling. */
+  scope?: "settings" | "management";
+  openManagement?(): void;
+}
+
+export function ConnectionScreen({ host, theme, layout, navigation, scope = "management", openManagement }: ConnectionScreenProps) {
   const settings = useSettings(multicaSettings);
   const readStatus = useRpc(connectionStatus);
   const listWorkspaces = useRpc(workspaceList);
   const enableWorkspace = useRpc(workspaceEnable);
-  const [workspaces, setWorkspaces] = useState<Array<{ connectionKey: string; id: string; name: string; enabled: boolean; rule: TaskRule }>>([]);
+  const sync = useSyncStatus();
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  /** Whether the workspace list was read for what is on screen; until then "no workspaces" would be a guess. */
+  const [workspacesRead, setWorkspacesRead] = useState(false);
   const [editingWorkspace, setEditingWorkspace] = useState<string | null>(null);
+  const [editorDirty, setEditorDirty] = useState(false);
   const [workspaceFailure, setWorkspaceFailure] = useState<string | null>(null);
   const [savingWorkspace, setSavingWorkspace] = useState<string | null>(null);
   const [status, setStatus] = useState<ConnectionStatus | null>(null);
@@ -32,13 +44,16 @@ export function ConnectionScreen({ host, theme, navigation }: PluginSurfaceProps
   const [attempt, setAttempt] = useState(0);
   const [draft, setDraft] = useState("");
   const [profileError, setProfileError] = useState<string | null>(null);
+  const [copied, setCopied] = useState<"done" | "failed" | null>(null);
   const configuredProfile = settings.status === "ready" ? settings.values.profile : undefined;
 
   useEffect(() => { if (configuredProfile !== undefined) setDraft(configuredProfile); }, [configuredProfile]);
+  // Another host or profile may be another identity: never keep showing the previous one's status or rules.
+  useEffect(() => { setStatus(null); setWorkspaces([]); setWorkspacesRead(false); setEditingWorkspace(null); setEditorDirty(false); setCopied(null); }, [host.id, configuredProfile]);
   useEffect(() => {
+    // Refreshes and rule changes keep the current rows on screen until the next reading replaces them.
     let active = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    setStatus(null);
     async function update() {
       try {
         const next = await readStatus({});
@@ -46,7 +61,7 @@ export function ConnectionScreen({ host, theme, navigation }: PluginSurfaceProps
         if (next.status === "ready") {
           try {
             const result = await listWorkspaces({});
-            if (active) { setWorkspaces(result.connectionKey === next.connectionKey ? result.workspaces.map(workspace => ({ ...workspace, connectionKey: result.connectionKey })) : []); setWorkspaceFailure(null); }
+            if (active) { setWorkspaces(result.connectionKey === next.connectionKey ? result.workspaces.map(workspace => ({ ...workspace, connectionKey: result.connectionKey })) : []); setWorkspacesRead(true); setWorkspaceFailure(null); }
           } catch { if (active) setWorkspaceFailure("无法读取 Multica 工作区，请检查连接后刷新。"); }
         } else if (active) setWorkspaces([]);
       } catch {
@@ -66,69 +81,126 @@ export function ConnectionScreen({ host, theme, navigation }: PluginSurfaceProps
     if (await settings.save(parsed.data, settings.revision)) setAttempt(value => value + 1);
   }
 
-  async function toggleWorkspace(workspace: { id: string; enabled: boolean; connectionKey: string }) {
+  async function toggleWorkspace(workspace: Workspace) {
     setSavingWorkspace(workspace.id);
     try {
       const result = await enableWorkspace({ connectionKey: workspace.connectionKey, workspaceId: workspace.id, enabled: !workspace.enabled });
       if (result.status !== "ready") { setWorkspaceFailure(result.message ?? "同步暂不可用，请重试。"); return; }
       setWorkspaceFailure(null);
+      setWorkspaces(list => list.map(item => item.connectionKey === workspace.connectionKey && item.id === workspace.id ? { ...item, enabled: !workspace.enabled } : item));
       setAttempt(value => value + 1);
     } catch { setWorkspaceFailure("Multica 工作区规则保存或同步失败，请重试。"); }
     finally { setSavingWorkspace(null); }
   }
 
+  async function copyLogin(command: string) {
+    try { await copyText(command); setCopied("done"); } catch { setCopied("failed"); }
+  }
+
+  const refresh = () => { void settings.reload(); setAttempt(value => value + 1); };
+  const refreshKey = `${host.id}:${configuredProfile}:${attempt}`;
   const text = { color: theme.colors.foreground };
   const muted = { color: theme.colors.foregroundMuted };
-  return <View style={{ gap: 24 }}>
-    <Text style={muted}>连接来自 Paseo daemon 主机 {host.label} 的 Multica CLI 登录。请在这台主机上使用同一运行用户管理 CLI 登录。</Text>
-    <SettingsSection title="CLI profile">
-      {settings.status === "ready" ? <SettingsCard>
-        <SettingsInput key={configuredProfile} label="Profile 名称" initialValue={draft} onChangeText={setDraft}
-          hint="留空使用 CLI 默认 profile；命名 profile 需显式填写，不会根据修改时间切换。" disabled={settings.saving} />
-        <SettingsAction label="选择 daemon 使用的 CLI profile" actionLabel="保存 profile" disabled={settings.saving}
-          onPress={() => { void saveProfile(); }} />
-      </SettingsCard> : <Text style={muted}>{settings.status === "loading" ? "正在读取设置…" : "无法读取插件设置，请重新读取。"}</Text>}
-      {profileError || settings.saveError ? <Text accessibilityRole="alert" style={{ color: theme.colors.statusDanger }}>{profileError ?? settings.saveError}</Text> : null}
-      <SettingsAction label="重新读取主机设置与连接" actionLabel="刷新" onPress={() => { void settings.reload(); setAttempt(value => value + 1); }} />
-    </SettingsSection>
-    <SettingsSection title="连接状态">
-      <SyncState theme={theme} />
-      {failure ? <Text accessibilityRole="alert" style={{ color: theme.colors.statusDanger }}>{failure}</Text> : null}
-      {status ? <>
+  const statusColor = (value: ConnectionStatus["status"]) => value === "ready" ? theme.colors.statusSuccess
+    : value === "offline" || value === "isolated_context" ? theme.colors.statusWarning : theme.colors.statusDanger;
+  const syncColor = sync.tone === "danger" ? theme.colors.statusDanger : sync.tone === "warning" ? theme.colors.statusWarning : theme.colors.foreground;
+  const syncHint = [sync.progress, sync.message, sync.lastSuccess ? `上次完成核对：${sync.lastSuccess}` : undefined].filter(Boolean).join("\n") || undefined;
+  const current = workspaces.filter(workspace => workspace.connectionKey === status?.connectionKey);
+
+  const connection = <SettingsSection title="Multica 连接" trailing={<HeaderAction theme={theme} label="刷新" onPress={refresh} />}
+    info={`连接来自 Paseo daemon 主机 ${host.label} 上的 Multica CLI 登录，请在这台主机以同一运行用户管理登录。凭据只在 daemon 内使用。`}>
+    <SettingsCard>
+      <SettingsRow label="状态" hint={status?.message} error={failure}>
+        <Text style={{ color: status ? statusColor(status.status) : theme.colors.foregroundMuted }}>{status ? labels[status.status] : failure ? "无法读取" : "正在验证…"}</Text>
+      </SettingsRow>
+      {status && status.status !== "ready" ? <SettingsAction label="恢复 CLI 登录" hint={`在 daemon 主机以同一运行用户执行，完成后点击刷新：\n${status.loginCommand}`}
+        actionLabel={copied === "done" ? "已复制" : "复制命令"} error={copied === "failed" ? "无法写入剪贴板，请手动输入上面的命令。" : null}
+        onPress={() => { void copyLogin(status.loginCommand); }} /> : null}
+      <SettingsRow label="Daemon 主机"><Text selectable style={text}>{host.label}</Text></SettingsRow>
+      {status ? [
+        <SettingsRow key="user" label="已验证用户" hint={status.user ? [status.user.email, `ID ${status.user.id}`].filter(Boolean).join(" · ") : undefined}>
+          <Text selectable style={status.user ? text : muted}>{status.user ? status.user.name || status.user.id : "尚未验证"}</Text>
+        </SettingsRow>,
+        <SettingsRow key="api" label="API 服务" hint={`来源：${sourceLabel[status.source.api]}`}>
+          <Text selectable style={status.apiUrl ? text : muted}>{status.apiUrl ?? "未就绪"}</Text>
+        </SettingsRow>,
+        <SettingsRow key="app" label="前端地址" hint={`来源：${sourceLabel[status.source.app]}`}>
+          {status.appUrl ? <ExternalLink href={status.appUrl}>{status.appUrl}</ExternalLink> : <Text style={muted}>未配置</Text>}
+        </SettingsRow>,
+        <SettingsRow key="config" label="CLI 配置" hint={`凭据来源：${sourceLabel[status.source.credentials]}`}>
+          <Text selectable style={status.configPath ? text : muted}>{status.configPath ?? "隔离上下文，未读取配置"}</Text>
+        </SettingsRow>,
+      ] : null}
+      <SettingsRow label="同步" hint={syncHint}><Text style={{ color: syncColor }}>{sync.short}</Text></SettingsRow>
+    </SettingsCard>
+    <SettingsCard>
+      {settings.status === "ready" ? [
+        <SettingsInput key={`profile:${configuredProfile}`} label="CLI profile" initialValue={draft} placeholder="默认" disabled={settings.saving}
+          hint="留空使用 CLI 默认 profile；命名 profile 需显式填写，不会根据修改时间切换。" error={profileError ?? settings.saveError}
+          onChangeText={value => { setDraft(value); setProfileError(null); }} />,
+        <SettingsAction key="save" label="应用 profile" hint="保存后以此 profile 重新验证连接。" actionLabel={settings.saving ? "正在保存…" : "保存 profile"}
+          disabled={settings.saving || draft.trim() === configuredProfile} onPress={() => { void saveProfile(); }} />,
+      ] : settings.status === "invalid" ? <SettingsAction label="CLI profile" hint={`已保存的插件设置无效：${settings.error}`} actionLabel="重置为默认 profile"
+        disabled={settings.saving} onPress={() => { void settings.reset().then(saved => { if (saved) setAttempt(value => value + 1); }); }} />
+        : <SettingsRow label="CLI profile" hint={settings.status === "loading" ? "正在读取设置…" : "无法读取插件设置，请点击刷新。"}>
+          {status ? <Text selectable style={text}>{status.profile || "默认"}</Text> : null}
+        </SettingsRow>}
+    </SettingsCard>
+  </SettingsSection>;
+
+  const rules = <SettingsSection title="Multica 工作区与筛选规则"
+    info="显式启用后才导入任务，默认只导入“未开始”和“进行中”状态类别，可再组合负责人、具体状态、Multica 项目与标签。直接分配给成员与分配给 Agent / Squad 是不同条件；Multica 项目只限制任务范围，任务仍归入此 Multica 工作区对应的 Paseo 项目。每项任务使用独立的非 Git 占位目录，原生文件与终端打开的是占位目录。">
+    {workspaceFailure ? <Notice theme={theme}>{workspaceFailure}</Notice> : null}
+    {current.map(workspace => {
+      const editing = editingWorkspace === workspace.id;
+      return <View key={`${workspace.connectionKey}:${workspace.id}`} style={{ gap: 12 }}>
         <SettingsCard>
-          <SettingsRow label="状态" hint={status.message}><Text style={text}>{labels[status.status]}</Text></SettingsRow>
-          <SettingsRow label="Profile"><Text selectable style={text}>{status.profile || "默认"}</Text></SettingsRow>
-          <SettingsRow label="CLI 配置来源"><Text selectable style={text}>{status.configPath ?? "隔离上下文，未读取配置"}</Text></SettingsRow>
-          <SettingsRow label="API 服务" hint={sourceLabel[status.source.api]}><Text selectable style={text}>{status.apiUrl ?? "未就绪"}</Text></SettingsRow>
-          <SettingsRow label="凭据来源"><Text style={text}>{sourceLabel[status.source.credentials]}</Text></SettingsRow>
-          <SettingsRow label="已验证用户"><Text selectable style={text}>{status.user ? `${status.user.name} (${status.user.email}) · ${status.user.id}` : "尚未验证"}</Text></SettingsRow>
-          <SettingsRow label="前端地址" hint={sourceLabel[status.source.app]}>
-            {status.appUrl ? <ExternalLink href={status.appUrl}>{status.appUrl}</ExternalLink> : <Text style={muted}>未配置</Text>}
-          </SettingsRow>
+          <SettingsSwitch label={workspace.name} value={workspace.enabled} disabled={savingWorkspace !== null}
+            hint={savingWorkspace === workspace.id ? "正在保存…" : workspace.enabled ? "已启用：同步匹配的任务" : "未启用：不导入此 Multica 工作区的任务"}
+            onValueChange={() => { void toggleWorkspace(workspace); }} />
+          <SettingsAction label="筛选条件" hint={describeRule(workspace.rule)} actionLabel={editing ? editorDirty ? "放弃修改" : "收起" : "配置筛选条件"}
+            onPress={() => { setEditorDirty(false); setEditingWorkspace(editing ? null : workspace.id); }} />
         </SettingsCard>
-        {status.status !== "ready" ? <Text selectable style={muted}>在 daemon 主机恢复 CLI 登录后刷新：{status.loginCommand}</Text> : null}
-      </> : !failure ? <Text style={muted}>正在验证 CLI 连接…</Text> : null}
-      <Text style={muted}>连接凭据仅在 daemon 内使用。</Text>
-    </SettingsSection>
-    <ConnectionHistory theme={theme} currentKey={status?.connectionKey} />
-    <ReadonlyHistory theme={theme} />
-    <SettingsSection title="Multica 工作区与筛选规则">
-      <Text style={muted}>显式启用后导入“未开始”和“进行中”状态类别的任务；初始不限制具体状态、负责人、Multica 项目和标签，可配置组合条件。未启用的 Multica 工作区不会导入。</Text>
-      {workspaceFailure ? <Text accessibilityRole="alert" style={{ color: theme.colors.statusDanger }}>{workspaceFailure}</Text> : null}
-      {workspaces.filter(workspace => workspace.connectionKey === status?.connectionKey).map(workspace => <SettingsCard key={`${workspace.connectionKey}:${workspace.id}`}>
-        <SettingsAction label={workspace.name} hint={workspace.enabled ? "已启用：按已保存的筛选规则同步" : "尚未启用"}
-          actionLabel={workspace.enabled ? "停用规则" : "启用规则"} disabled={savingWorkspace !== null}
-          onPress={() => { void toggleWorkspace(workspace); }} />
-        <SettingsAction label="负责人、状态、标签与 Multica 项目" actionLabel={editingWorkspace === workspace.id ? "收起筛选条件" : "配置筛选条件"}
-          onPress={() => setEditingWorkspace(value => value === workspace.id ? null : workspace.id)} />
-        {editingWorkspace === workspace.id ? <WorkspaceRuleEditor key={`${status?.connectionKey}:${workspace.id}`} connectionKey={workspace.connectionKey} workspaceId={workspace.id} initialRule={workspace.rule} theme={theme}
-          onSaved={() => { setEditingWorkspace(null); setAttempt(value => value + 1); }} /> : null}
-      </SettingsCard>)}
-      {status?.status === "ready" && !workspaces.length && !workspaceFailure ? <Text style={muted}>当前没有可用的 Multica 工作区。</Text> : null}
-      <Text style={muted}>每项任务使用独立的非 Git 占位目录，主讨论中可读任务描述。原生文件与终端打开的是占位目录。</Text>
-    </SettingsSection>
-    <HiddenObjects theme={theme} refreshKey={`${host.id}:${configuredProfile}:${attempt}`} />
-    <StopResults theme={theme} refreshKey={`${host.id}:${configuredProfile}:${attempt}`} />
-    <DeliveryManagement theme={theme} navigation={navigation} host={host} refreshKey={`${host.id}:${configuredProfile}:${attempt}`} />
+        {editing ? <WorkspaceRuleEditor key={`${workspace.connectionKey}:${workspace.id}`} connectionKey={workspace.connectionKey} workspaceId={workspace.id}
+          initialRule={workspace.rule} theme={theme} onDirtyChange={setEditorDirty} onCancel={() => setEditingWorkspace(null)}
+          onSaved={rule => {
+            setEditingWorkspace(null);
+            setWorkspaces(list => list.map(item => item.connectionKey === workspace.connectionKey && item.id === workspace.id ? { ...item, rule } : item));
+            setAttempt(value => value + 1);
+          }} /> : null}
+      </View>;
+    })}
+    {status?.status === "ready" && !workspacesRead && !workspaceFailure ? <SettingsCard>
+      <SettingsRow label="正在读取 Multica 工作区…" />
+    </SettingsCard> : null}
+    {status?.status === "ready" && workspacesRead && !current.length && !workspaceFailure ? <SettingsCard>
+      <SettingsRow label="当前没有可用的 Multica 工作区" hint="在 Multica 加入或创建工作区后点击刷新。" />
+    </SettingsCard> : null}
+    {status && status.status !== "ready" ? <SettingsCard>
+      <SettingsRow label="连接就绪后可配置" hint="恢复 Multica CLI 登录后，这里会列出可启用的 Multica 工作区。" />
+    </SettingsCard> : null}
+  </SettingsSection>;
+
+  if (scope === "settings") return <View>
+    {connection}
+    {rules}
+    {openManagement ? <SettingsSection title="记录与恢复">
+      <SettingsCard>
+        <SettingsAction label="Multica 管理页" hint="评论投递、停止结果、人工隐藏、只读历史与历史连接在管理页处理。" actionLabel="打开管理页" onPress={openManagement} />
+      </SettingsCard>
+    </SettingsSection> : null}
   </View>;
+  // The host hands a plugin screen a bare flex box: it neither scrolls nor pads, so the screen owns both.
+  // Settings is a page of the host's own settings view, which already scrolls.
+  return <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: layout.compact ? 16 : 24 }}>
+    {/* Records that need a decision come right after the connection; recovery and tools follow the rules. */}
+    {connection}
+    <DeliveryManagement theme={theme} navigation={navigation} host={host} refreshKey={refreshKey} />
+    <StopResults theme={theme} refreshKey={refreshKey} />
+    {rules}
+    <HiddenObjects theme={theme} refreshKey={refreshKey} />
+    <ReadonlyHistory theme={theme} />
+    <ConnectionHistory theme={theme} currentKey={status?.connectionKey} />
+    <MentionReferences theme={theme} refreshKey={refreshKey} />
+  </ScrollView>;
 }

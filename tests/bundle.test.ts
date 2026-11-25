@@ -2,12 +2,13 @@ import { build } from "paseo-esbuild";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { runInThisContext } from "node:vm";
-import { isValidElement } from "react";
+import { createElement, isValidElement, type FunctionComponent } from "react";
 import type { PluginTimelineRendererContribution } from "@getpaseo/plugin/client";
 import * as pluginRuntime from "@getpaseo/plugin";
 import * as zod from "zod";
 import { expect, it, vi } from "vitest";
 import { FakeServer } from "./support/fake-server.js";
+import { formatTime } from "../client/format.js";
 
 async function bundledContribution(entry: string, runtime: Record<string, unknown> = {}) {
   const result = await build({ entryPoints: [fileURLToPath(new URL(entry, import.meta.url))], bundle: true,
@@ -373,102 +374,316 @@ it.each(["messages", "empty", "unavailable"])("expands source Run metadata with 
   } finally { for (const cleanup of cleanups) cleanup?.(); dispose(); vi.useRealTimers(); }
 });
 
-it("management lists shared hidden objects and offers separate workspace and selected-tab restoration", async () => {
-  const navigation: unknown[] = [];
-  const effects: Array<() => unknown> = [];
-  const cleanups: Array<() => void> = [];
-  const actions: Array<{ actionLabel: string; onPress(): unknown }> = [];
-  const state: unknown[] = [];
+/**
+ * Hooks for calling bundled components directly. Like React, state and effects belong to a component's
+ * place in the tree, so a child that mounts later does not shift the state of the components after it.
+ * Effects run after each render when their dependencies change; cleanups run before a re-run and on unmount.
+ */
+function componentTree() {
+  const state = new Map<string, unknown>();
+  const mounted = new Map<string, { deps?: unknown[]; cleanup?: () => void }>();
+  const pending = new Map<string, { effect: () => unknown; deps?: unknown[] }>();
+  let scope = "", stateIndex = 0, effectIndex = 0;
+  const react = {
+    useState: (initial: unknown) => {
+      const id = `${scope}#${stateIndex++}`;
+      if (!state.has(id)) state.set(id, initial);
+      return [state.get(id), (value: unknown) => { state.set(id, typeof value === "function" ? (value as (previous: unknown) => unknown)(state.get(id)) : value); }];
+    },
+    useEffect: (effect: () => unknown, deps?: unknown[]) => {
+      const id = `${scope}@${effectIndex++}`;
+      const previous = mounted.get(id)?.deps;
+      if (previous && deps && previous.length === deps.length && deps.every((value, index) => Object.is(value, previous[index]))) return;
+      pending.set(id, { effect, deps });
+    },
+  };
+  function visit(node: unknown, path: string): string {
+    if (typeof node === "string") return node;
+    if (typeof node === "number") return String(node);
+    if (Array.isArray(node)) return node.map((child, position) => visit(child, `${path}.${isValidElement(child) && child.key !== null ? child.key : position}`)).join("");
+    if (!isValidElement<{ children?: unknown }>(node)) return "";
+    if (typeof node.type !== "function") return visit(node.props.children, path);
+    const own = `${path}/${node.type.name || "component"}`;
+    const saved = [scope, stateIndex, effectIndex] as const;
+    [scope, stateIndex, effectIndex] = [own, 0, 0];
+    let output: unknown;
+    try { output = (node.type as (props: unknown) => unknown)(node.props); } finally { [scope, stateIndex, effectIndex] = saved; }
+    return visit(output, own);
+  }
+  return {
+    react,
+    render(node: unknown) {
+      const text = visit(node, "");
+      for (const [id, { effect, deps }] of [...pending]) {
+        pending.delete(id);
+        mounted.get(id)?.cleanup?.();
+        const cleanup = effect();
+        mounted.set(id, { deps, cleanup: typeof cleanup === "function" ? cleanup as () => void : undefined });
+      }
+      return text;
+    },
+    unmount() { for (const entry of mounted.values()) entry.cleanup?.(); mounted.clear(); },
+  };
+}
+
+type Answer = (name: string, input: unknown) => unknown;
+async function managementHarness(answer: Answer) {
+  const tree = componentTree();
   const calls: Array<{ name: string; input: unknown }> = [];
-  let cursor = 0;
-  let Component: (props: unknown) => unknown = () => null;
+  const actions: Array<{ label: string; hint?: string; actionLabel: string; disabled?: boolean; onPress(): unknown }> = [];
+  const switches: Array<{ label: string; value: boolean; onValueChange(value: boolean): unknown }> = [];
+  const selects: Array<{ label: string; value: string; onValueChange(value: string): unknown }> = [];
+  const pressables: Array<{ accessibilityLabel?: string; onPress(): unknown }> = [];
+  const copied: string[] = [];
+  const opened: unknown[] = [];
+  const navigation: unknown[] = [];
+  const scrolls: Array<{ style?: unknown; contentContainerStyle?: unknown }> = [];
+  const rpcs = new Map<string, (input: unknown) => Promise<unknown>>();
+  const passthrough = (props: Record<string, unknown>) => [props.label, props.title, props.info, props.hint, props.error, props.trailing, props.children];
+  const setup = await bundledContribution("../index.client.tsx", {
+    react: tree.react,
+    "@getpaseo/plugin/client": {
+      useSettings: () => ({ status: "ready", values: { profile: "" }, revision: "1", saving: false, saveError: null, reload: async () => {}, save: async () => true, reset: async () => true }),
+      useRpc: (contract: { name: string }) => {
+        if (!rpcs.has(contract.name)) rpcs.set(contract.name, async input => { calls.push({ name: contract.name, input }); return answer(contract.name, input); });
+        return rpcs.get(contract.name);
+      },
+    },
+    "@getpaseo/plugin/client/ui": {
+      Markdown: ({ children }: { children: string }) => children, Icon: () => null, ExternalLink: ({ children }: { children: unknown }) => children,
+      SettingsSection: passthrough, SettingsCard: passthrough, SettingsInput: passthrough, SettingsRow: passthrough,
+      SettingsAction: (props: typeof actions[number] & { error?: string }) => { actions.push(props); return [props.label, props.hint, props.error, props.actionLabel]; },
+      SettingsSwitch: (props: typeof switches[number] & { hint?: string }) => { switches.push(props); return [props.label, props.hint]; },
+      SettingsSelect: (props: typeof selects[number] & { hint?: string }) => { selects.push(props); return [props.label, props.hint]; },
+      Modal: Object.assign(({ title, children }: { title: string; children: unknown }) => [title, children], { Content: ({ children }: { children: unknown }) => children }),
+      copyText: async (text: string) => { copied.push(text); },
+      ScrollView: (props: typeof scrolls[number] & { children?: unknown }) => { scrolls.push(props); return props.children; },
+    },
+    "react-native": { View: "View", Text: "Text", Pressable: (props: typeof pressables[number] & { children: unknown }) => { pressables.push(props); return props.children; } },
+  });
+  const screens: Record<string, FunctionComponent<Record<string, unknown>>> = {};
+  const dispose = setup({ rpc: async () => ({ status: "ready" }), openScreen: (input: unknown) => opened.push(input),
+    addSettingsScreen: (entry: { Component: FunctionComponent<Record<string, unknown>> }) => { screens.settings = entry.Component; return () => {}; },
+    addScreen: (entry: { Component: FunctionComponent<Record<string, unknown>> }) => { screens.management = entry.Component; return () => {}; },
+    addSidebarHeaderItem: () => () => {}, addTimelineRenderer: () => () => {} });
+  const colors = { foreground: "fg", foregroundMuted: "muted", statusDanger: "danger", statusWarning: "warning", statusSuccess: "success" };
+  return {
+    calls, actions, switches, selects, pressables, copied, opened, navigation, scrolls,
+    render(screen: "settings" | "management" = "management", props: Record<string, unknown> = {}) {
+      actions.length = 0; switches.length = 0; selects.length = 0; pressables.length = 0; scrolls.length = 0;
+      return tree.render(createElement(screens[screen], { host: { id: "host", label: "Host" }, theme: { colors }, layout: { compact: false, platform: "web" },
+        navigation: { openAgent: (input: unknown) => navigation.push(input) }, ...props }));
+    },
+    action(actionLabel: string) { const found = actions.find(action => action.actionLabel === actionLabel); expect(found, actionLabel).toBeDefined(); return found!; },
+    dispose() { tree.unmount(); dispose(); },
+  };
+}
+
+const readyStatus = { status: "ready", message: "已验证", profile: "", connectionKey: "current", apiUrl: "https://api.example.test", appUrl: "https://app.example.test", configPath: "/home/user/.multica/config.json",
+  source: { api: "config", credentials: "config", app: "config" }, user: { id: "me", name: "Lin", email: "lin@example.test" }, loginCommand: "multica login" };
+const defaultRule = { statusCategories: ["unstarted", "started"], statuses: [], assignees: [], projectIds: [], labelIds: [] };
+const empty: Answer = name => ({
+  "connection.history": { connections: [] }, "stop.list": { records: [] }, "hidden.list": { objects: [] }, "issue.history.list": { issues: [] },
+  "delivery.list": { records: [] }, "delivery.targets": { issues: [] }, "sync.status": { status: "ready", stage: "idle", completedWorkspaces: 1, enabledWorkspaces: 1 },
+} as Record<string, unknown>)[name];
+
+it("management lists shared hidden objects and offers separate workspace and selected-tab restoration", async () => {
   const objects = [
     { connectionKey: "old-connection", issueId: "issue", workspaceId: "workspace", cwd: "/original", kind: "workspace", title: "Task" },
     { connectionKey: "old-connection", issueId: "issue", workspaceId: "workspace", cwd: "/original", kind: "thread", rootId: "root", agentId: "original-agent", title: "Task · Root" },
   ];
-  const rpcs = new Map<string, (input: unknown) => Promise<unknown>>();
-  const passthrough = (props: { label?: string; title?: string; hint?: string; children?: unknown }) => [props.label, props.title, props.hint, props.children];
-  const setup = await bundledContribution("../index.client.tsx", {
-    react: { useState: (initial: unknown) => {
-      const index = cursor++;
-      if (!(index in state)) state[index] = initial;
-      return [state[index], (value: unknown) => { state[index] = typeof value === "function" ? value(state[index]) : value; }];
-    }, useEffect: (effect: () => unknown) => effects.push(effect) },
-    "@getpaseo/plugin/client": {
-      useSettings: () => ({ status: "ready", values: { profile: "" }, revision: "1" }),
-      useRpc: (contract: { name: string }) => {
-        if (!rpcs.has(contract.name)) rpcs.set(contract.name, async input => {
-          calls.push({ name: contract.name, input });
-          if (contract.name === "issue.history.list") return { issues: [{ connectionKey: "old-connection", issueId: "issue", workspaceId: "workspace", title: "Read-only Task", status: "inaccessible", reason: "forbidden", lastSuccessAt: "2026-11-24T10:00:00Z", checkedAt: "2026-11-24T11:00:00Z", revision: "cache-revision" }] };
-          if (contract.name === "issue.history.read") return { text: JSON.stringify({ title: "Read-only Task", description: "Preserved goal", discussions: [{ rootId: "root", title: "Original thread", rows: [{ id: "comment", role: "user", text: "Original cached comment" }] }], runs: [{ id: "run", agentName: "Original agent", status: "running", ownerRootId: "root", metadata: { error: "Cached task failure", work_dir: "/remote/cache/../original" }, messages: [{ task_id: "run", issue_id: "issue", seq: 1, type: "text", content: "Preserved output" }] }], deliveries: [], stops: [] }), nextOffset: null };
-          if (contract.name === "connection.history") return { connections: [{ connectionKey: "old-connection", apiUrl: "https://original.example.test", user: { id: "original-user", name: "Original account", email: "" }, profiles: ["office"], projectCount: 1, issueCount: 2, hiddenCount: 1, pendingDeliveryCount: 1, stopWarningCount: 1 }] };
-          if (contract.name === "stop.list") return { records: [{ connectionKey: "old-connection", issueId: "issue", rootId: "root", runId: "failed-run", title: "Closed Task", status: "running", cleanup: "unknown", retryable: true, message: "cancel failed" },
-            { connectionKey: "old-connection", issueId: "issue", rootId: "root", runId: "cancelled-run", title: "Stopped Task", status: "cancelled", cleanup: "pending", retryable: false }] };
-          if (contract.name === "stop.retry") return { status: "ready" };
-          if (contract.name === "delivery.list") return { records: [{ connectionKey: "old-connection", issueId: "issue", rootId: "main", clientMessageId: "native-input", idempotencyKey: "key", body: "Saved input", createdAt: "2026-11-24T10:00:00Z", status: "saved", threadRootId: "new-root", threadAgentId: "new-thread-agent" }, { connectionKey: "old-connection", issueId: "issue", rootId: "root", clientMessageId: "uncertain-input", idempotencyKey: "uncertain-key", body: "Please verify original", createdAt: "2026-11-24T10:00:00Z", status: "pending_verification" }] };
-          if (contract.name === "delivery.verify") return { status: "pending_verification", message: "Original remains uncertain" };
-          if (contract.name === "delivery.resend") return { clientMessageId: "new-input", idempotencyKey: "new-key" };
-          if (contract.name === "delivery.targets") return { issues: [{ connectionKey: "old-connection", issueId: "issue", title: "Task" }] };
-          if (contract.name === "delivery.mentions") return { agents: [{ id: "agent-id", name: "Agent A", reference: "[@Agent A](mention://agent/agent-id)" }] };
-          if (contract.name === "hidden.list") return { objects };
-          if (contract.name === "hidden.restore") return { status: "ready" };
-          if (contract.name === "workspace.list") return { workspaces: [] };
-          return { status: "offline", message: "offline", profile: "", source: { api: "none", credentials: "none", app: "none" } };
-        });
-        return rpcs.get(contract.name);
-      },
-    },
-    "@getpaseo/plugin/client/ui": { Markdown: ({ children }: { children: string }) => children, SettingsSection: passthrough, SettingsCard: passthrough, SettingsInput: passthrough, SettingsRow: passthrough,
-      SettingsAction: (props: { label: string; actionLabel: string; onPress(): unknown }) => { actions.push(props); return [props.label, props.actionLabel]; } },
-    "react-native": { View: "View", Text: "Text" },
+  const h = await managementHarness(name => {
+    if (name === "issue.history.list") return { issues: [{ connectionKey: "old-connection", issueId: "issue", workspaceId: "workspace", title: "Read-only Task", status: "inaccessible", reason: "forbidden", lastSuccessAt: "2026-11-24T10:00:00Z", checkedAt: "2026-11-24T11:00:00Z", revision: "cache-revision" }] };
+    if (name === "issue.history.read") return { text: JSON.stringify({ title: "Read-only Task", description: "Preserved goal", discussions: [{ rootId: "root", title: "Original thread", rows: [{ id: "comment", role: "user", text: "Original cached comment" }] }], runs: [{ id: "run", agentName: "Original agent", status: "running", ownerRootId: "root", metadata: { error: "Cached task failure", work_dir: "/remote/cache/../original" }, messages: [{ task_id: "run", issue_id: "issue", seq: 1, type: "text", content: "Preserved output" }] }], deliveries: [], stops: [] }), nextOffset: null };
+    if (name === "connection.history") return { connections: [{ connectionKey: "old-connection", apiUrl: "https://original.example.test", user: { id: "original-user", name: "Original account", email: "" }, profiles: ["office"], projectCount: 1, issueCount: 2, hiddenCount: 1, pendingDeliveryCount: 1, stopWarningCount: 1 }] };
+    if (name === "stop.list") return { records: [{ connectionKey: "old-connection", issueId: "issue", rootId: "root", runId: "failed-run", title: "Closed Task", status: "running", cleanup: "unknown", retryable: true, message: "cancel failed" },
+      { connectionKey: "old-connection", issueId: "issue", rootId: "root", runId: "cancelled-run", title: "Stopped Task", status: "cancelled", cleanup: "pending", retryable: false }] };
+    if (name === "stop.retry") return { status: "ready" };
+    if (name === "delivery.list") return { records: [{ connectionKey: "old-connection", issueId: "issue", rootId: "main", clientMessageId: "native-input", idempotencyKey: "key", body: "Saved input", createdAt: "2026-11-24T10:00:00Z", status: "saved", threadRootId: "new-root", threadAgentId: "new-thread-agent" }, { connectionKey: "old-connection", issueId: "issue", rootId: "root", clientMessageId: "uncertain-input", idempotencyKey: "uncertain-key", body: "Please verify original", createdAt: "2026-11-24T10:00:00Z", status: "pending_verification" }] };
+    if (name === "delivery.verify") return { status: "pending_verification", message: "Original remains uncertain" };
+    if (name === "delivery.resend") return { clientMessageId: "new-input", idempotencyKey: "new-key" };
+    if (name === "delivery.targets") return { issues: [{ connectionKey: "old-connection", issueId: "issue", title: "Task" }] };
+    if (name === "delivery.mentions") return { agents: [{ id: "agent-id", name: "Agent A", reference: "[@Agent A](mention://agent/agent-id)" }] };
+    if (name === "hidden.list") return { objects };
+    if (name === "hidden.restore") return { status: "ready" };
+    if (name === "workspace.list") return { workspaces: [] };
+    if (name === "sync.status") return empty(name, {});
+    return { status: "offline", message: "offline", profile: "", source: { api: "none", credentials: "none", app: "none" }, loginCommand: "multica login" };
   });
-  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: (entry: { Component: typeof Component }) => { Component = entry.Component; return () => {}; },
-    addSidebarHeaderItem: () => () => {}, addTimelineRenderer: () => () => {} });
-  const render = () => { cursor = 0; actions.length = 0; return renderedText(Component({ host: { id: "host", label: "Host" }, theme: { colors: {} }, navigation: { openAgent: (input: unknown) => navigation.push(input) } })); };
   try {
-    render();
-    for (const effect of effects.splice(0)) { const cleanup = effect(); if (typeof cleanup === "function") cleanups.push(cleanup as () => void); }
-    await vi.waitFor(() => { expect(render()).toContain("人工隐藏"); expect(render()).toContain("Task · Root"); });
-    expect(render()).toContain("原生停止结果");
-    expect(render()).toContain("历史连接");
-    expect(render()).toContain("Original account");
-    expect(render()).toContain("https://original.example.test");
-    expect(render()).toContain("待核实输入 1");
-    expect(render()).toContain("cancel failed");
-    expect(render()).toContain("进程清理尚待确认");
-    expect(render()).toContain("评论已保存");
-    expect(render()).toContain("只读历史");
-    expect(render()).toContain("Read-only Task");
-    expect(render()).toContain("访问受限");
-    actions.find(action => action.actionLabel === "读取缓存历史")!.onPress();
-    await vi.waitFor(() => expect(render()).toContain("Original cached comment"));
-    expect(render()).toContain("Preserved output");
-    expect(render()).toContain("Preserved goal");
-    expect(render()).toContain("Cached task failure");
-    expect(render()).toContain("REMOTE · work_dir");
-    expect(render()).toContain("/remote/cache/../original");
-    expect(calls).toContainEqual({ name: "issue.history.read", input: { connectionKey: "old-connection", issueId: "issue", revision: "cache-revision", offset: 0 } });
-    actions.find(action => action.actionLabel === "核实原投递")!.onPress();
-    await vi.waitFor(() => expect(calls).toContainEqual({ name: "delivery.verify", input: { connectionKey: "old-connection", issueId: "issue", rootId: "root", clientMessageId: "uncertain-input" } }));
-    render();
-    actions.find(action => action.actionLabel === "重新发送…")!.onPress();
-    expect(render()).toContain("可能重复触发执行");
-    expect(calls.some(call => call.name === "delivery.resend")).toBe(false);
-    actions.find(action => action.actionLabel === "确认另发一次")!.onPress();
-    await vi.waitFor(() => expect(calls).toContainEqual({ name: "delivery.resend", input: expect.objectContaining({ connectionKey: "old-connection", issueId: "issue", rootId: "root", clientMessageId: "uncertain-input", acknowledgeDuplicateRisk: true, requestId: expect.any(String) }) }));
-    render();
-    expect(navigation).toEqual([]);
-    actions.find(action => action.actionLabel === "继续此 Thread")!.onPress();
-    expect(navigation).toEqual([{ agentId: "new-thread-agent", serverId: "host" }]);
-    actions.find(action => action.actionLabel === "读取可提及身份")!.onPress();
-    await vi.waitFor(() => expect(render()).toContain("[@Agent A](mention://agent/agent-id)"));
-    actions.find(action => action.actionLabel === "重试此 Run")!.onPress();
-    await vi.waitFor(() => expect(calls).toContainEqual({ name: "stop.retry", input: { connectionKey: "old-connection", issueId: "issue", rootId: "root", runId: "failed-run" } }));
-    expect(actions.map(action => action.actionLabel)).toContain("仅恢复 Paseo 工作区");
-    const action = actions.find(action => action.actionLabel === "恢复此讨论")!;
-    action.onPress();
-    await vi.waitFor(() => expect(calls).toContainEqual({ name: "hidden.restore", input: { connectionKey: "old-connection", issueId: "issue", rootId: "root" } }));
-  } finally { for (const cleanup of cleanups) cleanup(); dispose(); }
+    await vi.waitFor(() => { expect(h.render()).toContain("人工隐藏"); expect(h.render()).toContain("Task · Root"); });
+    await vi.waitFor(() => expect(h.render()).toContain("停止结果"));
+    const page = h.render();
+    for (const text of ["历史连接", "Original account", "https://original.example.test", "待核实输入 1", "cancel failed", "进程清理尚待确认", "评论已保存", "需要处理 · 1", "只读历史", "Read-only Task", "访问受限"])
+      expect(page).toContain(text);
+    // The stop that still needs a decision is listed before the settled one.
+    expect(page.indexOf("Closed Task")).toBeLessThan(page.indexOf("Stopped Task"));
+    h.action("读取缓存历史").onPress();
+    await vi.waitFor(() => expect(h.render()).toContain("Original cached comment"));
+    for (const text of ["Preserved output", "Preserved goal", "Cached task failure", "REMOTE · work_dir", "/remote/cache/../original", "运行中"]) expect(h.render()).toContain(text);
+    expect(h.calls).toContainEqual({ name: "issue.history.read", input: { connectionKey: "old-connection", issueId: "issue", revision: "cache-revision", offset: 0 } });
+    h.action("核实原投递").onPress();
+    await vi.waitFor(() => expect(h.calls).toContainEqual({ name: "delivery.verify", input: { connectionKey: "old-connection", issueId: "issue", rootId: "root", clientMessageId: "uncertain-input" } }));
+    h.render();
+    h.action("重新发送…").onPress();
+    expect(h.render()).toContain("可能重复触发执行");
+    expect(h.calls.some(call => call.name === "delivery.resend")).toBe(false);
+    h.action("确认另发一次").onPress();
+    await vi.waitFor(() => expect(h.calls).toContainEqual({ name: "delivery.resend", input: expect.objectContaining({ connectionKey: "old-connection", issueId: "issue", rootId: "root", clientMessageId: "uncertain-input", acknowledgeDuplicateRisk: true, requestId: expect.any(String) }) }));
+    h.render();
+    expect(h.navigation).toEqual([]);
+    h.action("继续此 Thread").onPress();
+    expect(h.navigation).toEqual([{ agentId: "new-thread-agent", serverId: "host" }]);
+    h.selects.find(select => select.label === "任务")!.onValueChange(JSON.stringify(["old-connection", "issue"]));
+    await vi.waitFor(() => expect(h.render()).toContain("[@Agent A](mention://agent/agent-id)"));
+    h.action("复制引用").onPress();
+    await vi.waitFor(() => expect(h.copied).toEqual(["[@Agent A](mention://agent/agent-id)"]));
+    expect(h.render()).toContain("已复制");
+    h.action("重试此 Run").onPress();
+    await vi.waitFor(() => expect(h.calls).toContainEqual({ name: "stop.retry", input: { connectionKey: "old-connection", issueId: "issue", rootId: "root", runId: "failed-run" } }));
+    expect(h.actions.map(action => action.actionLabel)).toContain("仅恢复 Paseo 工作区");
+    h.action("恢复此讨论").onPress();
+    await vi.waitFor(() => expect(h.calls).toContainEqual({ name: "hidden.restore", input: { connectionKey: "old-connection", issueId: "issue", rootId: "root" } }));
+  } finally { h.dispose(); }
+});
+
+it("management hides empty record sections, and settings links to management instead of loading records", async () => {
+  const answer: Answer = (name, input) => name === "connection.status" ? readyStatus : name === "workspace.list" ? { connectionKey: "current", workspaces: [] } : empty(name, input);
+  const management = await managementHarness(answer);
+  try {
+    await vi.waitFor(() => expect(management.render()).toContain("当前没有可用的 Multica 工作区"));
+    const page = management.render();
+    for (const text of ["Multica 连接", "已连接", "Lin", "lin@example.test · ID me", "https://api.example.test", "Multica 工作区与筛选规则"]) expect(page).toContain(text);
+    for (const text of ["人工隐藏", "停止结果", "评论投递", "只读历史", "历史连接", "提及 Agent", "恢复 CLI 登录"]) expect(page).not.toContain(text);
+  } finally { management.dispose(); }
+  const settings = await managementHarness(answer);
+  try {
+    await vi.waitFor(() => expect(settings.render("settings")).toContain("当前没有可用的 Multica 工作区"));
+    expect(settings.render("settings")).toContain("Multica 连接");
+    expect(settings.calls.map(call => call.name).filter(name => ["delivery.list", "stop.list", "hidden.list", "issue.history.list", "connection.history", "delivery.targets"].includes(name))).toEqual([]);
+    settings.action("打开管理页").onPress();
+    expect(settings.opened).toEqual([{ screenId: "management" }]);
+  } finally { settings.dispose(); }
+});
+
+it("management scrolls inside its own padded ScrollView; settings leaves scrolling to the host page", async () => {
+  // The host hands a plugin screen a bare flex box that neither scrolls nor pads, so a page taller
+  // than the window is unreachable until the screen provides the scroll area itself.
+  const h = await managementHarness(empty);
+  try {
+    expect(h.render()).toContain("Multica 连接");
+    expect(h.scrolls).toHaveLength(1);
+    expect(h.scrolls[0].style).toEqual({ flex: 1 });
+    expect(h.scrolls[0].contentContainerStyle).toEqual({ padding: 24 });
+    h.render("settings");
+    expect(h.scrolls).toHaveLength(0);
+    h.render("management", { layout: { compact: true, platform: "ios" } });
+    expect(h.scrolls).toHaveLength(1);
+    expect(h.scrolls[0].contentContainerStyle).toEqual({ padding: 16 });
+  } finally { h.dispose(); }
+});
+
+it("refreshing or toggling a Multica workspace keeps the connection, rules and an open filter editor on screen", async () => {
+  let release: (() => void) | undefined;
+  let statusReads = 0;
+  const workspace = { id: "ws", name: "Team space", enabled: false, rule: defaultRule };
+  const h = await managementHarness(async (name, input) => {
+    if (name === "connection.status") {
+      // The refresh reading stays pending: the rows from the previous reading must stay put meanwhile.
+      if (++statusReads > 1) await new Promise<void>(resolve => { release = resolve; });
+      return readyStatus;
+    }
+    if (name === "workspace.list") return { connectionKey: "current", workspaces: [workspace] };
+    if (name === "workspace.enable") return { status: "ready" };
+    if (name === "workspace.catalog") return { assignees: [], statuses: [], projects: [], labels: [{ id: "bug", name: "Bug" }] };
+    return empty(name, input);
+  });
+  try {
+    await vi.waitFor(() => expect(h.render()).toContain("Team space"));
+    expect(h.render()).toContain("未开始、进行中 · 其他条件不限");
+    h.action("配置筛选条件").onPress();
+    await vi.waitFor(() => expect(h.render()).toContain("Bug"));
+    h.switches.find(item => item.label === "Bug")!.onValueChange(true);
+    expect(h.render()).toContain("放弃修改");
+    h.pressables.find(item => item.accessibilityLabel === "刷新")!.onPress();
+    // React re-renders after a state change; the harness renders explicitly so the refresh effect runs.
+    await vi.waitFor(() => { h.render(); expect(release).toBeDefined(); });
+    let page = h.render();
+    for (const text of ["已连接", "Team space", "Bug", "放弃修改"]) expect(page).toContain(text);
+    expect(page).not.toContain("正在验证");
+    expect(h.switches.find(item => item.label === "Bug")!.value).toBe(true);
+    h.switches.find(item => item.label === "Team space")!.onValueChange(true);
+    await vi.waitFor(() => expect(h.calls).toContainEqual({ name: "workspace.enable", input: { connectionKey: "current", workspaceId: "ws", enabled: true } }));
+    await vi.waitFor(() => { h.render(); expect(h.switches.find(item => item.label === "Team space")!.value).toBe(true); });
+    page = h.render();
+    expect(page).toContain("已启用");
+    expect(page).toContain("Bug");
+    release!();
+  } finally { h.dispose(); }
+});
+
+it("does not report an empty Multica workspace list before the list has been read", async () => {
+  // The connection reads ready before the workspace list arrives, so an empty list is first a pending read.
+  let release: ((value: unknown) => void) | undefined;
+  const h = await managementHarness((name, input) => name === "workspace.list" ? new Promise(resolve => { release = resolve; }) : name === "connection.status" ? readyStatus : empty(name, input));
+  try {
+    await vi.waitFor(() => { h.render("settings"); expect(release).toBeDefined(); });
+    let page = h.render("settings");
+    expect(page).toContain("已连接");
+    expect(page).toContain("正在读取 Multica 工作区");
+    expect(page).not.toContain("当前没有可用的 Multica 工作区");
+    release!({ connectionKey: "current", workspaces: [] });
+    await vi.waitFor(() => expect(h.render("settings")).toContain("当前没有可用的 Multica 工作区"));
+    page = h.render("settings");
+    expect(page).not.toContain("正在读取 Multica 工作区");
+  } finally { h.dispose(); }
+});
+
+it("the filter editor filters by category or by specific status, collapses long catalogs and saves the visible rule", async () => {
+  const labels = Array.from({ length: 10 }, (_, index) => ({ id: `label-${index}`, name: `Label ${index}` }));
+  const h = await managementHarness((name, input) => {
+    if (name === "connection.status") return readyStatus;
+    if (name === "workspace.list") return { connectionKey: "current", workspaces: [{ id: "ws", name: "Team space", enabled: true, rule: defaultRule }] };
+    if (name === "workspace.catalog") return { assignees: [], statuses: [{ key: "todo", name: "Todo", category: "unstarted" }], projects: [], labels };
+    if (name === "workspace.rule") return { status: "ready" };
+    return empty(name, input);
+  });
+  try {
+    await vi.waitFor(() => expect(h.render()).toContain("Team space"));
+    h.action("配置筛选条件").onPress();
+    await vi.waitFor(() => expect(h.render()).toContain("Label 0"));
+    let page = h.render();
+    expect(page).toContain("Label 7");
+    expect(page).not.toContain("Label 8");
+    expect(page).toContain("另有 2 项未显示");
+    h.action("显示全部").onPress();
+    expect(h.render()).toContain("Label 9");
+    expect(h.switches.map(item => item.label)).toContain("未开始");
+    h.selects.find(select => select.label === "筛选方式")!.onValueChange("status");
+    page = h.render();
+    expect(h.switches.map(item => item.label)).not.toContain("未开始");
+    expect(page).toContain("不选表示不限状态");
+    h.switches.find(item => item.label === "Todo · 未开始")!.onValueChange(true);
+    h.render();
+    h.action("保存筛选规则").onPress();
+    await vi.waitFor(() => expect(h.calls).toContainEqual({ name: "workspace.rule", input: { workspaceId: "ws", connectionKey: "current", rule: { ...defaultRule, statusCategories: [], statuses: ["todo"] } } }));
+    await vi.waitFor(() => expect(h.render()).toContain("具体状态 1 项 · 其他条件不限"));
+    expect(h.render()).not.toContain("Label 0");
+  } finally { h.dispose(); }
+});
+
+it("a lost CLI login shows the recovery command with a copy action instead of an empty connection", async () => {
+  const h = await managementHarness((name, input) => name === "connection.status"
+    ? { status: "not_logged_in", message: "CLI 未登录", profile: "work", configPath: "/home/user/.multica/profiles/work/config.json", source: { api: "config", credentials: "none", app: "none" }, loginCommand: "multica --profile work login" }
+    : empty(name, input));
+  try {
+    await vi.waitFor(() => expect(h.render()).toContain("恢复 CLI 登录"));
+    const page = h.render();
+    for (const text of ["未登录", "multica --profile work login", "尚未验证", "连接就绪后可配置"]) expect(page).toContain(text);
+    h.action("复制命令").onPress();
+    await vi.waitFor(() => expect(h.copied).toEqual(["multica --profile work login"]));
+    expect(h.render()).toContain("已复制");
+  } finally { h.dispose(); }
 });
 
 
@@ -532,7 +747,7 @@ it("the native discussion shows the same daemon sync failure and cached-history 
     await Promise.resolve();
     expect(render()).toContain("同步未完成");
     expect(render()).toContain("保留已读缓存");
-    expect(render()).toContain("2026-11-24T10:00:00Z");
+    expect(render()).toContain(`上次完成核对：${formatTime("2026-11-24T10:00:00Z")}`);
     for (const cleanup of unmount) cleanup();
   } finally { dispose(); }
 });
