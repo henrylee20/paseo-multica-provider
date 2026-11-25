@@ -5,7 +5,8 @@ import { copyText, SettingsAction, SettingsCard, SettingsInput, SettingsRow, Set
 import { connectionStatus, multicaSettings, workspaceList, workspaceEnable, type ConnectionStatus, type TaskRule, type SyncStatus } from "../shared/contracts.js";
 import { describeSync } from "./sync-status.js";
 import { describeRule, WorkspaceRuleEditor } from "./workspace-rule.js";
-import { HiddenObjects, type HiddenObject } from "./hidden-objects.js";
+import type { HiddenObject } from "../shared/hiding.js";
+import { HiddenObjects } from "./hidden-objects.js";
 import { HeaderAction, Notice } from "./ui-kit.js";
 
 type Workspace = { connectionKey: string; id: string; name: string; enabled: boolean; rule: TaskRule };

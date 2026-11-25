@@ -1,11 +1,9 @@
 import { useState } from "react";
 import { useRpc, type PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { SettingsAction, SettingsCard, SettingsSection } from "@getpaseo/plugin/client/ui";
-import type { z } from "zod";
-import { hiddenList, hiddenRestore } from "../shared/hiding.js";
+import { hiddenRestore, type HiddenObject } from "../shared/hiding.js";
 import { HeaderAction, Notice } from "./ui-kit.js";
 
-export type HiddenObject = z.output<typeof hiddenList.output>["objects"][number];
 /** Shown only while something is hidden or the list cannot be read. */
 export function HiddenObjects({ theme, objects, onRefresh }: { theme: PluginSurfaceProps["theme"]; objects: HiddenObject[]; onRefresh(): void }) {
   const restore = useRpc(hiddenRestore);

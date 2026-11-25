@@ -4,7 +4,7 @@ import { RunDetails } from "./run-details.js";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { PluginServerContribution } from "@getpaseo/plugin/server";
-import { multicaSettings, connectionStatus, syncBootstrap, syncStatus, workspaceList, workspaceEnable, workspaceRule, workspaceCatalog, taskRuleSchema, type ConnectionStatus } from "../shared/contracts.js";
+import { multicaSettings, connectionStatus, syncBootstrap, workspaceList, workspaceEnable, workspaceRule, workspaceCatalog, taskRuleSchema } from "../shared/contracts.js";
 import { createConnectionResolver, type AuthenticatedConnection, type ConnectionDependencies } from "./connection.js";
 import { StateStore } from "./state.js";
 import { SidebarSynchronizer } from "./sync.js";
@@ -18,7 +18,7 @@ import { descriptionRevision, descriptionSlice, TaskDescriptions } from "./task-
 import { projectionHistory, ThreadSynchronizer } from "./threads.js";
 import { threadOpen, commentEventDetail } from "../shared/threads.js";
 import { ManualHiding } from "./hiding.js";
-import { hiddenList, hiddenRestore } from "../shared/hiding.js";
+import { hiddenRestore } from "../shared/hiding.js";
 import { StopCoordinator } from "./stops.js";
 import { CommentDelivery } from "./delivery.js";
 import { deliveryMentions } from "../shared/delivery.js";
@@ -102,7 +102,6 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     const hiding = new ManualHiding(store, lifecycle, metadata);
     server.addHook("agent.archive.after", async ({ agent }) => { await hiding.archivedAgent(agent); });
     server.addHook("workspace.archive.after", async ({ workspace }) => { await hiding.archivedWorkspace(workspace.id); });
-    server.handle(hiddenList, async () => hiding.list());
     const runs = new RunSynchronizer(store);
     const runDetails = new RunDetails(store, connection);
     const stops = new StopCoordinator(store, connection, runs);
@@ -147,7 +146,6 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       try { await synchronizer.withNativeHost(context.paseo, host => hiding.restore(input, host)); return { status: "ready" as const }; }
       catch (error) { return { status: "unavailable" as const, message: error instanceof Error ? error.message : "隐藏对象恢复失败，请重试。" }; }
     });
-    server.handle(syncStatus, async () => synchronizer.status());
     server.handle(syncBootstrap, async (_, context) => {
       // Backfill existing discussions once; imports write their own metadata.
       void metadata.mirror(context.paseo);

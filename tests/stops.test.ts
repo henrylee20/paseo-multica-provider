@@ -9,7 +9,6 @@ import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { ProviderConnection, ProviderEvent, ProviderTimelineItem } from "@getpaseo/plugin/server/provider";
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
-import { hiddenList } from "../shared/hiding.js";
 import { runObserve, runOpen, runMetadataRead } from "../shared/runs.js";
 import { workspaceEnable, syncBootstrap } from "../shared/contracts.js";
 import { createServerContribution } from "../server/contribute.js";

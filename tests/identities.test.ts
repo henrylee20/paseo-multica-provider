@@ -10,11 +10,10 @@ import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { ProviderConnection, ProviderEvent } from "@getpaseo/plugin/server/provider";
 import { workspaceEnable, syncBootstrap, connectionStatus, multicaSettings, workspaceList } from "../shared/contracts.js";
 import { deliveryMentions } from "../shared/delivery.js";
-import { hiddenList } from "../shared/hiding.js";
 import { threadOpen } from "../shared/threads.js";
 import { createServerContribution } from "../server/contribute.js";
 import type { LocalState } from "../server/state.js";
-import { FakeServer } from "./support/fake-server.js";
+import { FakeServer, hiddenObjects } from "./support/fake-server.js";
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 
@@ -151,14 +150,14 @@ it("credential rotation reuses history while account and service switches isolat
   await (await f.connect()).send({ type: "session.interrupt", requestId: "stop-original", sessionId: originalThread.id });
   originalThread.archivedAt = "2026-11-24T10:05:00Z";
   await f.server.hook("agent.archive.after", { agent: { id: originalThread.id, provider: "multica", workspaceId: originalThread.workspaceId, cwd: originalThread.cwd, parentAgentId: null, title: null }, archivedAt: originalThread.archivedAt }, f.paseo);
-  const hidden = await f.server.rpc(hiddenList, {}, f.paseo);
+  const hidden = await hiddenObjects(f.server, f.paseo);
   const originalIds = { projects: f.projects.map(value => value.projectId), workspaces: f.workspaces.map(value => value.id), agents: f.agents.map(value => value.id) };
 
   await f.login(1);
   expect(await f.server.rpc(connectionStatus, {}, f.paseo)).toMatchObject({ connectionKey: original.connectionKey });
   await f.server.rpc(syncBootstrap, {}, f.paseo);
   expect({ projects: f.projects.map(value => value.projectId), workspaces: f.workspaces.map(value => value.id), agents: f.agents.map(value => value.id) }).toEqual(originalIds);
-  expect(await f.server.rpc(hiddenList, {}, f.paseo)).toEqual(hidden);
+  expect(await hiddenObjects(f.server, f.paseo)).toEqual(hidden);
   await f.login(1, f.primary.apiUrl, "same-account");
   f.server.setSettings(multicaSettings.id, { profile: "same-account" });
   await f.server.rpc(syncBootstrap, {}, f.paseo);
@@ -196,7 +195,7 @@ it("credential rotation reuses history while account and service switches isolat
   await (await f.connect()).send({ type: "session.open", requestId: "old-replay", sessionId: "old-replay", history: "replay", persistence: { version: 1, data: { connectionKey: original.connectionKey, issueId: "issue", discussion: "thread", rootId: "root" } }, config: { cwd: originalThread.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
   expect(f.events).toContainEqual(expect.objectContaining({ type: "timeline.item", sessionId: "old-replay", item: expect.objectContaining({ type: "user_message", messageId: "root", text: "Original Lin comment" }) }));
   expect(f.events).toContainEqual(expect.objectContaining({ type: "timeline.item", sessionId: "old-replay", item: expect.objectContaining({ type: "plugin", kind: "run-summary", data: expect.objectContaining({ ...original, runId: "run" }) }) }));
-  expect(await f.server.rpc(hiddenList, {}, f.paseo)).toEqual(hidden);
+  expect(await hiddenObjects(f.server, f.paseo)).toEqual(hidden);
 
   await f.login(1);
   await f.server.rpc(syncBootstrap, {}, f.paseo);

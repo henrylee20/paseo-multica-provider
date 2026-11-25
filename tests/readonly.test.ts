@@ -8,12 +8,12 @@ import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { ProviderConnection, ProviderEvent } from "@getpaseo/plugin/server/provider";
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
-import { workspaceEnable, syncBootstrap, syncStatus } from "../shared/contracts.js";
+import { workspaceEnable, syncBootstrap, connectionStatus } from "../shared/contracts.js";
 import { threadOpen } from "../shared/threads.js";
 import { runOpen, runRead } from "../shared/runs.js";
-import { hiddenList, hiddenRestore } from "../shared/hiding.js";
+import { hiddenRestore } from "../shared/hiding.js";
 import { createServerContribution } from "../server/contribute.js";
-import { FakeServer, resync } from "./support/fake-server.js";
+import { FakeServer, resync, hiddenObjects } from "./support/fake-server.js";
 
 const cleanup: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const dispose of cleanup.splice(0).reverse()) await dispose(); });
@@ -180,7 +180,7 @@ it.each(["list failure", "network", "authentication"])("%s preserves active mapp
   if (failure === "authentication") f.remote.authStatus = 401;
   expect(await resync(f.server, f.paseo, "workspace")).toMatchObject({ status: "unavailable" });
   expect(f.native.archived).toBe(false);
-  if (failure !== "authentication") expect(await f.server.rpc(syncStatus, {}, f.paseo)).toMatchObject({ status: "unavailable" });
+  if (failure !== "authentication") expect((await f.server.rpc(connectionStatus, {}, f.paseo)).sync).toMatchObject({ status: "unavailable" });
 });
 
 it.each(["all", "one"])("reconciles %s host-reopened filtered discussions without losing hidden tabs when the Issue returns to the filter", async reopened => {
@@ -195,7 +195,7 @@ it.each(["all", "one"])("reconciles %s host-reopened filtered discussions withou
   const address = { connectionKey: main.labels["multica.connection"], issueId: "issue" };
   thread.archivedAt = stamp;
   await f.server.hook("agent.archive.after", { agent: { ...thread, provider: "multica" } } as never, f.paseo);
-  const hidden = await f.server.rpc(hiddenList, {}, f.paseo);
+  const hidden = await hiddenObjects(f.server, f.paseo);
   const identities = f.agents.map(agent => ({ id: agent.id, cwd: agent.cwd, handle: agent.handle }));
   f.remote.visible = false; f.remote.objectStatus = 404;
   await resync(f.server, f.paseo, "workspace");
@@ -211,7 +211,7 @@ it.each(["all", "one"])("reconciles %s host-reopened filtered discussions withou
   expect(f.native.archived).toBe(true);
   await resync(f.server, f.paseo, "workspace");
   expect(f.posts).toEqual([]);
-  expect(await f.server.rpc(hiddenList, {}, f.paseo)).toEqual(hidden);
+  expect(await hiddenObjects(f.server, f.paseo)).toEqual(hidden);
   expect([...f.canonical]).toEqual(history);
   expect(f.agents.map(agent => ({ id: agent.id, cwd: agent.cwd, handle: agent.handle }))).toEqual(identities);
 
@@ -221,7 +221,7 @@ it.each(["all", "one"])("reconciles %s host-reopened filtered discussions withou
   expect(main.archivedAt).toBeNull();
   expect(thread.archivedAt).toBeTruthy();
   expect(f.agents.filter(agent => agent !== thread).every(agent => !agent.archivedAt)).toBe(true);
-  expect(await f.server.rpc(hiddenList, {}, f.paseo)).toEqual(hidden);
+  expect(await hiddenObjects(f.server, f.paseo)).toEqual(hidden);
 });
 
 it("a successful list row restores a filtered issue without object reads", async () => {
@@ -298,7 +298,7 @@ it("closes only the hidden projection before rearchiving a host-restored tab and
   expect(f.events).toContainEqual(expect.objectContaining({ type: "request.failed", requestId: "late-closed-interrupt" }));
   expect(f.posts).toEqual([]);
   expect(f.runs[0].status).toBe("running");
-  expect((await f.server.rpc(hiddenList, {}, f.paseo)).objects).toContainEqual(expect.objectContaining({ ...address, agentId: thread.id }));
+  expect((await hiddenObjects(f.server, f.paseo))).toContainEqual(expect.objectContaining({ ...address, agentId: thread.id }));
   await (await f.connect()).send({ type: "session.open", requestId: "cached-hidden-open", sessionId: thread.id, history: "skip", persistence: JSON.parse(thread.handle.slice(7)), config: { cwd: thread.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
   expect(f.events).toContainEqual(expect.objectContaining({ type: "session.opened", requestId: "cached-hidden-open" }));
 });
@@ -326,7 +326,7 @@ it.each([undefined, "main"])("manual restore of %s preserves every unselected hi
   expect(thread.archivedAt).toBeTruthy();
   expect(other.archivedAt).toBeTruthy();
   expect(!!main.archivedAt).toBe(selectedRoot === undefined);
-  expect((await f.server.rpc(hiddenList, {}, f.paseo)).objects.map(object => object.rootId).sort()).toEqual(selectedRoot ? ["other", "root"] : ["main", "other", "root"]);
+  expect((await hiddenObjects(f.server, f.paseo)).map(object => object.rootId).sort()).toEqual(selectedRoot ? ["other", "root"] : ["main", "other", "root"]);
   expect(f.agents.map(agent => ({ id: agent.id, cwd: agent.cwd, handle: agent.handle }))).toEqual(original);
   expect(f.runs[0].status).toBe("running"); expect(f.posts).toEqual([]);
 });
@@ -380,6 +380,6 @@ it("a lost workspace restore acknowledgement still reapplies unselected hiding b
   const address = { connectionKey: thread.labels["multica.connection"], issueId: "issue" };
   expect(await f.server.rpc(hiddenRestore, address, f.paseo)).toMatchObject({ status: "unavailable" });
   expect(f.agents.every(agent => agent.archivedAt)).toBe(true);
-  expect((await f.server.rpc(hiddenList, {}, f.paseo)).objects.map(object => object.kind).sort()).toEqual(["main", "thread", "workspace"]);
+  expect((await hiddenObjects(f.server, f.paseo)).map(object => object.kind).sort()).toEqual(["main", "thread", "workspace"]);
   expect(f.posts).toEqual([]); expect(f.runs[0].status).toBe("running");
 });

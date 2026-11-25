@@ -530,7 +530,7 @@ async function settingsHarness(answer: Answer, host: { composerItems?: boolean }
     "@getpaseo/plugin/client": {
       useSettings: () => ({ status: "ready", values: { profile: "" }, revision: "1", saving: false, saveError: null, reload: async () => {}, save: async () => true, reset: async () => true }),
       useRpc: (contract: { name: string }) => {
-        if (!rpcs.has(contract.name)) rpcs.set(contract.name, async input => { calls.push({ name: contract.name, input }); return contract.name === "connection.status" ? { ...(await answer(contract.name, input) as object), sync: await answer("sync.status", {}), hidden: (await answer("hidden.list", {}) as any)?.objects ?? [] } : answer(contract.name, input); });
+        if (!rpcs.has(contract.name)) rpcs.set(contract.name, async input => { calls.push({ name: contract.name, input }); return contract.name === "connection.status" ? { sync: { status: "ready", stage: "idle", completedWorkspaces: 1, enabledWorkspaces: 1 }, hidden: [], ...(await answer(contract.name, input) as object) } : answer(contract.name, input); });
         return rpcs.get(contract.name);
       },
     },
@@ -568,9 +568,7 @@ async function settingsHarness(answer: Answer, host: { composerItems?: boolean }
 const readyStatus = { status: "ready", message: "已验证", profile: "", connectionKey: "current", apiUrl: "https://api.example.test", appUrl: "https://app.example.test", configPath: "/home/user/.multica/config.json",
   source: { api: "config", credentials: "config", app: "config" }, user: { id: "me", name: "Lin", email: "lin@example.test" }, loginCommand: "multica login" };
 const defaultRule = { statusCategories: ["unstarted", "started"], statuses: [], assignees: [], projectIds: [], labelIds: [] };
-const empty: Answer = name => ({
-  "hidden.list": { objects: [] }, "sync.status": { status: "ready", stage: "idle", completedWorkspaces: 1, enabledWorkspaces: 1 },
-} as Record<string, unknown>)[name];
+const empty: Answer = () => undefined;
 
 it("settings lists shared hidden objects and offers separate workspace and selected-tab restoration", async () => {
   const objects = [
@@ -578,11 +576,9 @@ it("settings lists shared hidden objects and offers separate workspace and selec
     { connectionKey: "old-connection", issueId: "issue", workspaceId: "workspace", cwd: "/original", kind: "thread", rootId: "root", agentId: "original-agent", title: "Task · Root" },
   ];
   const h = await settingsHarness(name => {
-    if (name === "hidden.list") return { objects };
     if (name === "hidden.restore") return { status: "ready" };
     if (name === "workspace.list") return { workspaces: [] };
-    if (name === "sync.status") return empty(name, {});
-    return { status: "offline", message: "offline", profile: "", source: { api: "none", credentials: "none", app: "none" }, loginCommand: "multica login" };
+    return { hidden: objects, status: "offline", message: "offline", profile: "", source: { api: "none", credentials: "none", app: "none" }, loginCommand: "multica login" };
   });
   try {
     await vi.waitFor(() => { expect(h.render()).toContain("人工隐藏"); expect(h.render()).toContain("Task · Root"); });
@@ -720,9 +716,7 @@ it("the native discussion shows only thread-open failures", async () => {
       const index = cursor++; if (!(index in state)) state[index] = initial;
       return [state[index], (value: unknown) => { state[index] = value; }];
     } },
-    "@getpaseo/plugin/client": { useRpc: (contract: { name: string }) => async () => contract.name === "sync.status"
-      ? { status: "unavailable", stage: "issues", completedWorkspaces: 0, enabledWorkspaces: 1, lastSuccessAt: "2026-11-24T10:00:00Z", message: "保留已读缓存" }
-      : { status: "cached", message: "可阅读已读历史" } },
+    "@getpaseo/plugin/client": { useRpc: () => async () => ({ status: "cached", message: "可阅读已读历史" }) },
     "react-native": { Text: "Text", View: "View", Pressable: "Pressable" },
     "@getpaseo/plugin/client/ui": {},
   });

@@ -11,9 +11,10 @@ import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 import { createServerContribution } from "../server/contribute.js";
 import type { LocalState } from "../server/state.js";
-import { FakeServer, resync } from "./support/fake-server.js";
+import { FakeServer, resync, hiddenObjects } from "./support/fake-server.js";
 import { metadataHost } from "./support/metadata-host.js";
-import { hiddenList, hiddenRestore } from "../shared/hiding.js";
+import { connectionStatus } from "../shared/contracts.js";
+import { hiddenRestore } from "../shared/hiding.js";
 
 const bootstrap = defineRpc({ name: "sync.bootstrap", input: z.object({}), output: z.object({ status: z.string() }) });
 const management = defineRpc({ name: "workspace.list", input: z.object({}), output: z.object({ workspaces: z.array(z.object({ id: z.string(), name: z.string(), enabled: z.boolean() })) }) });
@@ -300,9 +301,9 @@ it("rebuilt Projects retain manual hiding and restore the original discussion on
   await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: false }, f.paseo);
   await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   expect(main.archivedAt).toBeTruthy();
-  const hidden = await f.server.rpc(hiddenList, {}, f.paseo);
-  expect(hidden.objects).toHaveLength(1);
-  expect(hidden.objects[0].agentId).toBe(main.id);
+  const hidden = await hiddenObjects(f.server, f.paseo);
+  expect(hidden).toHaveLength(1);
+  expect(hidden[0].agentId).toBe(main.id);
   expect(await f.server.rpc(hiddenRestore, { connectionKey: main.labels["multica.connection"], issueId: "issue-one", rootId: "main" }, f.paseo)).toEqual({ status: "ready" });
   expect(main.archivedAt).toBeNull();
   expect(f.native.agents).toHaveLength(2);
@@ -803,20 +804,19 @@ it("a restarted daemon keeps one retry worker after the connecting client leaves
 });
 
 it("shares truthful sync progress and retains cached task identity through failed reads and recovery", async () => {
-  const status = defineRpc({ name: "sync.status", input: z.object({}), output: z.object({ status: z.string(), stage: z.string(), lastSuccessAt: z.string().optional(), completedWorkspaces: z.number(), enabledWorkspaces: z.number() }) });
   const f = await fixture();
   await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
-  const ready = await f.server.rpc(status, {}, f.paseo);
+  const ready = (await f.server.rpc(connectionStatus, {}, f.paseo)).sync;
   expect(ready).toMatchObject({ status: "ready", stage: "idle", completedWorkspaces: 1, enabledWorkspaces: 1, lastSuccessAt: expect.any(String) });
   const ids = f.native.agents.map(agent => agent.id);
   f.remote.invalidIssuePage = true;
   expect(await resync(f.server, f.paseo, "remote-workspace")).toMatchObject({ status: "unavailable" });
-  expect(await f.server.rpc(status, {}, f.paseo)).toMatchObject({ status: "unavailable", stage: "issues", lastSuccessAt: ready.lastSuccessAt });
+  expect((await f.server.rpc(connectionStatus, {}, f.paseo)).sync).toMatchObject({ status: "unavailable", stage: "issues", lastSuccessAt: ready.lastSuccessAt });
   expect(f.native.agents.map(agent => agent.id)).toEqual(ids);
   expect(f.native.workspaces.every(workspace => !workspace.archived)).toBe(true);
   f.remote.invalidIssuePage = false;
   await Promise.all([resync(f.server, f.paseo, "remote-workspace"), resync(f.server, f.paseo, "remote-workspace")]);
-  expect(await f.server.rpc(status, {}, f.paseo)).toMatchObject({ status: "ready", completedWorkspaces: 1 });
+  expect((await f.server.rpc(connectionStatus, {}, f.paseo)).sync).toMatchObject({ status: "ready", completedWorkspaces: 1 });
 });
 
 it("updates the opened main discussion's stable description from cached observation without losing version guards offline", async () => {
@@ -843,7 +843,6 @@ it("updates the opened main discussion's stable description from cached observat
 
 
 it("coalesces multiple reconnecting clients and periodic opportunities into one effective sync pass with visible progress", async () => {
-  const status = defineRpc({ name: "sync.status", input: z.object({}), output: z.object({ status: z.string(), stage: z.string(), enabledWorkspaces: z.number() }) });
   const f = await fixture(1000);
   await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   await new Promise(resolve => setTimeout(resolve, 70));
@@ -856,7 +855,7 @@ it("coalesces multiple reconnecting clients and periodic opportunities into one 
     f.remote.holdIssueReads = true;
     const clients = Promise.all([restarted.server.rpc(bootstrap, {}, f.paseo), restarted.server.rpc(bootstrap, {}, { ...f.paseo } as PaseoApi), restarted.server.rpc(bootstrap, {}, f.paseo)]);
     await expect.poll(() => f.heldIssueReads.length).toBe(1);
-    expect(await restarted.server.rpc(status, {}, f.paseo)).toMatchObject({ status: "syncing", stage: "issues", enabledWorkspaces: 1 });
+    expect((await restarted.server.rpc(connectionStatus, {}, f.paseo)).sync).toMatchObject({ status: "syncing", stage: "issues", enabledWorkspaces: 1 });
     await vi.advanceTimersByTimeAsync(30_000);
     expect(f.requests.slice(before).filter(path => path.startsWith("/api/issues?"))).toHaveLength(1);
     f.remote.holdIssueReads = false;

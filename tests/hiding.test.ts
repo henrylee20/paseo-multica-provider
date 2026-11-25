@@ -11,12 +11,8 @@ import type { ProviderConnection, ProviderEvent } from "@getpaseo/plugin/server/
 import { z } from "zod";
 import { createServerContribution } from "../server/contribute.js";
 import { syncBootstrap, workspaceEnable } from "../shared/contracts.js";
-import { FakeServer, resync } from "./support/fake-server.js";
+import { FakeServer, resync, hiddenObjects } from "./support/fake-server.js";
 
-const hiddenList = defineRpc({ name: "hidden.list", input: z.object({}), output: z.object({ objects: z.array(z.object({
-  connectionKey: z.string(), issueId: z.string(), workspaceId: z.string(), title: z.string(), cwd: z.string(),
-  kind: z.enum(["workspace", "main", "thread"]), rootId: z.string().optional(), agentId: z.string().optional(),
-})) }) });
 const hiddenRestore = defineRpc({ name: "hidden.restore", input: z.object({ connectionKey: z.string(), issueId: z.string(), rootId: z.string().optional() }),
   output: z.object({ status: z.enum(["ready", "unavailable"]), message: z.string().optional() }) });
 const cleanup: Array<() => unknown | Promise<unknown>> = [];
@@ -138,8 +134,8 @@ it("keeps a manually closed Thread hidden through new discovery, filter reentry,
   f.remote.matching = true; await resync(f.server, f.paseo, "remote");
   await f.dispose(); const restarted = await f.start();
   await resync(restarted.server, f.paseo, "remote");
-  const hidden = await restarted.server.rpc(hiddenList, {}, f.paseo);
-  expect(hidden.objects).toEqual([expect.objectContaining({ kind: "thread", rootId: "root", agentId: thread.id, cwd: thread.cwd })]);
+  const hidden = await hiddenObjects(restarted.server, f.paseo);
+  expect(hidden).toEqual([expect.objectContaining({ kind: "thread", rootId: "root", agentId: thread.id, cwd: thread.cwd })]);
   expect(thread.archivedAt).toBeTruthy();
   expect(f.native.agents).toHaveLength(3);
   expect(f.requests.every(request => request.startsWith("GET "))).toBe(true);
@@ -154,9 +150,9 @@ it("keeps an archived workspace hidden and restores only explicitly selected ori
   await resync(f.server, f.paseo, "remote");
   expect(workspace.archivedAt).toBeTruthy();
   expect(f.native.agents).toHaveLength(2);
-  const hidden = await f.server.rpc(hiddenList, {}, f.paseo);
-  expect(hidden.objects.map(object => object.kind).sort()).toEqual(["main", "thread", "workspace"]);
-  const selected = hidden.objects.find(object => object.kind === "thread")!;
+  const hidden = await hiddenObjects(f.server, f.paseo);
+  expect(hidden.map(object => object.kind).sort()).toEqual(["main", "thread", "workspace"]);
+  const selected = hidden.find(object => object.kind === "thread")!;
   f.native.effects.length = 0;
   expect(await f.server.rpc(hiddenRestore, { connectionKey: selected.connectionKey, issueId: selected.issueId, rootId: selected.rootId }, f.paseo)).toEqual({ status: "ready" });
   expect(f.native.effects).toEqual([`restore:${workspace.id}`, `refresh:${selected.agentId}`]);
@@ -164,7 +160,7 @@ it("keeps an archived workspace hidden and restores only explicitly selected ori
   expect(f.native.agents[0].archivedAt).toBeTruthy();
   expect(f.native.agents[1].archivedAt).toBeNull();
   expect(f.native.agents.map(agent => ({ id: agent.id, cwd: agent.cwd, handle: agent.handle }))).toEqual(original);
-  expect((await f.server.rpc(hiddenList, {}, f.paseo)).objects).toEqual([expect.objectContaining({ kind: "main" })]);
+  expect((await hiddenObjects(f.server, f.paseo))).toEqual([expect.objectContaining({ kind: "main" })]);
   expect(await f.server.rpc(hiddenRestore, { connectionKey: selected.connectionKey, issueId: selected.issueId, rootId: selected.rootId }, f.paseo)).toEqual({ status: "ready" });
   expect(f.native.effects).toEqual([`restore:${workspace.id}`, `refresh:${selected.agentId}`]);
   await resync(f.server, f.paseo, "remote");
@@ -182,7 +178,7 @@ it("restores a manually hidden Thread in its active workspace after filter reent
   f.remote.matching = true; await resync(f.server, f.paseo, "remote");
   expect(f.native.workspaces[0].archivedAt).toBeNull();
   expect(f.native.agents.find(agent => agent.labels["multica.discussion"] === "main")!.archivedAt).toBeNull();
-  const hidden = (await f.server.rpc(hiddenList, {}, f.paseo)).objects[0];
+  const hidden = (await hiddenObjects(f.server, f.paseo))[0];
   // The SDK ignores idPrefix; the original active workspace is on a later page.
   f.native.workspaces.unshift({ id: `${hidden.workspaceId}-similar`, cwd: hidden.cwd, archivedAt: null });
   f.native.workspacePageSize = 1;
@@ -190,10 +186,10 @@ it("restores a manually hidden Thread in its active workspace after filter reent
   const requestsBeforeRestore = f.requests.length;
   expect(await f.server.rpc(hiddenRestore, { connectionKey: hidden.connectionKey, issueId: hidden.issueId, rootId: hidden.rootId }, f.paseo)).toEqual({ status: "ready" });
   expect(thread.archivedAt).toBeNull();
-  expect((await f.server.rpc(hiddenList, {}, f.paseo)).objects).toEqual([]);
+  expect((await hiddenObjects(f.server, f.paseo))).toEqual([]);
   expect(f.native.agents.map(agent => ({ id: agent.id, cwd: agent.cwd, handle: agent.handle }))).toEqual(original);
   expect(f.native.effects).toEqual([`refresh:${thread.id}`]);
-  expect(f.requests).toHaveLength(requestsBeforeRestore);
+  expect(f.requests.slice(requestsBeforeRestore).every(request => request === "GET /api/me")).toBe(true);
 });
 
 it("keeps main-discussion hiding independent from session resource close and preserves replayed history", async () => {
@@ -208,7 +204,7 @@ it("keeps main-discussion hiding independent from session resource close and pre
   };
   const original = await open("before");
   await f.provider().send({ type: "session.close", requestId: "resource-close", sessionId: "before" });
-  expect(await f.server.rpc(hiddenList, {}, f.paseo)).toEqual({ objects: [] });
+  expect(await hiddenObjects(f.server, f.paseo)).toEqual([]);
   await f.archiveAgent(main);
   f.remote.roots.push("new-root");
   await resync(f.server, f.paseo, "remote");
@@ -216,7 +212,7 @@ it("keeps main-discussion hiding independent from session resource close and pre
   f.remote.matching = true; await resync(f.server, f.paseo, "remote");
   expect(main.archivedAt).toBeTruthy();
   expect(f.native.agents.filter(agent => !agent.archivedAt).map(agent => agent.labels["multica.discussion"])).toEqual(["root", "new-root"]);
-  const hidden = (await f.server.rpc(hiddenList, {}, f.paseo)).objects[0];
+  const hidden = (await hiddenObjects(f.server, f.paseo))[0];
   await f.server.rpc(hiddenRestore, { connectionKey: hidden.connectionKey, issueId: hidden.issueId, rootId: "main" }, f.paseo);
   expect(await open("after")).toEqual(original);
   expect(f.requests.every(request => request.startsWith("GET "))).toBe(true);
@@ -225,20 +221,20 @@ it("keeps main-discussion hiding independent from session resource close and pre
 it("restores a workspace alone without refreshing its hidden tabs", async () => {
   const f = await fixture();
   await f.archiveWorkspace(f.native.workspaces[0].id);
-  const workspace = (await f.server.rpc(hiddenList, {}, f.paseo)).objects.find(object => object.kind === "workspace")!;
+  const workspace = (await hiddenObjects(f.server, f.paseo)).find(object => object.kind === "workspace")!;
   f.native.workspaces.push({ id: `${workspace.workspaceId}-similar`, cwd: workspace.cwd, archivedAt: null });
   f.native.effects.length = 0;
   await f.server.rpc(hiddenRestore, { connectionKey: workspace.connectionKey, issueId: workspace.issueId }, f.paseo);
   expect(f.native.effects).toEqual([`restore:${workspace.workspaceId}`]);
   expect(f.native.agents.every(agent => agent.archivedAt)).toBe(true);
-  expect((await f.server.rpc(hiddenList, {}, f.paseo)).objects.map(object => object.kind).sort()).toEqual(["main", "thread"]);
+  expect((await hiddenObjects(f.server, f.paseo)).map(object => object.kind).sort()).toEqual(["main", "thread"]);
 });
 
 it("retries a lost workspace restore acknowledgement without restoring the already active workspace again", async () => {
   const f = await fixture();
   const original = f.native.agents.map(agent => ({ id: agent.id, cwd: agent.cwd, handle: agent.handle }));
   await f.archiveWorkspace(f.native.workspaces[0].id);
-  const hidden = (await f.server.rpc(hiddenList, {}, f.paseo)).objects.find(object => object.kind === "thread")!;
+  const hidden = (await hiddenObjects(f.server, f.paseo)).find(object => object.kind === "thread")!;
   const target = { connectionKey: hidden.connectionKey, issueId: hidden.issueId, rootId: hidden.rootId };
   const restore = f.host.restoreWorkspace.bind(f.host);
   f.host.restoreWorkspace = async id => { await restore(id); throw new Error("workspace restore acknowledgement lost"); };
@@ -247,29 +243,29 @@ it("retries a lost workspace restore acknowledgement without restoring the alrea
   expect(await f.server.rpc(hiddenRestore, target, f.paseo)).toMatchObject({ status: "unavailable" });
   expect(f.native.workspaces[0].archivedAt).toBeNull();
   expect(f.native.agents.every(agent => agent.archivedAt)).toBe(true);
-  expect((await f.server.rpc(hiddenList, {}, f.paseo)).objects).toHaveLength(3);
+  expect((await hiddenObjects(f.server, f.paseo))).toHaveLength(3);
   await f.dispose(); const restarted = await f.start();
   expect(await restarted.server.rpc(hiddenRestore, target, f.paseo)).toEqual({ status: "ready" });
   expect(f.native.effects).toEqual([`restore:${hidden.workspaceId}`, `refresh:${hidden.agentId}`]);
-  expect((await restarted.server.rpc(hiddenList, {}, f.paseo)).objects).toEqual([expect.objectContaining({ kind: "main" })]);
+  expect((await hiddenObjects(restarted.server, f.paseo))).toEqual([expect.objectContaining({ kind: "main" })]);
   expect(f.native.agents.map(agent => ({ id: agent.id, cwd: agent.cwd, handle: agent.handle }))).toEqual(original);
-  expect(f.requests).toHaveLength(requestsBeforeRestore);
+  expect(f.requests.slice(requestsBeforeRestore).every(request => request === "GET /api/me")).toBe(true);
 });
 
 it("retains hide intent after a lost restore acknowledgement and retries without refreshing the now live agent", async () => {
   const f = await fixture();
   const main = f.native.agents[0];
   await f.archiveAgent(main);
-  const hidden = (await f.server.rpc(hiddenList, {}, f.paseo)).objects[0];
+  const hidden = (await hiddenObjects(f.server, f.paseo))[0];
   const target = { connectionKey: hidden.connectionKey, issueId: hidden.issueId, rootId: "main" };
   const refresh = f.host.refreshAgent.bind(f.host);
   f.host.refreshAgent = async id => { await refresh(id); throw new Error("response lost"); };
   expect(await f.server.rpc(hiddenRestore, target, f.paseo)).toMatchObject({ status: "unavailable" });
-  expect((await f.server.rpc(hiddenList, {}, f.paseo)).objects).toHaveLength(1);
+  expect((await hiddenObjects(f.server, f.paseo))).toHaveLength(1);
   expect(main.archivedAt).toBeNull();
   await f.dispose(); const restarted = await f.start();
-  expect((await restarted.server.rpc(hiddenList, {}, f.paseo)).objects).toHaveLength(1);
+  expect((await hiddenObjects(restarted.server, f.paseo))).toHaveLength(1);
   expect(await restarted.server.rpc(hiddenRestore, target, f.paseo)).toEqual({ status: "ready" });
   expect(f.native.effects.filter(effect => effect === `refresh:${main.id}`)).toHaveLength(1);
-  expect((await restarted.server.rpc(hiddenList, {}, f.paseo)).objects).toEqual([]);
+  expect((await hiddenObjects(restarted.server, f.paseo))).toEqual([]);
 });
