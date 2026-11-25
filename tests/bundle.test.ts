@@ -583,8 +583,8 @@ it("settings lists shared hidden objects and offers separate workspace and selec
   try {
     await vi.waitFor(() => { expect(h.render()).toContain("人工隐藏"); expect(h.render()).toContain("Task · Root"); });
     const page = h.render();
-    expect(h.actions.map(action => action.actionLabel)).toContain("仅恢复 Paseo 工作区");
-    h.action("恢复此讨论").onPress();
+    expect(h.actions.map(action => action.actionLabel)).toContain("恢复 Paseo 工作区");
+    h.action("恢复讨论").onPress();
     await vi.waitFor(() => expect(h.calls).toContainEqual({ name: "hidden.restore", input: { connectionKey: "old-connection", issueId: "issue", rootId: "root" } }));
   } finally { h.dispose(); }
 });
@@ -658,12 +658,12 @@ it("does not report an empty Multica workspace list before the list has been rea
   } finally { h.dispose(); }
 });
 
-it("the filter editor filters by category or by specific status, collapses long catalogs and saves the visible rule", async () => {
+it("the filter editor selects concrete default statuses, collapses catalogs and saves the visible rule", async () => {
   const labels = Array.from({ length: 10 }, (_, index) => ({ id: `label-${index}`, name: `Label ${index}` }));
   const h = await settingsHarness((name, input) => {
     if (name === "connection.status") return readyStatus;
     if (name === "workspace.list") return { connectionKey: "current", workspaces: [{ id: "ws", name: "Team space", enabled: true, rule: defaultRule }] };
-    if (name === "workspace.catalog") return { assignees: [], statuses: [{ key: "todo", name: "Todo", category: "unstarted" }], projects: [], labels };
+    if (name === "workspace.catalog") return { assignees: [], statuses: [{ key: "todo", name: "Todo", category: "unstarted" }, { key: "doing", name: "Doing", category: "started" }, { key: "done", name: "Done", category: "done" }, { key: "closed", name: "Closed", category: "closed" }], projects: [], labels };
     if (name === "workspace.rule") return { status: "ready" };
     return empty(name, input);
   });
@@ -677,12 +677,14 @@ it("the filter editor filters by category or by specific status, collapses long 
     expect(page).toContain("另有 2 项未显示");
     h.action("显示全部").onPress();
     expect(h.render()).toContain("Label 9");
-    expect(h.switches.map(item => item.label)).toContain("未开始");
-    h.selects.find(select => select.label === "筛选方式")!.onValueChange("status");
-    page = h.render();
-    expect(h.switches.map(item => item.label)).not.toContain("未开始");
-    expect(page).toContain("不选表示不限状态");
-    h.switches.find(item => item.label === "Todo · 未开始")!.onValueChange(true);
+    expect(h.selects.some(select => select.label === "筛选方式")).toBe(false);
+    expect(page).not.toContain("另有状态类别限制");
+    expect(h.switches.find(item => item.label === "Todo · 未开始")!.value).toBe(true);
+    expect(h.switches.find(item => item.label === "Doing · 进行中")!.value).toBe(true);
+    expect(h.switches.find(item => item.label === "Done · 已完成")!.value).toBe(false);
+    expect(h.switches.find(item => item.label === "Closed · 已关闭")!.value).toBe(false);
+    expect(page).toContain("不选表示不限");
+    h.switches.find(item => item.label === "Doing · 进行中")!.onValueChange(false);
     h.render();
     h.action("保存筛选规则").onPress();
     await vi.waitFor(() => expect(h.calls).toContainEqual({ name: "workspace.rule", input: { workspaceId: "ws", connectionKey: "current", rule: { ...defaultRule, statusCategories: [], statuses: ["todo"] } } }));
@@ -874,4 +876,29 @@ it("the compiled failed-answer card reports its error and explains conditions wi
     expect(text).toContain("「发布范围」选择「全量」时必填"); expect(text).toContain("回答发送失败");
     expect(pressables).toHaveLength(0); expect(opened).toEqual([]);
   } finally { tree.unmount(); dispose(); }
+});
+
+it.each([
+  { categories: ["done"], statuses: [], selected: ["done"] },
+  { categories: [], statuses: ["done"], selected: ["done"] },
+  { categories: ["unstarted", "started"], statuses: ["todo", "done"], selected: ["todo"] },
+  { categories: [], statuses: [], selected: [] },
+])("saves concrete statuses from an existing rule: %j", async example => {
+  const rule = { ...defaultRule, statusCategories: example.categories, statuses: example.statuses };
+  const h = await settingsHarness((name, input) => {
+    if (name === "connection.status") return readyStatus;
+    if (name === "workspace.list") return { connectionKey: "current", workspaces: [{ id: "ws", name: "Team space", enabled: true, rule }] };
+    if (name === "workspace.catalog") return { assignees: [], statuses: [{ key: "todo", name: "Todo", category: "unstarted" }, { key: "doing", name: "Doing", category: "started" }, { key: "done", name: "Done", category: "done" }], projects: [], labels: [] };
+    if (name === "workspace.rule") return { status: "ready" };
+    return empty(name, input);
+  });
+  try {
+    await vi.waitFor(() => expect(h.render()).toContain("Team space"));
+    h.action("配置筛选条件").onPress();
+    await vi.waitFor(() => expect(h.render()).toContain("Todo · 未开始"));
+    const choices = h.switches.filter(item => item.label.includes(" · "));
+    expect(choices.filter(item => item.value).map(item => ({ "Todo · 未开始": "todo", "Doing · 进行中": "doing", "Done · 已完成": "done" })[item.label])).toEqual(example.selected);
+    h.action("保存筛选规则").onPress();
+    await vi.waitFor(() => expect(h.calls).toContainEqual({ name: "workspace.rule", input: { workspaceId: "ws", connectionKey: "current", rule: { ...rule, statusCategories: [], statuses: example.selected } } }));
+  } finally { h.dispose(); }
 });

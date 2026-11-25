@@ -22,12 +22,12 @@ export function HiddenObjects({ theme, objects, onRefresh }: { theme: PluginSurf
   }
   if (!objects.length && !failure) return null;
   return <SettingsSection title="人工隐藏" trailing={<HeaderAction theme={theme} label="刷新" onPress={onRefresh} />}
-    info="关闭讨论 tab 或归档 Paseo 工作区后持续隐藏，同一 daemon 的客户端共享此选择。恢复 Paseo 工作区不会恢复其中隐藏的讨论；恢复某个讨论会先恢复其原 Paseo 工作区。恢复后仍遵循 Multica 工作区筛选规则。">
+    info="恢复 Paseo 工作区后，仍需分别恢复其中的隐藏讨论。">
     {failure ? <Notice theme={theme}>{failure}</Notice> : null}
     {objects.length ? <SettingsCard>
       {objects.map(object => <SettingsAction key={JSON.stringify([object.connectionKey, object.issueId, object.kind, object.rootId])} label={object.title}
-        hint={object.kind === "workspace" ? "Paseo 工作区 · 保留原目录；其中的讨论 tab 需分别恢复。" : "讨论 · 恢复原身份与已有历史；其他隐藏讨论保持隐藏。"}
-        actionLabel={object.kind === "workspace" ? "仅恢复 Paseo 工作区" : "恢复此讨论"} disabled={saving}
+        hint={object.kind === "workspace" ? "恢复此 Paseo 工作区，讨论需分别恢复。" : "保留原有历史，其他隐藏讨论保持隐藏。"}
+        actionLabel={object.kind === "workspace" ? "恢复 Paseo 工作区" : "恢复讨论"} disabled={saving}
         onPress={() => { void restoreObject(object); }} />)}
     </SettingsCard> : null}
   </SettingsSection>;
