@@ -7,6 +7,7 @@ import type { PluginTimelineRendererContribution } from "@getpaseo/plugin/client
 import * as pluginRuntime from "@getpaseo/plugin";
 import * as zod from "zod";
 import { expect, it, vi } from "vitest";
+import type { TaskRule } from "../shared/contracts.js";
 import { FakeServer } from "./support/fake-server.js";
 
 async function bundledContribution(entry: string, runtime: Record<string, unknown> = {}) {
@@ -541,15 +542,15 @@ function componentTree() {
   const state = new Map<string, unknown>();
   const mounted = new Map<string, { deps?: unknown[]; cleanup?: () => void }>();
   const pending = new Map<string, { effect: () => unknown; deps?: unknown[] }>();
+  let visited = new Set<string>();
   let scope = "", stateIndex = 0, effectIndex = 0;
   const react = {
     useState: (initial: unknown) => {
       const id = `${scope}#${stateIndex++}`;
-      if (!state.has(id)) state.set(id, initial);
-      return [state.get(id), (value: unknown) => {
-        state.set(id, typeof value === "function" ? (value as (previous: unknown) => unknown)(state.get(id)) : value);
-      }];
+      if (!state.has(id)) state.set(id, typeof initial === "function" ? (initial as () => unknown)() : initial);
+      return [state.get(id), (value: unknown) => { state.set(id, typeof value === "function" ? (value as (previous: unknown) => unknown)(state.get(id)) : value); }];
     },
+    useRef: (initial: unknown) => react.useState({ current: initial })[0],
     useEffect: (effect: () => unknown, deps?: unknown[]) => {
       const id = `${scope}@${effectIndex++}`;
       const previous = mounted.get(id)?.deps;
@@ -560,11 +561,11 @@ function componentTree() {
   function visit(node: unknown, path: string): string {
     if (typeof node === "string") return node;
     if (typeof node === "number") return String(node);
-    if (Array.isArray(node))
-      return node.map((child, position) => visit(child, `${path}.${isValidElement(child) && child.key !== null ? child.key : position}`)).join("");
+    if (Array.isArray(node)) return node.map((child, position) => visit(child, `${path}.${isValidElement(child) && child.key !== null ? child.key : position}`)).join("");
     if (!isValidElement<{ children?: unknown }>(node)) return "";
     if (typeof node.type !== "function") return visit(node.props.children, path);
     const own = `${path}/${node.type.name || "component"}`;
+    visited.add(own);
     const saved = [scope, stateIndex, effectIndex] as const;
     [scope, stateIndex, effectIndex] = [own, 0, 0];
     let output: unknown;
@@ -574,7 +575,10 @@ function componentTree() {
   return {
     react,
     render(node: unknown) {
+      visited = new Set();
       const text = visit(node, "");
+      for (const [id, entry] of mounted) if (!visited.has(id.slice(0, id.lastIndexOf("@")))) { entry.cleanup?.(); mounted.delete(id); }
+      for (const id of state.keys()) if (!visited.has(id.slice(0, id.lastIndexOf("#")))) state.delete(id);
       for (const [id, { effect, deps }] of [...pending]) {
         pending.delete(id);
         mounted.get(id)?.cleanup?.();
@@ -593,45 +597,41 @@ async function settingsHarness(answer: Answer, host: { composerItems?: boolean }
   const tree = componentTree();
   const calls: Array<{ name: string; input: unknown }> = [];
   const actions: Array<{ label: string; hint?: string; actionLabel: string; disabled?: boolean; onPress(): unknown }> = [];
-  const switches: Array<{ label: string; value: boolean; onValueChange(value: boolean): unknown }> = [];
+  const switches: Array<{ label: string; value: boolean; disabled?: boolean; onValueChange(value: boolean): unknown }> = [];
   const selects: Array<{ label: string; value: string; onValueChange(value: string): unknown }> = [];
-  const pressables: Array<{ accessibilityLabel?: string; onPress(): unknown }> = [];
+  const pressables: Array<{ accessibilityLabel?: string; accessibilityRole?: string; accessibilityState?: { checked?: boolean | "mixed" }; disabled?: boolean; style?: { borderStyle?: string }; onPress(): unknown }> = [];
+  const inputs: Array<{ accessibilityLabel: string; value: string; onChangeText(value: string): void }> = [];
+  const modals: Array<{ title: string; onOpenChange(open: boolean): void }> = [];
+  const modalContents: Array<{ scrollable?: boolean; children: unknown }> = [];
   const copied: string[] = [];
   const opened: unknown[] = [];
   const navigation: unknown[] = [];
   const scrolls: Array<{ style?: unknown; contentContainerStyle?: unknown }> = [];
   const rpcs = new Map<string, (input: unknown) => Promise<unknown>>();
+  let profile = "";
   const passthrough = (props: Record<string, unknown>) => [props.label, props.title, props.info, props.hint, props.error, props.trailing, props.children];
   const setup = await bundledContribution("../index.client.tsx", {
     react: tree.react,
     "@getpaseo/plugin/client": {
-      useSettings: () => ({ status: "ready", values: { profile: "" }, revision: "1", saving: false, saveError: null, reload: async () => {}, save: async () => true, reset: async () => true }),
+      useSettings: () => ({ status: "ready", values: { profile }, revision: "1", saving: false, saveError: null, reload: async () => {}, save: async () => true, reset: async () => true }),
       useRpc: (contract: { name: string }) => {
-        if (!rpcs.has(contract.name))
-          rpcs.set(contract.name, async input => {
-            calls.push({ name: contract.name, input });
-            return contract.name === "connection.status" ? { sync: { status: "ready", stage: "idle", completedWorkspaces: 1, enabledWorkspaces: 1 }, hidden: [], ...(await answer(contract.name, input) as object) } : answer(contract.name, input);
-          });
+        if (!rpcs.has(contract.name)) rpcs.set(contract.name, async input => { calls.push({ name: contract.name, input }); return contract.name === "connection.status" ? { sync: { status: "ready", stage: "idle", completedWorkspaces: 1, enabledWorkspaces: 1 }, hidden: [], ...(await answer(contract.name, input) as object) } : answer(contract.name, input); });
         return rpcs.get(contract.name);
       },
     },
     "@getpaseo/plugin/client/ui": {
       Markdown: ({ children }: { children: string }) => children, Icon: () => null, ExternalLink: ({ children }: { children: unknown }) => children,
       SettingsSection: passthrough, SettingsCard: passthrough, SettingsInput: passthrough, SettingsRow: passthrough,
-      SettingsAction: (props: typeof actions[number] & { error?: string }) => {
-        actions.push(props);
-        return [props.label, props.hint, props.error, props.actionLabel];
-      },
+      SettingsAction: (props: typeof actions[number] & { error?: string }) => { actions.push(props); return [props.label, props.hint, props.error, props.actionLabel]; },
       SettingsSwitch: (props: typeof switches[number] & { hint?: string }) => { switches.push(props); return [props.label, props.hint]; },
       SettingsSelect: (props: typeof selects[number] & { hint?: string }) => { selects.push(props); return [props.label, props.hint]; },
-      Modal: Object.assign(({ title, children }: { title: string; children: unknown }) => [title, children], { Content: ({ children }: { children: unknown }) => children }),
+      Modal: Object.assign((props: typeof modals[number] & { children: unknown }) => { modals.push(props); return [props.title, props.children]; },
+        { Content: (props: typeof modalContents[number]) => { modalContents.push(props); return props.children; } }),
+      TextInput: (props: typeof inputs[number]) => { inputs.push(props); return null; },
       copyText: async (text: string) => { copied.push(text); },
       ScrollView: (props: typeof scrolls[number] & { children?: unknown }) => { scrolls.push(props); return props.children; },
     },
-    "react-native": { View: "View", Text: "Text", Pressable: (props: typeof pressables[number] & { children: unknown }) => {
-      pressables.push(props);
-      return props.children;
-    } },
+    "react-native": { View: "View", Text: "Text", Pressable: (props: typeof pressables[number] & { children: unknown }) => { pressables.push(props); return props.children; } },
   });
   const screens: Record<string, FunctionComponent<Record<string, unknown>>> = {};
   const composerItems: string[] = [];
@@ -639,27 +639,31 @@ async function settingsHarness(answer: Answer, host: { composerItems?: boolean }
     addSettingsScreen: (entry: { Component: FunctionComponent<Record<string, unknown>> }) => { screens.settings = entry.Component; return () => {}; },
     addSidebarHeaderItem: () => () => {}, addTimelineRenderer: () => () => {},
     ...(host.composerItems ? { addComposerItem: (entry: { id: string }) => { composerItems.push(entry.id); return () => {}; } } : {}) });
-  const colors = { foreground: "fg", foregroundMuted: "muted", statusDanger: "danger", statusWarning: "warning", statusSuccess: "success" };
+  const colors = { surface0: "base", surface1: "raised", surface2: "control", border: "border", accent: "accent", accentForeground: "on-accent", foreground: "fg", foregroundMuted: "muted", statusDanger: "danger", statusWarning: "warning", statusSuccess: "success" };
   return {
-    calls, actions, switches, selects, pressables, copied, opened, navigation, scrolls, composerItems,
+    calls, actions, switches, selects, pressables, inputs, modals, modalContents, copied, opened, navigation, scrolls, composerItems,
+    setProfile(value: string) { profile = value; },
     render(screen: "settings" = "settings", props: Record<string, unknown> = {}) {
-      actions.length = 0; switches.length = 0; selects.length = 0; pressables.length = 0; scrolls.length = 0;
+      actions.length = 0; switches.length = 0; selects.length = 0; pressables.length = 0; scrolls.length = 0; inputs.length = 0; modals.length = 0; modalContents.length = 0;
       return tree.render(createElement(screens[screen], { host: { id: "host", label: "Host" }, theme: { colors }, layout: { compact: false, platform: "web" },
         navigation: { openAgent: (input: unknown) => navigation.push(input) }, ...props }));
     },
-    action(actionLabel: string) {
-      const found = actions.find(action => action.actionLabel === actionLabel);
-      expect(found, actionLabel).toBeDefined();
-      return found!;
+    action(actionLabel: string) { const found = actions.find(action => action.actionLabel === actionLabel); expect(found, actionLabel).toBeDefined(); return found!; },
+    press(label: string) { const found = pressables.find(item => item.accessibilityLabel === label); expect(found, label).toBeDefined(); expect(found!.disabled).not.toBe(true); found!.onPress(); },
+    async save(label = "保存", screen: "settings" = "settings") {
+      let button: typeof pressables[number] | undefined;
+      await vi.waitFor(() => { this.render(screen); button = pressables.find(item => item.accessibilityLabel?.startsWith(label)); expect(button, label).toBeDefined(); expect(button!.disabled).not.toBe(true); });
+      button!.onPress();
     },
+    checkbox(label: string) { const found = pressables.find(item => item.accessibilityRole === "checkbox" && item.accessibilityLabel === label); expect(found, label).toBeDefined(); return found!; },
     dispose() { tree.unmount(); dispose(); },
   };
 }
 
 const readyStatus = { status: "ready", message: "已验证", profile: "", connectionKey: "current", apiUrl: "https://api.example.test", appUrl: "https://app.example.test", configPath: "/home/user/.multica/config.json",
   source: { api: "config", credentials: "config", app: "config" }, user: { id: "me", name: "Lin", email: "lin@example.test" }, loginCommand: "multica login" };
-const defaultRule = { statusCategories: ["unstarted", "started"], statuses: [], assignees: [], projectIds: [], labelIds: [] };
-const empty: Answer = () => undefined;
+const defaultRule: TaskRule = { statusCategories: ["unstarted", "started"], statuses: [], assignees: [], projectIds: [], labelIds: [] };
+const empty: Answer = name => name === "workspace.preview" ? { total: 0, imported: 0, entering: 0, leaving: [] } : undefined;
 
 it("settings lists shared hidden objects and offers separate workspace and selected-tab restoration", async () => {
   const objects = [
@@ -694,41 +698,31 @@ it("settings shows only connection and rules when nothing is hidden", async () =
 
 });
 
-it("refreshing or toggling a Multica workspace keeps the connection, rules and an open filter editor on screen", async () => {
+it("refreshing keeps the connection, rules and unsaved modal edits on screen", async () => {
   let release: (() => void) | undefined;
   let statusReads = 0;
-  const workspace = { id: "ws", name: "Team space", enabled: false, rule: defaultRule };
   const h = await settingsHarness(async (name, input) => {
     if (name === "connection.status") {
       // The refresh reading stays pending: the rows from the previous reading must stay put meanwhile.
       if (++statusReads > 1) await new Promise<void>(resolve => { release = resolve; });
       return readyStatus;
     }
-    if (name === "workspace.list") return { connectionKey: "current", workspaces: [workspace] };
-    if (name === "workspace.enable") return { status: "ready" };
+    if (name === "workspace.list") return { connectionKey: "current", workspaces: [{ id: "ws", name: "Team space", enabled: true, rule: defaultRule, importedCount: 2 }] };
     if (name === "workspace.catalog") return { assignees: [], statuses: [], projects: [], labels: [{ id: "bug", name: "Bug" }] };
     return empty(name, input);
   });
   try {
     await vi.waitFor(() => expect(h.render()).toContain("Team space"));
-    expect(h.render()).toContain("未开始、进行中 · 其他条件不限");
-    h.action("配置筛选条件").onPress();
+    h.action("编辑筛选").onPress();
     await vi.waitFor(() => expect(h.render()).toContain("Bug"));
-    h.switches.find(item => item.label === "Bug")!.onValueChange(true);
-    expect(h.render()).toContain("放弃修改");
-    h.pressables.find(item => item.accessibilityLabel === "刷新")!.onPress();
-    // React re-renders after a state change; the harness renders explicitly so the refresh effect runs.
+    h.press("Bug");
+    expect(h.render()).toContain("有未保存的修改");
+    h.press("刷新");
     await vi.waitFor(() => { h.render(); expect(release).toBeDefined(); });
-    let page = h.render();
-    for (const text of ["已连接", "Team space", "Bug", "放弃修改"]) expect(page).toContain(text);
+    const page = h.render();
+    for (const text of ["已连接", "Team space", "Bug", "有未保存的修改"]) expect(page).toContain(text);
     expect(page).not.toContain("正在验证");
-    expect(h.switches.find(item => item.label === "Bug")!.value).toBe(true);
-    h.switches.find(item => item.label === "Team space")!.onValueChange(true);
-    await vi.waitFor(() => expect(h.calls).toContainEqual({ name: "workspace.enable", input: { connectionKey: "current", workspaceId: "ws", enabled: true } }));
-    await vi.waitFor(() => { h.render(); expect(h.switches.find(item => item.label === "Team space")!.value).toBe(true); });
-    page = h.render();
-    expect(page).toContain("已启用");
-    expect(page).toContain("Bug");
+    expect(h.checkbox("Bug").accessibilityState).toEqual({ checked: true });
     release!();
   } finally { h.dispose(); }
 });
@@ -736,9 +730,7 @@ it("refreshing or toggling a Multica workspace keeps the connection, rules and a
 it("does not report an empty Multica workspace list before the list has been read", async () => {
   // The connection reads ready before the workspace list arrives, so an empty list is first a pending read.
   let release: ((value: unknown) => void) | undefined;
-  const h = await settingsHarness((name, input) => name === "workspace.list" ? new Promise(resolve => {
-    release = resolve;
-  }) : name === "connection.status" ? readyStatus : empty(name, input));
+  const h = await settingsHarness((name, input) => name === "workspace.list" ? new Promise(resolve => { release = resolve; }) : name === "connection.status" ? readyStatus : empty(name, input));
   try {
     await vi.waitFor(() => { h.render("settings"); expect(release).toBeDefined(); });
     let page = h.render("settings");
@@ -752,40 +744,377 @@ it("does not report an empty Multica workspace list before the list has been rea
   } finally { h.dispose(); }
 });
 
-it("the filter editor selects concrete default statuses, collapses catalogs and saves the visible rule", async () => {
+const filterCatalog = {
+  statuses: [
+    { key: "backlog", name: "Backlog", category: "unstarted" }, { key: "todo", name: "Todo", category: "unstarted" },
+    { key: "progress", name: "In Progress", category: "started" }, { key: "review", name: "In Review", category: "started" }, { key: "blocked", name: "Blocked", category: "started" },
+    { key: "done", name: "Done", category: "done" }, { key: "cancelled", name: "Cancelled", category: "closed" },
+  ],
+  assignees: [{ id: "other", name: "Other member", type: "member" }, { id: "builder", name: "拉车的🫏", type: "agent" }, { id: "me", name: "Lin", type: "member" }, { id: "team", name: "Front end", type: "squad" }],
+  projects: [{ id: "plugin", name: "插件生态" }], labels: [{ id: "bug", name: "Bug" }],
+};
+
+async function filterHarness({ rule = defaultRule, catalog = filterCatalog, enabled = true, answer = () => undefined }: {
+  rule?: TaskRule; catalog?: typeof filterCatalog; enabled?: boolean; answer?: Answer;
+} = {}) {
+  const workspace = { id: "ws", name: "Team space", enabled, rule, importedCount: enabled ? 2 : 0 };
+  return settingsHarness((name, input) => {
+    const result = answer(name, input);
+    if (result !== undefined) return result;
+    if (name === "connection.status") return readyStatus;
+    if (name === "workspace.list") return { connectionKey: "current", workspaces: [workspace] };
+    if (name === "workspace.catalog") return catalog;
+    if (name === "workspace.preview") return { total: 2, imported: workspace.importedCount, entering: 2 - workspace.importedCount, leaving: [] };
+    if (name === "workspace.rule") { workspace.rule = (input as { rule: TaskRule }).rule; return { status: "ready" }; }
+    if (name === "workspace.enable") { workspace.enabled = (input as { enabled: boolean }).enabled; return { status: "ready" }; }
+    return empty(name, input);
+  });
+}
+
+it.each([
+  { name: "whole categories", clicks: [], expected: { statusCategories: ["unstarted", "started"], statuses: [] } },
+  { name: "partial statuses plus the other whole category", clicks: ["In Review"], expected: { statusCategories: [], statuses: ["backlog", "todo", "progress", "blocked"] } },
+  { name: "a partial selection promoted to a whole category", clicks: ["进行中", "In Progress", "In Review", "Blocked"], expected: { statusCategories: ["unstarted", "started"], statuses: [] } },
+  { name: "unlimited statuses", clicks: ["未开始", "进行中"], expected: { statusCategories: [], statuses: [] } },
+])("the status editor saves $name", async ({ clicks, expected }) => {
+  const h = await filterHarness();
+  try {
+    await vi.waitFor(() => expect(h.render()).toContain("Team space"));
+    h.action("编辑筛选").onPress();
+    await vi.waitFor(() => expect(h.render()).toContain("In Review"));
+    expect(h.selects).toEqual([]);
+    for (const label of clicks) { h.press(label); h.render(); }
+    if (expected.statuses.length) {
+      expect(h.checkbox("进行中").accessibilityState).toEqual({ checked: "mixed" });
+      expect(h.render()).toContain("只选了部分状态，规则将按具体状态保存；今后新增的状态不会自动纳入。");
+    } else expect(h.render()).toContain("按类别 · 今后新增的状态自动纳入");
+    expect(h.modalContents[0].scrollable).toBe(false);
+    await h.save();
+    await vi.waitFor(() => expect(h.calls.filter(call => call.name === "workspace.rule")).toHaveLength(1));
+    const saved = (h.calls.find(call => call.name === "workspace.rule")!.input as { rule: TaskRule }).rule;
+    expect(h.calls.filter(call => call.name === "workspace.preview").at(-1)?.input).toEqual({ workspaceId: "ws", connectionKey: "current", rule: saved });
+    expect({ ...saved, statuses: [...saved.statuses].sort() }).toEqual({ ...defaultRule, ...expected, statuses: [...expected.statuses].sort() });
+    await vi.waitFor(() => { h.render(); expect(h.modals).toHaveLength(0); });
+  } finally { h.dispose(); }
+});
+
+it("legacy mixed rules load the intersection and keep empty catalog categories selected", async () => {
+  const h = await filterHarness({ rule: { ...defaultRule, statusCategories: ["started"], statuses: ["todo", "progress"] } });
+  try {
+    await vi.waitFor(() => expect(h.render()).toContain("Team space"));
+    h.action("编辑筛选").onPress();
+    await vi.waitFor(() => expect(h.render()).toContain("In Review"));
+    expect(h.checkbox("Todo").accessibilityState).toEqual({ checked: false });
+    expect(h.checkbox("In Progress").accessibilityState).toEqual({ checked: true });
+    expect(h.checkbox("进行中").accessibilityState).toEqual({ checked: "mixed" });
+    expect(h.render()).not.toContain("有未保存的修改");
+    await h.save();
+    await vi.waitFor(() => expect(h.calls).toContainEqual({ name: "workspace.rule", input: { workspaceId: "ws", connectionKey: "current", rule: { ...defaultRule, statusCategories: [], statuses: ["progress"] } } }));
+  } finally { h.dispose(); }
+  const noStatuses = await filterHarness({ catalog: { ...filterCatalog, statuses: [] } });
+  try {
+    await vi.waitFor(() => expect(noStatuses.render()).toContain("Team space"));
+    noStatuses.action("编辑筛选").onPress();
+    await vi.waitFor(() => { noStatuses.render(); expect(noStatuses.modals[0]?.title).toBe("筛选条件 · Team space"); });
+    expect(noStatuses.checkbox("未开始").accessibilityState).toEqual({ checked: true });
+    expect(noStatuses.checkbox("进行中").accessibilityState).toEqual({ checked: true });
+    await noStatuses.save();
+    await vi.waitFor(() => expect(noStatuses.calls).toContainEqual({ name: "workspace.rule", input: { workspaceId: "ws", connectionKey: "current", rule: defaultRule } }));
+  } finally { noStatuses.dispose(); }
+});
+
+it("the list uses catalog names and the assignee chips group actors with the verified member first", async () => {
+  const h = await filterHarness({ rule: { ...defaultRule, assignees: [{ type: "member", id: "me" }, { type: "agent", id: "builder" }], labelIds: ["bug"] } });
+  try {
+    await vi.waitFor(() => expect(h.render()).toContain("状态 未开始、进行中 · 负责人 我、拉车的🫏 · 标签 Bug · Multica 项目 不限"));
+    h.action("编辑筛选").onPress();
+    expect(h.render()).toContain("成员");
+    const actors = h.pressables.filter(item => ["我 · Lin", "Other member", "拉车的🫏", "Front end"].includes(item.accessibilityLabel ?? ""));
+    expect(actors.map(item => item.accessibilityLabel)).toEqual(["我 · Lin", "Other member", "拉车的🫏", "Front end"]);
+    expect(actors.map(item => item.accessibilityState?.checked)).toEqual([true, false, true, false]);
+    expect(h.render()).toContain("直接分配给成员，与分配给其 Agent／Squad 是不同条件，需分别选择。");
+    expect(h.calls.filter(call => call.name === "workspace.catalog")).toHaveLength(1);
+  } finally { h.dispose(); }
+});
+
+it("search ignores case, keeps selected and missing values visible, and allows clearing each field", async () => {
   const labels = Array.from({ length: 10 }, (_, index) => ({ id: `label-${index}`, name: `Label ${index}` }));
+  const h = await filterHarness({ catalog: { ...filterCatalog, labels }, rule: { ...defaultRule, statuses: ["gone-status"], statusCategories: [], labelIds: ["label-0", "gone-label"], projectIds: ["gone-project"], assignees: [{ type: "agent", id: "gone-agent" }] } });
+  try {
+    await vi.waitFor(() => expect(h.render()).toContain("Team space"));
+    h.action("编辑筛选").onPress();
+    await vi.waitFor(() => expect(h.render()).toContain("Label 9"));
+    for (const id of ["gone-status", "gone-label", "gone-project", "gone-agent"]) {
+      const chip = h.checkbox(`${id}（已不在目录）`);
+      expect(chip.accessibilityState).toEqual({ checked: true });
+      expect(chip.style?.borderStyle).toBe("dashed");
+    }
+    h.inputs.find(item => item.accessibilityLabel === "搜索标签")!.onChangeText("lAbEl 9");
+    let page = h.render();
+    expect(page).toContain("Label 0"); expect(page).toContain("Label 9"); expect(page).toContain("gone-label（已不在目录）"); expect(page).not.toContain("Label 1");
+    h.press("gone-label（已不在目录）");
+    expect(h.render()).not.toContain("gone-label（已不在目录）");
+    h.press("清除标签");
+    page = h.render();
+    expect(h.pressables.some(item => item.accessibilityLabel === "Label 0")).toBe(false);
+    expect(h.pressables.some(item => item.accessibilityLabel === "清除标签")).toBe(false);
+    h.press("gone-status（已不在目录）"); h.render();
+    h.press("清除负责人"); h.render();
+    h.press("清除Multica 项目"); h.render();
+    await h.save();
+    await vi.waitFor(() => expect(h.calls).toContainEqual({ name: "workspace.rule", input: { workspaceId: "ws", connectionKey: "current", rule: { ...defaultRule, statusCategories: [] } } }));
+  } finally { h.dispose(); }
+});
+
+it("enabling opens the same editor and saves the rule before enabling; an enable failure retries only enable", async () => {
+  let attempts = 0;
+  const h = await filterHarness({ enabled: false, answer: name => name === "workspace.enable" ? (++attempts === 1 ? { status: "unavailable", message: "启用失败，规则已保存" } : { status: "ready" }) : undefined });
+  try {
+    await vi.waitFor(() => expect(h.render()).toContain("未启用 · 不导入任务"));
+    expect(h.switches).toEqual([]);
+    expect(h.calls.filter(call => call.name === "workspace.catalog")).toHaveLength(0);
+    h.action("启用…").onPress();
+    await vi.waitFor(() => expect(h.render()).toContain("启用并导入"));
+    expect(h.modals[0].title).toBe("启用 · Team space");
+    expect(h.render()).toContain("默认只导入“未开始”和“进行中”，其他条件不限；可以先缩小范围再导入。");
+    expect(h.calls.filter(call => call.name === "workspace.enable")).toEqual([]);
+    h.press("Bug"); h.render(); await h.save("启用并导入");
+    await vi.waitFor(() => expect(h.render()).toContain("启用失败，规则已保存"));
+    let writes = h.calls.filter(call => ["workspace.rule", "workspace.enable"].includes(call.name));
+    expect(writes.map(call => call.name)).toEqual(["workspace.rule", "workspace.enable"]);
+    expect(writes[0].input).toEqual({ workspaceId: "ws", connectionKey: "current", rule: { ...defaultRule, labelIds: ["bug"] } });
+    expect(h.render()).not.toContain("有未保存的修改");
+    await h.save("启用并导入");
+    await vi.waitFor(() => { h.render(); expect(h.modals).toHaveLength(0); });
+    writes = h.calls.filter(call => ["workspace.rule", "workspace.enable"].includes(call.name));
+    expect(writes.map(call => call.name)).toEqual(["workspace.rule", "workspace.enable", "workspace.enable"]);
+    expect(h.switches.find(item => item.label === "Team space")?.value).toBe(true);
+  } finally { h.dispose(); }
+});
+
+it("a failed rule save keeps the error in the modal and does not enable the workspace", async () => {
+  let attempts = 0;
+  const h = await filterHarness({ enabled: false, answer: name => name === "workspace.rule" && ++attempts === 1 ? { status: "unavailable", message: "无法保存规则" } : undefined });
+  try {
+    await vi.waitFor(() => expect(h.render()).toContain("Team space"));
+    h.action("启用…").onPress();
+    await vi.waitFor(() => expect(h.render()).toContain("启用并导入"));
+    await h.save("启用并导入");
+    await vi.waitFor(() => expect(h.render()).toContain("无法保存规则"));
+    expect(h.calls.filter(call => call.name === "workspace.enable")).toHaveLength(0);
+    await h.save("启用并导入");
+    await vi.waitFor(() => { h.render(); expect(h.modals).toHaveLength(0); });
+    expect(h.calls.filter(call => ["workspace.rule", "workspace.enable"].includes(call.name)).map(call => call.name)).toEqual(["workspace.rule", "workspace.rule", "workspace.enable"]);
+  } finally { h.dispose(); }
+});
+
+it("disabling needs confirmation and disables only that workspace while saving", async () => {
+  let release: ((value: unknown) => void) | undefined;
   const h = await settingsHarness((name, input) => {
     if (name === "connection.status") return readyStatus;
-    if (name === "workspace.list") return { connectionKey: "current", workspaces: [{ id: "ws", name: "Team space", enabled: true, rule: defaultRule }] };
-    if (name === "workspace.catalog")
-      return { assignees: [], statuses: [{ key: "todo", name: "Todo", category: "unstarted" }, { key: "doing", name: "Doing", category: "started" }, { key: "done", name: "Done", category: "done" }, { key: "closed", name: "Closed", category: "closed" }], projects: [], labels };
-    if (name === "workspace.rule") return { status: "ready" };
+    if (name === "workspace.list") return { connectionKey: "current", workspaces: [
+      { id: "off", name: "Off space", enabled: false, rule: defaultRule, importedCount: 0 }, { id: "ws", name: "Team space", enabled: true, rule: defaultRule, importedCount: 12 }, { id: "second", name: "Second space", enabled: true, rule: defaultRule, importedCount: 5 },
+    ] };
+    if (name === "workspace.catalog") return filterCatalog;
+    if (name === "workspace.enable") return new Promise(resolve => { release = resolve; });
     return empty(name, input);
   });
   try {
-    await vi.waitFor(() => expect(h.render()).toContain("Team space"));
-    h.action("配置筛选条件").onPress();
-    await vi.waitFor(() => expect(h.render()).toContain("Label 0"));
+    await vi.waitFor(() => expect(h.render()).toContain("Second space"));
     let page = h.render();
-    expect(page).toContain("Label 7");
-    expect(page).not.toContain("Label 8");
-    expect(page).toContain("另有 2 项未显示");
-    h.action("显示全部").onPress();
-    expect(h.render()).toContain("Label 9");
-    expect(h.selects.some(select => select.label === "筛选方式")).toBe(false);
-    expect(page).not.toContain("另有状态类别限制");
-    expect(h.switches.find(item => item.label === "Todo · 未开始")!.value).toBe(true);
-    expect(h.switches.find(item => item.label === "Doing · 进行中")!.value).toBe(true);
-    expect(h.switches.find(item => item.label === "Done · 已完成")!.value).toBe(false);
-    expect(h.switches.find(item => item.label === "Closed · 已关闭")!.value).toBe(false);
-    expect(page).toContain("不选表示不限");
-    h.switches.find(item => item.label === "Doing · 进行中")!.onValueChange(false);
+    expect(page.indexOf("Team space")).toBeLessThan(page.indexOf("Off space"));
+    h.switches.find(item => item.label === "Team space")!.onValueChange(false);
+    page = h.render();
+    expect(page).toContain("停用 Team space？");
+    for (const text of ["已导入 12 项任务", "此 Multica 工作区已导入的 12 项任务会归档", "空的 Paseo 项目会移除", "评论、执行记录、讨论身份和人工隐藏都会保留", "重新启用后恢复", "不会取消远端 Run"]) expect(page).toContain(text);
+    expect(h.calls.filter(call => call.name === "workspace.enable")).toHaveLength(0);
+    h.press("取消"); h.render();
+    expect(h.modals).toHaveLength(0);
+    h.switches.find(item => item.label === "Team space")!.onValueChange(false); h.render(); h.press("停用");
     h.render();
-    h.action("保存筛选规则").onPress();
-    await vi.waitFor(() => expect(h.calls).toContainEqual({ name: "workspace.rule", input: { workspaceId: "ws", connectionKey: "current", rule: { ...defaultRule, statusCategories: [], statuses: ["todo"] } } }));
-    await vi.waitFor(() => expect(h.render()).toContain("具体状态 1 项 · 其他条件不限"));
-    expect(h.render()).not.toContain("Label 0");
+    expect(h.switches.find(item => item.label === "Team space")?.disabled).toBe(true);
+    expect(h.switches.find(item => item.label === "Second space")?.disabled).toBe(false);
+    expect(h.action("启用…").disabled).toBe(false);
+    expect(h.calls).toContainEqual({ name: "workspace.enable", input: { connectionKey: "current", workspaceId: "ws", enabled: false } });
+    release!({ status: "unavailable", message: "停用失败" });
+    await vi.waitFor(() => expect(h.render()).toContain("停用失败"));
+    h.press("停用"); release!({ status: "ready" });
+    await vi.waitFor(() => { h.render(); expect(h.modals).toHaveLength(0); });
   } finally { h.dispose(); }
+});
+
+it("cancel and the modal close button confirm dirty edits inline, and reopening discards them", async () => {
+  const h = await filterHarness();
+  try {
+    await vi.waitFor(() => expect(h.render()).toContain("Team space"));
+    h.action("编辑筛选").onPress();
+    await vi.waitFor(() => expect(h.render()).toContain("In Review"));
+    h.press("Bug"); h.render(); h.press("取消");
+    expect(h.render()).toContain("放弃未保存的修改？");
+    expect(h.modals).toHaveLength(1);
+    h.press("继续编辑");
+    expect(h.render()).toContain("有未保存的修改");
+    h.modals[0].onOpenChange(false);
+    expect(h.render()).toContain("放弃未保存的修改？");
+    h.press("放弃修改"); h.render();
+    expect(h.modals).toHaveLength(0);
+    h.action("编辑筛选").onPress(); h.render();
+    expect(h.checkbox("Bug").accessibilityState).toEqual({ checked: false });
+    expect(h.render()).not.toContain("有未保存的修改");
+    h.press("取消"); h.render();
+    expect(h.modals).toHaveLength(0);
+    expect(h.calls.filter(call => call.name === "workspace.rule")).toHaveLength(0);
+  } finally { h.dispose(); }
+});
+
+it("ten-second polling and rule saves reuse the catalog; host changes and profile changes invalidate it", async () => {
+  const h = await filterHarness();
+  vi.useFakeTimers();
+  try {
+    await vi.waitFor(() => expect(h.render("settings")).toContain("状态 未开始、进行中"));
+    expect(h.calls.filter(call => call.name === "workspace.catalog")).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(20_000); h.render("settings");
+    expect(h.calls.filter(call => call.name === "workspace.list")).toHaveLength(3);
+    expect(h.calls.filter(call => call.name === "workspace.catalog")).toHaveLength(1);
+    h.action("编辑筛选").onPress(); h.render("settings");
+    expect(h.calls.filter(call => call.name === "workspace.catalog")).toHaveLength(1);
+    h.press("Bug"); h.render("settings"); await h.save("保存", "settings");
+    await vi.waitFor(() => { h.render("settings"); expect(h.modals).toHaveLength(0); });
+    expect(h.calls.filter(call => call.name === "workspace.catalog")).toHaveLength(1);
+    h.action("编辑筛选").onPress(); h.render("settings");
+    expect(h.checkbox("Bug").accessibilityState).toEqual({ checked: true });
+    expect(h.calls.filter(call => call.name === "workspace.catalog")).toHaveLength(1);
+    h.press("取消"); h.render("settings");
+    const nextHost = { host: { id: "another-host", label: "Another host" } };
+    await vi.waitFor(() => expect(h.render("settings", nextHost)).toContain("状态 未开始、进行中"));
+    const hostReads = h.calls.filter(call => call.name === "workspace.catalog").length;
+    expect(hostReads).toBe(2);
+    h.setProfile("work");
+    await vi.waitFor(() => expect(h.render("settings", nextHost)).toContain("状态 未开始、进行中"));
+    expect(h.calls.filter(call => call.name === "workspace.catalog")).toHaveLength(3);
+  } finally { h.dispose(); vi.useRealTimers(); }
+});
+
+it("catalog failures fall back to counts, stay cached across polling, and can retry in the editor", async () => {
+  let fail = true;
+  const h = await filterHarness({ rule: { ...defaultRule, labelIds: ["bug"] }, answer: name => name === "workspace.catalog" && fail ? Promise.reject(new Error("offline")) : undefined });
+  vi.useFakeTimers();
+  try {
+    await vi.waitFor(() => expect(h.render()).toContain("标签 1 项"));
+    await vi.advanceTimersByTimeAsync(20_000); h.render();
+    expect(h.calls.filter(call => call.name === "workspace.catalog")).toHaveLength(1);
+    h.action("编辑筛选").onPress();
+    expect(h.render()).toContain("无法读取筛选目录");
+    fail = false; h.press("重试");
+    await vi.waitFor(() => expect(h.render()).toContain("In Review"));
+    expect(h.calls.filter(call => call.name === "workspace.catalog")).toHaveLength(2);
+  } finally { h.dispose(); vi.useRealTimers(); }
+});
+
+it("the preview debounces rule edits, shows footer counts and disables saving until the current result arrives", async () => {
+  let release!: (value: unknown) => void;
+  const h = await filterHarness({ answer: name => name === "workspace.preview" ? new Promise(resolve => { release = resolve; }) : undefined });
+  vi.useFakeTimers();
+  try {
+    await vi.waitFor(() => expect(h.render()).toContain("状态 未开始、进行中"));
+    h.action("编辑筛选").onPress();
+    expect(h.render()).toContain("正在计算匹配数…");
+    expect(h.pressables.find(item => item.accessibilityLabel === "正在计算…")?.disabled).toBe(true);
+    await vi.advanceTimersByTimeAsync(399);
+    expect(h.calls.filter(call => call.name === "workspace.preview")).toHaveLength(0);
+    h.press("Bug"); h.render();
+    await vi.advanceTimersByTimeAsync(399);
+    expect(h.calls.filter(call => call.name === "workspace.preview")).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(h.calls.filter(call => call.name === "workspace.preview")).toEqual([{ name: "workspace.preview", input: { workspaceId: "ws", connectionKey: "current", rule: { ...defaultRule, labelIds: ["bug"] } } }]);
+    expect(h.render()).toContain("正在计算匹配数…");
+    expect(h.calls.filter(call => call.name === "workspace.rule")).toHaveLength(0);
+    release({ total: 14, imported: 12, entering: 3, leaving: [{ id: "old", title: "旧任务" }] });
+    await vi.waitFor(() => expect(h.render()).toContain("将匹配 14 项任务"));
+    expect(h.render()).toContain("当前已导入 12 项：新增 3 · 移出 1 · 有未保存的修改");
+    expect(h.pressables.find(item => item.accessibilityLabel === "保存")?.disabled).toBe(false);
+  } finally { h.dispose(); vi.useRealTimers(); }
+});
+
+it.each(["success", "failure"])("an obsolete preview %s cannot replace the current rule's result", async outcome => {
+  const pending: Array<{ resolve(value: unknown): void; reject(error: Error): void }> = [];
+  const h = await filterHarness({ answer: name => name === "workspace.preview" ? new Promise((resolve, reject) => pending.push({ resolve, reject })) : undefined });
+  vi.useFakeTimers();
+  try {
+    await vi.waitFor(() => expect(h.render()).toContain("状态 未开始、进行中"));
+    h.action("编辑筛选").onPress(); h.render();
+    await vi.advanceTimersByTimeAsync(400);
+    h.press("Bug"); h.render();
+    await vi.advanceTimersByTimeAsync(400);
+    expect(pending).toHaveLength(2);
+    pending[1].resolve({ total: 7, imported: 2, entering: 5, leaving: [] });
+    await vi.waitFor(() => expect(h.render()).toContain("将匹配 7 项任务"));
+    if (outcome === "success") pending[0].resolve({ total: 99, imported: 99, entering: 0, leaving: [{ id: "stale", title: "过期任务" }] });
+    else pending[0].reject(new Error("stale error"));
+    await vi.advanceTimersByTimeAsync(0);
+    let page = h.render();
+    expect(page).toContain("将匹配 7 项任务");
+    expect(page).not.toContain("将匹配 99"); expect(page).not.toContain("无法预览匹配数");
+    h.press("Bug"); page = h.render();
+    expect(page).toContain("正在计算匹配数…");
+    expect(page).not.toContain("将匹配 7 项任务");
+    expect(h.pressables.find(item => item.accessibilityLabel === "正在计算…")?.disabled).toBe(true);
+  } finally { h.dispose(); vi.useRealTimers(); }
+});
+
+it("leaving tasks require an inline confirmation; returning and editing do not save, and the list shows at most ten titles", async () => {
+  const leaving = Array.from({ length: 12 }, (_, index) => ({ id: `old-${index}`, title: `将移出的任务 ${index + 1}。` }));
+  const h = await filterHarness({ answer: name => name === "workspace.preview" ? { total: 14, imported: 23, entering: 3, leaving } : undefined });
+  vi.useFakeTimers();
+  try {
+    await vi.waitFor(() => expect(h.render()).toContain("状态 未开始、进行中"));
+    h.action("编辑筛选").onPress();
+    await h.save();
+    let page = h.render();
+    expect(page).toContain("保存后 12 项任务将移出");
+    expect(page).toContain("它们不再符合新条件，对应的 Paseo 工作区会自动归档：");
+    expect(page).toContain("将移出的任务 10。"); expect(page).not.toContain("将移出的任务 11。"); expect(page).toContain("等 12 项");
+    expect(page).toContain("评论、执行记录和讨论身份都会保留，再次符合条件时恢复原工作区。不会取消远端 Run。");
+    expect(h.modals).toHaveLength(1);
+    expect(h.calls.filter(call => call.name === "workspace.rule")).toHaveLength(0);
+    h.press("返回修改");
+    expect(h.render()).not.toContain("保存后 12 项任务将移出");
+    expect(h.calls.filter(call => call.name === "workspace.rule")).toHaveLength(0);
+    await h.save(); h.render(); h.press("Bug");
+    page = h.render();
+    expect(page).not.toContain("保存后 12 项任务将移出");
+    expect(page).toContain("正在计算匹配数…");
+    await h.save(); h.render(); h.press("保存并归档 12 项");
+    await vi.waitFor(() => { h.render(); expect(h.modals).toHaveLength(0); });
+    expect(h.calls.filter(call => call.name === "workspace.rule")).toEqual([{ name: "workspace.rule", input: { workspaceId: "ws", connectionKey: "current", rule: { ...defaultRule, labelIds: ["bug"] } } }]);
+  } finally { h.dispose(); vi.useRealTimers(); }
+});
+
+it("a failed preview reports the failure and still allows saving", async () => {
+  const h = await filterHarness({ answer: name => name === "workspace.preview" ? Promise.reject(new Error("offline")) : undefined });
+  vi.useFakeTimers();
+  try {
+    await vi.waitFor(() => expect(h.render()).toContain("状态 未开始、进行中"));
+    h.action("编辑筛选").onPress();
+    await vi.waitFor(() => expect(h.render()).toContain("无法预览匹配数"));
+    h.press("保存");
+    await vi.waitFor(() => { h.render(); expect(h.modals).toHaveLength(0); });
+    expect(h.calls.filter(call => call.name === "workspace.rule")).toHaveLength(1);
+  } finally { h.dispose(); vi.useRealTimers(); }
+});
+
+it.each([{ total: 30, warning: false }, { total: 31, warning: true }])("enabling $total matches shows the count and warns only above the large-import threshold", async ({ total, warning }) => {
+  const h = await filterHarness({ enabled: false, answer: name => name === "workspace.preview" ? { total, imported: 0, entering: total, leaving: [] } : undefined });
+  vi.useFakeTimers();
+  try {
+    await vi.waitFor(() => expect(h.render()).toContain("Team space"));
+    h.action("启用…").onPress();
+    await vi.waitFor(() => expect(h.render()).toContain(`启用并导入 ${total} 项`));
+    expect(h.render().includes("数量较多，可按负责人或标签缩小范围")).toBe(warning);
+    h.press(`启用并导入 ${total} 项`);
+    await vi.waitFor(() => { h.render(); expect(h.modals).toHaveLength(0); });
+    expect(h.calls.filter(call => ["workspace.rule", "workspace.enable"].includes(call.name)).map(call => call.name)).toEqual(["workspace.rule", "workspace.enable"]);
+  } finally { h.dispose(); vi.useRealTimers(); }
 });
 
 it("a lost CLI login shows the recovery command with a copy action instead of an empty connection", async () => {
@@ -980,15 +1309,15 @@ it("the compiled failed-answer card reports its error and explains conditions wi
 });
 
 it.each([
-  { categories: ["done"], statuses: [], selected: ["done"] },
-  { categories: [], statuses: ["done"], selected: ["done"] },
-  { categories: ["unstarted", "started"], statuses: ["todo", "done"], selected: ["todo"] },
-  { categories: [], statuses: [], selected: [] },
-])("saves concrete statuses from an existing rule: %j", async example => {
-  const rule = { ...defaultRule, statusCategories: example.categories, statuses: example.statuses };
+  { categories: ["done"], statuses: [], selected: ["done"], whole: ["done"] },
+  { categories: [], statuses: ["done"], selected: ["done"], whole: ["done"] },
+  { categories: ["unstarted", "started"], statuses: ["todo", "done"], selected: ["todo"], whole: ["unstarted"] },
+  { categories: [], statuses: [], selected: [], whole: [] },
+])("normalizes category and concrete selections from an existing rule: %j", async example => {
+  const rule = { ...defaultRule, statusCategories: example.categories as TaskRule["statusCategories"], statuses: example.statuses };
   const h = await settingsHarness((name, input) => {
     if (name === "connection.status") return readyStatus;
-    if (name === "workspace.list") return { connectionKey: "current", workspaces: [{ id: "ws", name: "Team space", enabled: true, rule }] };
+    if (name === "workspace.list") return { connectionKey: "current", workspaces: [{ id: "ws", name: "Team space", enabled: true, rule, importedCount: 0 }] };
     if (name === "workspace.catalog")
       return { assignees: [], statuses: [{ key: "todo", name: "Todo", category: "unstarted" }, { key: "doing", name: "Doing", category: "started" }, { key: "done", name: "Done", category: "done" }], projects: [], labels: [] };
     if (name === "workspace.rule") return { status: "ready" };
@@ -996,11 +1325,11 @@ it.each([
   });
   try {
     await vi.waitFor(() => expect(h.render()).toContain("Team space"));
-    h.action("配置筛选条件").onPress();
-    await vi.waitFor(() => expect(h.render()).toContain("Todo · 未开始"));
-    const choices = h.switches.filter(item => item.label.includes(" · "));
-    expect(choices.filter(item => item.value).map(item => ({ "Todo · 未开始": "todo", "Doing · 进行中": "doing", "Done · 已完成": "done" })[item.label])).toEqual(example.selected);
-    h.action("保存筛选规则").onPress();
-    await vi.waitFor(() => expect(h.calls).toContainEqual({ name: "workspace.rule", input: { workspaceId: "ws", connectionKey: "current", rule: { ...rule, statusCategories: [], statuses: example.selected } } }));
+    h.action("编辑筛选").onPress();
+    await vi.waitFor(() => expect(h.render()).toContain("Todo"));
+    for (const [key, label] of [["todo", "Todo"], ["doing", "Doing"], ["done", "Done"]])
+      expect(h.checkbox(label).accessibilityState?.checked).toBe(example.selected.includes(key));
+    await h.save();
+    await vi.waitFor(() => expect(h.calls).toContainEqual({ name: "workspace.rule", input: { workspaceId: "ws", connectionKey: "current", rule: { ...rule, statusCategories: example.whole, statuses: [] } } }));
   } finally { h.dispose(); }
 });

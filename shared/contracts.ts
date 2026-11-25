@@ -33,6 +33,10 @@ export const taskRuleSchema = z.object({
 });
 export type TaskRule = z.output<typeof taskRuleSchema>;
 export const workspaceRule = defineRpc({ name: "workspace.rule", input: z.object({ connectionKey: z.string().optional(), workspaceId: z.string().min(1), rule: taskRuleSchema }), output: syncBootstrap.output });
+export const workspacePreview = defineRpc({ name: "workspace.preview", input: workspaceRule.input, output: z.object({
+  total: z.number().int().nonnegative(), imported: z.number().int().nonnegative(), entering: z.number().int().nonnegative(),
+  leaving: z.array(z.object({ id: z.string(), title: z.string() })),
+}) });
 const catalogItem = z.object({ id: z.string(), name: z.string() });
 export const workspaceCatalog = defineRpc({ name: "workspace.catalog", input: z.object({ connectionKey: z.string().optional(), workspaceId: z.string().min(1) }), output: z.object({
   assignees: z.array(catalogItem.extend({ type: z.enum(["member", "agent", "squad"]) })),
@@ -40,7 +44,7 @@ export const workspaceCatalog = defineRpc({ name: "workspace.catalog", input: z.
 }) });
 export const workspaceList = defineRpc({ name: "workspace.list", input: z.object({}), output: z.object({
   connectionKey: z.string(),
-  workspaces: z.array(z.object({ id: z.string(), name: z.string(), enabled: z.boolean(), rule: taskRuleSchema })),
+  workspaces: z.array(z.object({ id: z.string(), name: z.string(), enabled: z.boolean(), rule: taskRuleSchema, importedCount: z.number().int().nonnegative() })),
 }) });
 export const workspaceEnable = defineRpc({ name: "workspace.enable", input: z.object({ connectionKey: z.string().optional(), workspaceId: z.string().min(1), enabled: z.boolean() }), output: syncBootstrap.output });
 

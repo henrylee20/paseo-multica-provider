@@ -25,6 +25,14 @@ export function HeaderAction({ theme, label, icon = "RefreshCw", onPress, disabl
   </Pressable>;
 }
 
+export function RuleButton({ theme, children, onPress, disabled, tone }: { theme: Theme; children: string; onPress(): void; disabled?: boolean; tone?: "primary" | "danger" }) {
+  return <Pressable accessibilityRole="button" accessibilityLabel={children} disabled={disabled} onPress={onPress}
+    style={{ paddingHorizontal: 16, paddingVertical: 7, borderRadius: 20, borderWidth: 1, borderColor: tone ? theme.colors[tone === "danger" ? "statusDanger" : "accent"] : theme.colors.border,
+      backgroundColor: tone ? theme.colors[tone === "danger" ? "statusDanger" : "accent"] : theme.colors.surface0, opacity: disabled ? 0.5 : 1 }}>
+    <Text style={{ color: tone ? theme.colors.accentForeground : theme.colors.foreground, fontSize: 13 }}>{children}</Text>
+  </Pressable>;
+}
+
 /** A failure that belongs to a whole section rather than one row. */
 export function Notice({ theme, children }: { theme: Theme; children: ReactNode }) {
   return <Text accessibilityRole="alert" style={{ color: theme.colors.statusDanger, marginHorizontal: 4 }}>{children}</Text>;

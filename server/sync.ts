@@ -8,7 +8,7 @@ import { issueQuery } from "./filters.js";
 import { WorkspaceEvents, type WorkspaceEvent } from "./workspace-events.js";
 import { remoteFetch, type AuthenticatedConnection } from "./connection.js";
 import { archiveClosedDiscussion, ensureWorkspaceActive, findActiveWorkspace, findNativeDiscussion, projectHasActiveWorkspaces, restoreMappedDiscussion, type NativeHost } from "./native-host.js";
-import { StateStore, connectionState, issueSchema } from "./state.js";
+import { StateStore, connectionState, issueSchema, type ConnectionState } from "./state.js";
 import { hiddenAgent, restoreWorkspacePreservingHidden } from "./hiding.js";
 import { discussionKeys } from "../shared/discussion.js";
 import type { DiscussionMetadata } from "./discussion-metadata.js";
@@ -31,6 +31,10 @@ export function issueLabels(connectionKey: string, issueId: string) {
   return { [discussionKeys.connection]: connectionKey, [discussionKeys.issue]: issueId, [discussionKeys.discussion]: "main" };
 }
 function stableId(...parts: string[]) { return createHash("sha256").update(JSON.stringify(parts)).digest("hex"); }
+
+export function importedIssues(local: ConnectionState | undefined, workspaceId: string) {
+  return Object.entries(local?.issues ?? {}).filter(([, issue]) => issue.remoteWorkspaceId === workspaceId && !issue.archiveReason);
+}
 
 export async function remoteJson(connection: AuthenticatedConnection, path: string, schema: z.ZodType, workspace?: RemoteWorkspace) {
   const response = await remoteFetch(connection, path, { headers: workspace ? { "X-Workspace-Slug": workspace.slug } : {} });
@@ -78,7 +82,7 @@ export class SidebarSynchronizer {
     this.eventTimer.unref?.();
   }
   constructor(private readonly options: {
-    store: StateStore; connection: () => Promise<AuthenticatedConnection>; lifecycle: DiscussionLifecycle; metadata: DiscussionMetadata;
+    store: StateStore; connection: (notifyIdentity?: boolean) => Promise<AuthenticatedConnection>; lifecycle: DiscussionLifecycle; metadata: DiscussionMetadata;
     connectHost: () => Promise<NativeHost>; intervalMs: number; onRemoteEvent?: (event: WorkspaceEvent) => void;
     onCached?: (host: NativeHost) => Promise<void>;
     onIssue?: (connection: AuthenticatedConnection, workspace: RemoteWorkspace, issueId: string, host: NativeHost) => Promise<void>;
@@ -86,6 +90,33 @@ export class SidebarSynchronizer {
 
   async workspaces(connection: AuthenticatedConnection): Promise<RemoteWorkspace[]> {
     return await remoteJson(connection, "/api/workspaces", z.array(workspaceSchema)) as RemoteWorkspace[];
+  }
+  private async matchingIssues(connection: AuthenticatedConnection, workspace: RemoteWorkspace, rule: TaskRule) {
+    const issues: z.infer<typeof remoteIssueSchema>[] = [];
+    let offset = 0;
+    for (;;) {
+      const query = issueQuery(rule, offset);
+      const page = await remoteJson(connection, `/api/issues?${query}`, pageSchema, workspace) as z.infer<typeof pageSchema>;
+      if (page.issues.some(issue => issue.workspace_id !== workspace.id)) throw new Error("Issue belongs to a different workspace");
+      issues.push(...page.issues);
+      offset += page.issues.length;
+      if (offset >= page.total) break;
+      if (!page.issues.length) throw new Error("Incomplete issue pagination");
+    }
+    return issues;
+  }
+  async preview(workspaceId: string, rule: TaskRule, expectedConnectionKey?: string) {
+    // Preview bypasses the sync queue and identity-change projection notifications.
+    const connection = await this.options.connection(false);
+    if (expectedConnectionKey && connection.connectionKey !== expectedConnectionKey) throw new Error("Connection identity changed");
+    const workspace = (await this.workspaces(connection)).find(item => item.id === workspaceId);
+    if (!workspace) throw new Error("Multica workspace unavailable");
+    const issues = await this.matchingIssues(connection, workspace, rule);
+    const imported = importedIssues((await this.options.store.read()).connections[connection.connectionKey], workspaceId);
+    await connection.assertCurrent?.();
+    const matchingIds = new Set(issues.map(issue => issue.id)), importedIds = new Set(imported.map(([id]) => id));
+    return { total: matchingIds.size, imported: imported.length, entering: [...matchingIds].filter(id => !importedIds.has(id)).length,
+      leaving: imported.filter(([id]) => !matchingIds.has(id)).map(([id, issue]) => ({ id, title: issue.title })) };
   }
   private async assertOwningDaemon(paseo?: PaseoApi) {
     const serverId = (await (paseo ? paseo.hosts.list() : this.host!.listHosts())).self.serverId;
@@ -244,17 +275,7 @@ export class SidebarSynchronizer {
       const workspace = workspaces.find(item => item.id === workspaceId);
       if (!workspace) throw new Error("Enabled workspace snapshot unavailable");
       this.syncState.stage = "issues";
-      const issues: z.infer<typeof remoteIssueSchema>[] = [];
-      let offset = 0;
-      for (;;) {
-        const query = issueQuery(rule, offset);
-        const page = await remoteJson(connection, `/api/issues?${query}`, pageSchema, workspace) as z.infer<typeof pageSchema>;
-        if (page.issues.some(issue => issue.workspace_id !== workspaceId)) throw new Error("Issue belongs to a different workspace");
-        issues.push(...page.issues);
-        offset += page.issues.length;
-        if (offset >= page.total) break;
-        if (!page.issues.length) throw new Error("Incomplete issue pagination");
-      }
+      const issues = await this.matchingIssues(connection, workspace, rule);
       // Only the complete successful snapshot is authoritative for rule exits.
       const matchingIds = new Set(issues.map(issue => issue.id));
       for (const [issueId, mapping] of Object.entries(local?.issues ?? {})) {

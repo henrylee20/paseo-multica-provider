@@ -13,7 +13,7 @@ import { createServerContribution } from "../server/contribute.js";
 import type { LocalState } from "../server/state.js";
 import { FakeServer, resync, hiddenObjects } from "./support/fake-server.js";
 import { metadataHost } from "./support/metadata-host.js";
-import { connectionStatus } from "../shared/contracts.js";
+import { connectionStatus, taskRuleSchema, workspaceList, workspacePreview } from "../shared/contracts.js";
 import { hiddenRestore } from "../shared/hiding.js";
 
 const bootstrap = defineRpc({ name: "sync.bootstrap", input: z.object({}), output: z.object({ status: z.string() }) });
@@ -44,7 +44,7 @@ async function fixture(syncIntervalMs = 15_000, homePrefix = "multica-sidebar-")
   const scopes: Array<{ path: string; slug?: string }> = [];
   const workspaces = [{ id: "remote-workspace", name: "产品开发", slug: "product" }];
   const heldIssueReads: Array<() => void> = [];
-  const remote = { holdIssueReads: false, disconnect: false, authStatus: 200, issueStatus: 200, invalidIssuePage: false, nextPageFails: false };
+  const remote = { holdIssueReads: false, disconnect: false, authStatus: 200, issueStatus: 200, invalidIssuePage: false, nextPageFails: false, emptyNextPage: false };
   const http = createServer((request, response) => {
     requests.push(request.url!);
     scopes.push({ path: request.url!, slug: request.headers["x-workspace-slug"] as string | undefined });
@@ -59,7 +59,7 @@ async function fixture(syncIntervalMs = 15_000, homePrefix = "multica-sidebar-")
         (!values("assignee_filters").length || values("assignee_filters").includes(`${issue.assignee_type}:${issue.assignee_id}`)) &&
         (!values("project_ids").length || values("project_ids").includes(issue.project_id)) &&
         (!values("label_ids").length || issue.labels.some(label => values("label_ids").includes(label.id))));
-      const reply = () => response.end(JSON.stringify(remote.invalidIssuePage ? { issues: [] } : { issues: found.slice(Number(url.searchParams.get("offset")), Number(url.searchParams.get("offset")) + 1), total: found.length }));
+      const reply = () => response.end(JSON.stringify(remote.invalidIssuePage ? { issues: [] } : { issues: remote.emptyNextPage && Number(url.searchParams.get("offset")) > 0 ? [] : found.slice(Number(url.searchParams.get("offset")), Number(url.searchParams.get("offset")) + 1), total: found.length }));
       if (remote.holdIssueReads) heldIssueReads.push(reply); else reply();
       return;
     }
@@ -163,15 +163,16 @@ async function fixture(syncIntervalMs = 15_000, homePrefix = "multica-sidebar-")
     },
     close: async () => {},
   } as unknown as DaemonClient;
+  const connectHost = vi.fn(async () => host);
   function start() {
     const server = new FakeServer();
-    const dispose = createServerContribution({ homeDirectory: home, workingDirectory: home, environment: { PASEO_HOME: home }, connectHost: async () => host, syncIntervalMs })(server.context);
+    const dispose = createServerContribution({ homeDirectory: home, workingDirectory: home, environment: { PASEO_HOME: home }, connectHost, syncIntervalMs })(server.context);
     cleanup.push(dispose);
     return { server, dispose };
   }
   const { server, dispose } = start();
   const paseo = { hosts: { list: async () => ({ self: { serverId: "owning-daemon" } }) } } as unknown as PaseoApi;
-  return { server, requests, paseo, native, home, issues, start, dispose, host, remote, heldIssueReads, websocket, websocketRequests, signal, scopes, workspaces };
+  return { server, requests, paseo, native, home, issues, start, dispose, host, connectHost, remote, heldIssueReads, websocket, websocketRequests, signal, scopes, workspaces };
 }
 
 it("client bootstrap leaves the native sidebar empty until a workspace rule is explicitly enabled", async () => {
@@ -180,6 +181,72 @@ it("client bootstrap leaves the native sidebar empty until a workspace rule is e
   expect(await f.server.rpc(workspaces, {}, f.paseo)).toEqual({ workspaces: [{ id: "remote-workspace", name: "产品开发", enabled: false }] });
   expect(f.requests.some(path => path.startsWith("/api/issues"))).toBe(false);
   expect(f.websocketRequests).toEqual([]);
+});
+
+it("workspace preview counts all matched tasks against unarchived mappings without writing state or calling the native host", async () => {
+  const f = await fixture(60_000);
+  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await f.dispose();
+  const statePath = join(f.home, "multica-provider", "state.json");
+  const state = JSON.parse(await readFile(statePath, "utf8")) as LocalState;
+  const connectionKey = Object.keys(state.connections)[0], local = state.connections[connectionKey];
+  local.issues["issue-two"].archiveReason = "filter_exit";
+  local.issues["left-task"] = { ...local.issues["issue-one"], title: "保留的本地标题" };
+  local.issues["other-workspace"] = { ...local.issues["issue-one"], remoteWorkspaceId: "other" };
+  local.issues["archived-task"] = { ...local.issues["issue-one"], archiveReason: "inaccessible" };
+  // Manual hiding and an unfinished native creation do not add an archiveReason.
+  local.issues["left-task"].manualHidden = { workspace: true, discussions: ["main"] };
+  local.issues["left-task"].workspaceCreated = false;
+  await writeFile(statePath, JSON.stringify(state));
+  f.issues.push({ ...f.issues[1], id: "new-task", title: "新任务" });
+  const reader = f.start();
+  f.connectHost.mockClear();
+  const before = await readFile(statePath, "utf8"), native = JSON.stringify(f.native), requests = f.requests.length;
+  const rule = taskRuleSchema.parse({});
+  expect(await reader.server.rpc(workspacePreview, { workspaceId: "remote-workspace", connectionKey, rule }, f.paseo)).toEqual({
+    total: 3, imported: 2, entering: 2, leaving: [{ id: "left-task", title: "保留的本地标题" }],
+  });
+  expect(f.requests.slice(requests).filter(path => path.startsWith("/api/issues?"))).toHaveLength(3);
+  expect(f.scopes.filter(item => item.path.startsWith("/api/issues?")).every(item => item.slug === "product")).toBe(true);
+  expect(await reader.server.rpc(workspacePreview, { workspaceId: "remote-workspace", connectionKey, rule: { ...rule, labelIds: ["blue"] } }, f.paseo)).toEqual({
+    total: 2, imported: 2, entering: 2, leaving: [{ id: "issue-one", title: "PRD-1 实现登录" }, { id: "left-task", title: "保留的本地标题" }],
+  });
+  expect(await readFile(statePath, "utf8")).toBe(before);
+  expect(JSON.stringify(f.native)).toBe(native);
+  expect(f.connectHost).not.toHaveBeenCalled();
+  expect((await reader.server.rpc(workspaceList, {}, f.paseo)).workspaces[0]).toMatchObject({ id: "remote-workspace", importedCount: 2 });
+});
+
+it("workspace preview rejects an old connection or missing workspace and preserves pagination and workspace guards", async () => {
+  const f = await fixture();
+  const input = { workspaceId: "remote-workspace", rule: taskRuleSchema.parse({}) };
+  await expect(f.server.rpc(workspacePreview, { ...input, connectionKey: "old-connection" }, f.paseo)).rejects.toThrow("Connection identity changed");
+  await expect(f.server.rpc(workspacePreview, { ...input, workspaceId: "missing" }, f.paseo)).rejects.toThrow("Multica workspace unavailable");
+  expect(f.requests.filter(path => path.startsWith("/api/issues?"))).toHaveLength(0);
+  f.issues[0].workspace_id = "other";
+  await expect(f.server.rpc(workspacePreview, input, f.paseo)).rejects.toThrow("Issue belongs to a different workspace");
+  f.issues[0].workspace_id = "remote-workspace";
+  f.remote.emptyNextPage = true;
+  await expect(f.server.rpc(workspacePreview, input, f.paseo)).rejects.toThrow("Incomplete issue pagination");
+  f.remote.emptyNextPage = false;
+  f.remote.nextPageFails = true;
+  await expect(f.server.rpc(workspacePreview, input, f.paseo)).rejects.toThrow("HTTP 503");
+  expect(f.connectHost).not.toHaveBeenCalled();
+  await expect(stat(join(f.home, "multica-provider", "state.json"))).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+it("workspace preview does not wait behind a blocked native sync", async () => {
+  const f = await fixture();
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const rename = f.host.renameProject.bind(f.host);
+  const held = vi.spyOn(f.host, "renameProject").mockImplementation(async (...args) => { await gate; return rename(...args); });
+  const syncing = f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  try {
+    await vi.waitFor(() => expect(held).toHaveBeenCalled());
+    expect(await f.server.rpc(workspacePreview, { workspaceId: "remote-workspace", rule: taskRuleSchema.parse({}) }, f.paseo)).toEqual({ total: 2, imported: 0, entering: 2, leaving: [] });
+    expect(f.native.workspaces).toHaveLength(0);
+  } finally { release(); await syncing; }
 });
 
 it("client bootstrap copies each discussion's task from agent labels into metadata for the composer's agent picker", async () => {

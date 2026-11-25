@@ -9,7 +9,7 @@
 - Run 保留首次唯一归属，评论保留原生消息并追加更正；主讨论发送创建新 Thread，保存评论不保证 Run 启动。
 - 保留空 Project 删除及重建迁移、人工隐藏与自动归档区分、隐藏投影关闭保护；完整理由和真实宿主故障见 ADR 0002。
 - 保留时间线完整回扫和纳秒级归属仲裁；Paseo 0.17.4 的普通消息去重不跨 provider 会话，关联数组顺序也不等于时间顺序，见 ADR 0005／0003。
-- 界面只保留设置页及 composer 提及选择器。状态只按具体状态多选；取消保证 A／B／C 后，发送失败和停止失败直接显示原生错误，归档历史由宿主提供，详见规格。
+- 界面只保留设置页及 composer 提及选择器。状态按整类或具体状态在同一弹窗编辑器中选择，并由只读 `workspace.preview` 预览匹配与移出项；取消保证 A／B／C 后，发送失败和停止失败直接显示原生错误，归档历史由宿主提供，详见规格。
 
 ## 已核查的约束
 
@@ -17,7 +17,7 @@
 - Paseo v0.15.4（`1c00b365c9e0b74c1580eba33d905d693125ae21`）：provider 契约不提供原生 project/workspace 的枚举与创建；需要额外同步这些记录。现有交互 workspace/agent 要求 daemon 上存在实际目录，非 Git 目录也可使用。[Provider 契约](https://github.com/getpaseo/paseo/blob/1c00b365c9e0b74c1580eba33d905d693125ae21/packages/plugin/src/server/provider.ts#L29)、[Workspace source](https://github.com/getpaseo/paseo/blob/1c00b365c9e0b74c1580eba33d905d693125ae21/packages/protocol/src/messages.ts#L2715)。
 - Multica（`33215cec572fd2a9859c702311dfb23b80bc8be5`）：API 的 AgentTask/task_id 表示一次运行；一次运行能合并不同 Thread 的评论，也可能没有触发评论。[运行字段](https://github.com/multica-ai/multica/blob/33215cec572fd2a9859c702311dfb23b80bc8be5/packages/core/types/agent.ts#L316)、[跨 Thread 合并](https://github.com/multica-ai/multica/blob/33215cec572fd2a9859c702311dfb23b80bc8be5/server/internal/handler/agent.go#L807)。
 - Multica 评论包括成员、agent 和 system 作者；执行消息包括 text、thinking、tool_use、tool_result、error。系统记录与运行文本的呈现不能仅凭“其他人评论”规则推断。[评论字段](https://github.com/multica-ai/multica/blob/33215cec572fd2a9859c702311dfb23b80bc8be5/packages/core/types/comment.ts#L1)、[执行消息](https://github.com/multica-ai/multica/blob/33215cec572fd2a9859c702311dfb23b80bc8be5/packages/core/types/events.ts#L364)。
-- Multica 正常 Issue 列表支持所选筛选字段并分页返回；`open_only=true` 走旧查询路径，会忽略标签等部分筛选。使用正常列表的具体状态筛选（旧类别字段仅为读取已有规则保留），而不能把 `open_only` 当作同等替代。[列表分支](https://github.com/multica-ai/multica/blob/33215cec572fd2a9859c702311dfb23b80bc8be5/server/internal/handler/issue.go#L1459)。
+- Multica 正常 Issue 列表支持所选筛选字段并分页返回；`open_only=true` 走旧查询路径，会忽略标签等部分筛选。使用正常列表的状态类别或具体状态筛选，而不能把 `open_only` 当作同等替代。[列表分支](https://github.com/multica-ai/multica/blob/33215cec572fd2a9859c702311dfb23b80bc8be5/server/internal/handler/issue.go#L1459)。
 - Multica agent mention 使用带身份的 Markdown 链接，而非裸 `@名称`；回复根评论保留 Thread，但不保证产生执行，成功保存评论与 agent 触发结果需要分别表达。[mention 解析](https://github.com/multica-ai/multica/blob/33215cec572fd2a9859c702311dfb23b80bc8be5/server/internal/util/mention.go#L19)、[评论路由](https://github.com/multica-ai/multica/blob/33215cec572fd2a9859c702311dfb23b80bc8be5/server/internal/handler/comment.go#L2723)。
 - Paseo 原生停止与运行中关闭 root-agent tab 都发送无原因字段的 `session.interrupt`，provider 无法区分；运行中刷新/替换/回退也可能要求先中断。接受中断却不停止远端，会让 Paseo 强制结算为 canceled，不能用假成功应答实现。当前实现选择按讨论快照逐项取消，部分失败返回原生错误。[调用路径](https://github.com/getpaseo/paseo/blob/1c00b365c9e0b74c1580eba33d905d693125ae21/packages/server/src/server/agent/lifecycle-command.ts#L96)、[拒绝与结算](https://github.com/getpaseo/paseo/blob/1c00b365c9e0b74c1580eba33d905d693125ae21/packages/server/src/server/agent/agent-manager.ts#L3351)。
 - workspace 归档直接关闭各 agent 的会话，不先发上述中断；空闲清理及 daemon 关闭也有 `session.close` 路径。单纯 close 必须仅释放本地资源，自动筛选归档不能逐个调用会先中断的 root-tab 归档入口。[workspace 归档](https://github.com/getpaseo/paseo/blob/1c00b365c9e0b74c1580eba33d905d693125ae21/packages/server/src/server/workspace-archive-service.ts#L517)。
