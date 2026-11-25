@@ -102,7 +102,7 @@ async function fixture() {
   let provider: ProviderConnection | undefined;
   async function connect() {
     if (provider) return provider;
-    provider = await server.providers.get("multica")!.connect({ versions: [1], capabilities: ["session.persistence", "timeline.plugin", "permission"] });
+    provider = await server.providers.get("multica")!.connect({ versions: [1], capabilities: ["session.subsession", "session.persistence", "timeline.plugin", "permission"] });
     provider.onEvent(event => {
       events.push(event);
       if (event.type !== "timeline.item") return;
@@ -361,8 +361,8 @@ it("places a generated root card in its new Thread while its unanchored Run stay
   f.documents.set("generated-file", card); await f.sync();
   const generated = f.agents.find(agent => agent.labels["multica.discussion"] === "generated")!;
   expect(f.rows.get(generated.id)).toContainEqual(expect.objectContaining({ type: "plugin", kind: "askuser", data: expect.objectContaining({ rootId: "generated", commentId: "generated" }) }));
-  expect(f.rows.get(f.agents[0].id)).toContainEqual(expect.objectContaining({ type: "plugin", kind: "run-summary", id: "multica:run:unanchored" }));
-  expect(f.rows.get(generated.id)?.some(row => row.type === "plugin" && row.kind === "run-summary")).toBe(false);
+  expect(f.rows.get(f.agents[0].id)).toContainEqual(expect.objectContaining({ type: "tool_call", id: "multica:run-marker:unanchored", status: "completed" }));
+  expect(f.rows.get(generated.id)?.some(row => row.type === "tool_call" && row.detail.type === "sub_agent")).toBe(false);
 });
 
 it("keeps a prior connection's cached card read-only after the CLI resolves another account", async () => {

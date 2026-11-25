@@ -22,6 +22,7 @@ export const issueSchema = z.object({
   askuserCards: z.record(z.string(), storedAskuserCardSchema).optional(),
   commentInputs: z.record(z.string(), z.object({ commentId: z.string(), rootId: z.string() })).default({}),
   commentSourceTaskIds: z.record(z.string(), z.string()).default({}),
+  commentAuthors: z.record(z.string(), z.object({ id: z.string(), type: z.enum(["member", "agent", "system"]) })).default({}),
   commentCreatedAt: z.record(z.string(), z.string()).default({}),
   commentRoots: z.record(z.string(), z.string()).default({}),
   unresolvedCommentIds: z.array(z.string()).default([]),

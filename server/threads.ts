@@ -140,6 +140,7 @@ export class ThreadSynchronizer {
       issue.systemRootIds = [...comments.values()].filter(comment => !comment.parent_id && (comment.type !== "comment" || comment.author_type === "system")).map(comment => comment.id);
       for (const comment of comments.values()) {
         const rootId = roots.get(comment.id);
+        issue.commentAuthors[comment.id] = { id: comment.author_id, type: comment.author_type };
         if (comment.created_at) issue.commentCreatedAt[comment.id] = comment.created_at;
         if (comment.source_task_id) issue.commentSourceTaskIds[comment.id] = comment.source_task_id;
         if (rootId) issue.commentRoots[comment.id] = issue.systemRootIds.includes(rootId) ? "main" : rootId;

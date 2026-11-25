@@ -92,7 +92,7 @@ async function fixture(options: { askuser?: boolean; empty?: boolean } = {}) {
   let server = new FakeServer();
   const connect = async () => {
     if (!provider) {
-      provider = await server.providers.get("multica")!.connect({ versions: [1], capabilities: ["session.persistence", "prompt.message", "prompt.steer", "timeline.plugin"] });
+      provider = await server.providers.get("multica")!.connect({ versions: [1], capabilities: ["session.subsession", "session.persistence", "prompt.message", "prompt.steer", "timeline.plugin"] });
       provider.onEvent(event => {
         events.push(event);
       });

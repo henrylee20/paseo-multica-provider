@@ -7,7 +7,6 @@ import { afterEach, expect, it } from "vitest";
 import type { PaseoApi } from "@getpaseo/client";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { ProviderConnection, ProviderEvent, ProviderTimelineItem } from "@getpaseo/plugin/server/provider";
-import { runObserve, runOpen, runRead } from "../shared/runs.js";
 import { workspaceEnable } from "../shared/contracts.js";
 import { createServerContribution } from "../server/contribute.js";
 
@@ -115,14 +114,14 @@ async function fixture(initialRuns: Run[] = []) {
   let provider: ProviderConnection | undefined;
   async function connect() {
     if (provider) return provider;
-    provider = await server.providers.get("multica")!.connect({ versions: [1], capabilities: ["session.persistence", "session.list"] });
+    provider = await server.providers.get("multica")!.connect({ versions: [1], capabilities: ["session.subsession", "session.persistence", "session.list"] });
     provider.onEvent(event => {
       providerEvents.push(event);
       if (event.type !== "timeline.item") return;
       const rows = timelines.get(event.sessionId) ?? [];
       const existing = rows.findIndex(row => row.id === event.item.id);
       if (existing >= 0) {
-        if (event.item.type !== "plugin" || event.item.kind !== "run-summary") throw new Error(`Duplicate native row ${event.item.id}`);
+        if (event.item.type !== "plugin") throw new Error(`Duplicate native row ${event.item.id}`);
         rows[existing] = event.item;
       } else rows.push(event.item); timelines.set(event.sessionId, rows);
     });
@@ -220,10 +219,8 @@ it("reads actual terminal race outcomes without tracking cleanup evidence", asyn
   const thread = f.native.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
   await (await f.connect()).send({ type: "session.interrupt", requestId: "stop", sessionId: thread.id });
   expect(f.providerEvents).toContainEqual({ type: "request.completed", requestId: "stop" });
-  const summaries = f.timelines.get(thread.id)!.filter(row => row.type === "plugin" && row.kind === "run-summary");
-  expect(summaries.map(row => row.type === "plugin" ? row.data : null)).toEqual(expect.arrayContaining([
-    expect.objectContaining({ runId: "finished", status: "completed" }), expect.objectContaining({ runId: "failed", status: "failed" }),
-  ]));
+  expect(f.providerEvents).toContainEqual(expect.objectContaining({ type: "session.turn", sessionId: `${thread.id}:run:finished`, state: "completed" }));
+  expect(f.providerEvents).toContainEqual(expect.objectContaining({ type: "session.turn", sessionId: `${thread.id}:run:failed`, state: "failed" }));
 });
 
 it("keeps available failure metadata from a per-Run Stop receipt when execution messages are unavailable", async () => {
@@ -232,12 +229,9 @@ it("keeps available failure metadata from a per-Run Stop receipt when execution 
   f.cancel(async () => ({ body: { ...f.runs[0], status: "failed", ...metadata } }));
   const thread = f.native.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
   await (await f.connect()).send({ type: "session.interrupt", requestId: "failed-receipt", sessionId: thread.id });
-  const address = { ...JSON.parse(thread.handle.slice(7)).data, runId: "failed-during-stop" };
-  const opened = await f.server.rpc(runOpen, address, f.paseo);
-  expect(opened).toMatchObject({ status: "cached", metadataRevision: expect.any(String) });
-  const page = await f.server.rpc(runRead, { kind: "metadata", ...address, revision: opened.metadataRevision!, offset: 0 }, f.paseo);
-  expect(JSON.parse(page.text)).toEqual(metadata);
-  expect(f.providerEvents.some(event => event.type === "timeline.item" && event.item.type === "assistant_message")).toBe(false);
+  const rows = f.timelines.get(`${thread.id}:run:failed-during-stop`)!;
+  expect(rows).toContainEqual(expect.objectContaining({ type: "error", message: "任务错误：Runtime failed before streaming" }));
+  expect(rows).toContainEqual(expect.objectContaining({ type: "notification", message: "远端目录：/remote/original" }));
 });
 
 it("reports partial failures natively without expanding the cancellation set", async () => {
@@ -290,7 +284,7 @@ it("settles the interrupted native turn and keeps later runs active without expa
   const later = turns()[2];
   expect(later.turnId).not.toBe(original.turnId);
   expect(f.providerEvents.indexOf(later)).toBeLessThan(f.providerEvents.findIndex(event => event.type === "request.completed" && event.requestId === "fixed"));
-  await f.server.rpc(runObserve, JSON.parse(thread.handle.slice(7)).data, f.paseo);
+  await resync(f.server, f.paseo, "remote-workspace");
   await resync(f.server, f.paseo, "remote-workspace");
   expect(turns()).toEqual([original, { ...original, state: "completed" }, later]);
   f.runs.find(run => run.id === "later")!.status = "completed";
@@ -367,6 +361,6 @@ it("does not reactivate a cancelled run when an older in-flight snapshot finishe
   const thread = f.native.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
   await (await f.connect()).send({ type: "session.interrupt", requestId: "stop", sessionId: thread.id });
   release(); await staleSnapshot;
-  expect(f.timelines.get(thread.id)?.find(row => row.id === "multica:run:active")).toMatchObject({ data: { status: "cancelled" } });
+  expect(f.providerEvents).toContainEqual(expect.objectContaining({ type: "session.turn", sessionId: `${thread.id}:run:active`, state: "canceled" }));
   expect(f.providerEvents.filter(event => event.type === "session.turn" && event.sessionId === thread.id).map(event => event.type === "session.turn" ? event.state : null)).toEqual(["started", "completed"]);
 });

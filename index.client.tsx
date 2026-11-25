@@ -1,7 +1,5 @@
 import { AskuserCard } from "./client/askuser-card.js";
 import { askuserCardSchema } from "./shared/askuser.js";
-import { RunSummary } from "./client/run-summary.js";
-import { runSummarySchema } from "./shared/runs.js";
 import type { PluginClientContext } from "@getpaseo/plugin/client";
 import { ConnectionScreen } from "./client/connection-screen.js";
 import { syncBootstrap } from "./shared/contracts.js";
@@ -32,7 +30,6 @@ export default function contribute(client: PluginClientContext) {
   const removeDescription = client.addTimelineRenderer({ kind: taskDescriptionKind, version: taskDescriptionVersion,
     schema: taskDescriptionSchema, Component: TaskDescription });
   const removeThread = client.addTimelineRenderer({ kind: "thread", version: 1, schema: threadSummarySchema, Component: ThreadSummary });
-  const removeRun = client.addTimelineRenderer({ kind: "run-summary", version: 1, schema: runSummarySchema, Component: RunSummary });
   const removeEvent = client.addTimelineRenderer({ kind: "comment-event", version: 1, schema: commentEventSchema, Component: CommentEvent });
   const removeAskuser = client.addTimelineRenderer({ kind: "askuser", version: 1, schema: askuserCardSchema, Component: AskuserCard });
   const removeDelivery = client.addTimelineRenderer({ kind: "comment-delivery", version: 1, schema: deliverySummary, Component: DeliveryStatus });
@@ -41,7 +38,6 @@ export default function contribute(client: PluginClientContext) {
     clearInterval(timer);
     removeAskuser();
     removeDelivery();
-    removeRun();
     removeEvent();
     removeThread();
     removeDescription();

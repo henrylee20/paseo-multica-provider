@@ -1,40 +1,58 @@
 import { z } from "zod";
-import { runAddress, runMessageSchema, type runRead } from "../shared/runs.js";
+import { isActiveRun, runMessageSchema } from "../shared/runs.js";
+import type { RunAddress } from "./runs.js";
 import type { AuthenticatedConnection } from "./connection.js";
 import { StateStore, cachedWorkspace } from "./state.js";
 import { remoteJson } from "./sync.js";
-import { readText, textRevision } from "./chunked-text.js";
 
-type Address = z.infer<typeof runAddress>;
+type Address = RunAddress & { runId: string };
 const key = (address: Address) => JSON.stringify([address.connectionKey, address.issueId, address.rootId, address.runId]);
 
-/** Only explicit expansion refreshes output. Cached reads never need CLI login. */
+/** Only discussions actually opened in this process refresh remote output. */
 export class RunDetails {
   private readonly pending = new Map<string, Promise<void>>();
-  constructor(private readonly store: StateStore, private readonly connection: () => Promise<AuthenticatedConnection>) {}
-
+  private readonly opened = new Map<string, RunAddress>();
+  private readonly terminal = new Set<string>();
+  private readonly timer: ReturnType<typeof setInterval>;
+  private paused = false;
+  constructor(private readonly store: StateStore, private readonly connection: () => Promise<AuthenticatedConnection>) {
+    this.timer = setInterval(() => { void this.refreshOpened().catch(() => {}); }, 2000);
+    this.timer.unref?.();
+  }
+  openDiscussion(address: RunAddress) {
+    this.opened.set(JSON.stringify(address), address);
+    void this.refreshOpened().catch(() => {});
+  }
+  async refreshOpened() {
+    if (this.paused || !this.opened.size) return;
+    const state = await this.store.read();
+    if (this.paused) return;
+    await Promise.all([...this.opened.values()].flatMap(address => {
+      const issue = state.connections[address.connectionKey]?.issues[address.issueId];
+      return Object.entries(issue?.runs ?? {}).filter(([, run]) => run.ownerRootId === address.rootId).map(async ([runId, run]) => {
+        const target = { ...address, runId }, id = key(target);
+        if (this.terminal.has(id)) return;
+        let operation = this.pending.get(id);
+        if (!operation) {
+          operation = this.refresh(target).then(() => { if (!isActiveRun(run.status)) this.terminal.add(id); }).finally(() => this.pending.delete(id));
+          this.pending.set(id, operation);
+        }
+        await operation.catch(() => {}); // Keep the cache; retry unsuccessful terminal reads too.
+      });
+    }));
+  }
+  async pause() { this.paused = true; await Promise.allSettled(this.pending.values()); }
+  resume(connectionKey?: string) {
+    if (connectionKey) {
+      for (const [id, address] of this.opened) if (address.connectionKey === connectionKey) this.opened.delete(id);
+      for (const id of this.terminal) if (JSON.parse(id)[0] === connectionKey) this.terminal.delete(id);
+    }
+    this.paused = false;
+  }
   private async cached(address: Address) {
     const issue = (await this.store.read()).connections[address.connectionKey]?.issues[address.issueId];
     if (!issue || issue.runs[address.runId]?.ownerRootId !== address.rootId) throw new Error("Run does not belong to this discussion");
-    return { issue, cache: issue.runDetails[address.runId], metadata: issue.runs[address.runId].metadata };
-  }
-  async open(address: Address): Promise<{ status: "ready" | "cached" | "unavailable"; revision?: string; metadataRevision?: string; message?: string }> {
-    try { await this.cached(address); } catch { return { status: "unavailable", message: "此执行段尚未映射到当前讨论。" }; }
-    let status: "ready" | "cached" | "unavailable" = "ready";
-    try {
-      const id = key(address);
-      let operation = this.pending.get(id);
-      if (!operation) {
-        operation = this.refresh(address).finally(() => this.pending.delete(id));
-        this.pending.set(id, operation);
-      }
-      await operation;
-    } catch { status = "cached"; }
-    const { cache, metadata } = await this.cached(address);
-    const metadataRevision = metadata && Object.keys(metadata).length ? textRevision(JSON.stringify(metadata)) : undefined;
-    if (!cache) return { status: metadataRevision ? "cached" : "unavailable", metadataRevision, message: "无法读取执行消息；尚无已读消息缓存。" };
-    return { status, revision: textRevision(JSON.stringify(cache.messages)), metadataRevision,
-      ...(status === "cached" ? { message: "远端执行明细暂不可用，正在显示已读缓存。" } : {}) };
+    return { issue, cache: issue.runDetails[address.runId] };
   }
   private async refresh(address: Address) {
     const { issue, cache } = await this.cached(address);
@@ -57,11 +75,5 @@ export class RunDetails {
       state.connections[address.connectionKey].issues[address.issueId].runDetails[address.runId] = { messages: [...unique.values()].sort((a, b) => a.seq - b.seq) };
     });
   }
-  async read(address: z.infer<typeof runRead.input>) {
-    const { cache, metadata } = await this.cached(address);
-    const value = address.kind === "messages" ? cache?.messages : metadata;
-    if (!value) throw new Error("Run cached content unavailable");
-    return readText(JSON.stringify(value), address);
-  }
-  async close() { await Promise.allSettled(this.pending.values()); }
+  async close() { clearInterval(this.timer); await this.pause(); this.opened.clear(); }
 }

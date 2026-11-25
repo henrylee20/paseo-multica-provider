@@ -1,9 +1,11 @@
+import { RunProjection } from "./run-projection.js";
+import type { RunDetails } from "./run-details.js";
 import { askuserPermission, askuserPermissionId, isLocalAskuserDismiss } from "./askuser-answers.js";
 import type { AskuserCardData } from "../shared/askuser.js";
 import type { AskUsers } from "./askuser.js";
 import { randomUUID } from "node:crypto";
 import { isActiveRun } from "../shared/runs.js";
-import { runSummary, type RunSynchronizer } from "./runs.js";
+import type { RunSynchronizer } from "./runs.js";
 import { z } from "zod";
 import type { ProviderEvent, ProviderRegistration } from "@getpaseo/plugin/server/provider";
 import { StateStore } from "./state.js";
@@ -20,7 +22,7 @@ import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
 const persistenceSchema = z.object({ version: z.literal(1), data: z.object({
   connectionKey: z.string(), issueId: z.string(),
 }).and(z.discriminatedUnion("discussion", [z.object({ discussion: z.literal("main") }), z.object({ discussion: z.literal("thread"), rootId: z.string() })])) });
-const supported = ["prompt.message", "prompt.steer", "session.persistence", "session.list", "timeline.plugin", "session.archive", "session.unarchive", "permission"];
+const supported = ["prompt.message", "prompt.steer", "session.persistence", "session.subsession", "session.list", "timeline.plugin", "session.archive", "session.unarchive", "permission"];
 
 interface SessionContext {
   address: RunAddress;
@@ -34,7 +36,7 @@ interface SessionContext {
 }
 
 /** A Multica discussion projection, never a local code execution engine. */
-export function createMulticaProvider(store: StateStore, threads: ThreadSynchronizer, runs: RunSynchronizer, stops: StopCoordinator, deliveries: CommentDelivery, descriptions: TaskDescriptions, lifecycle: DiscussionLifecycle, askusers: AskUsers): ProviderRegistration {
+export function createMulticaProvider(store: StateStore, threads: ThreadSynchronizer, runs: RunSynchronizer, stops: StopCoordinator, deliveries: CommentDelivery, descriptions: TaskDescriptions, lifecycle: DiscussionLifecycle, askusers: AskUsers, runDetails: RunDetails): ProviderRegistration {
   return {
     id: providerId, label: "Multica", description: "Multica 任务讨论（目录仅为本地占位目录）",
     status: async () => ({ available: true }),
@@ -173,18 +175,17 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
             const cards = await askusers.cards(address);
             if (sessions.get(input.sessionId) !== session || lifecycle.unavailable(address)) return;
             for (const card of cards) projectPermission(card);
-            const projected = new Map<string, string>();
+            const projection = new RunProjection(input.sessionId, address.rootId, emit);
+            if (capabilities.includes("session.subsession")) {
+              projection.project(issue, input.history === "replay");
+              session.subscriptions.push(store.subscribe(state => {
+                const latest = state.connections[address.connectionKey]?.issues[address.issueId];
+                if (latest) projection.project(latest);
+              }), () => projection.close());
+            }
             let currentRuns: typeof issue.runs = {};
             const projectRuns = (owned: typeof issue.runs, activity = true) => {
               currentRuns = owned;
-              for (const [runId, run] of Object.entries(owned)) {
-                const row = runSummary(address, runId, run);
-                const fingerprint = JSON.stringify(row);
-                if (projected.get(runId) !== fingerprint) {
-                  emit({ type: "timeline.item", sessionId: input.sessionId, item: row });
-                  projected.set(runId, fingerprint);
-                }
-              }
               if (!activity) return;
               const active = Object.values(owned).some(run => isActiveRun(run.status));
               if (active && !session.turnId) {
@@ -196,8 +197,7 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
               }
             };
             const owned = Object.fromEntries(Object.entries(issue.runs).filter(([, run]) => run.ownerRootId === address.rootId));
-            if (input.history === "replay") projectRuns(owned, false);
-            else for (const [runId, run] of Object.entries(owned)) projected.set(runId, JSON.stringify(runSummary(address, runId, run)));
+            projectRuns(owned, false);
             session.settleInterrupt = turnId => {
               if (session.turnId !== turnId) return;
               // Stop settles the turn captured by the host, even if later Runs
@@ -209,6 +209,9 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
             session.subscriptions.push(runs.subscribe(address, owned => projectRuns(owned)));
             emit({ type: "session.ready", requestId: input.requestId, sessionId: input.sessionId });
             opening = false;
+            runDetails.openDiscussion(address);
+            // Native registration completes after session.ready / importAgent returns.
+            setImmediate(() => { if (sessions.get(input.sessionId) === session) void runs.observe(address).catch(() => {}); });
             return;
           }
           if (input.type === "session.close") {
