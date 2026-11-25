@@ -4,7 +4,7 @@
 
 ## 宿主与验证边界
 
-manifest 仅声明 Paseo `>=0.15.3`，不设最高版本；开发 SDK 固定 `0.15.4`。原生验收先在实际 `0.15.3`，后在独立及用户主 `0.17.4` daemon 执行，证据分别记录。提及选择器使用 0.16 起的 composer item，0.15 不显示选择器；没有修改 Paseo 核心。
+manifest 仅声明 Paseo `>=0.15.3`，不设最高版本；开发 SDK 固定 `0.15.4`。原生验收先在实际 `0.15.3`，后在独立及用户主 `0.17.4` daemon 执行，证据分别记录。提及选择器使用 0.16 起的 composer item，0.15 不显示选择器；Run 改用 provider subagent，0.15.x 应用的 Subagents 显示未验证，没有执行段后备；manifest 下限保持不变。没有修改 Paseo 核心。
 
 既有真实云服务验收仅使用授权 Issue HENR-2，包括 CLI 复用、筛选导入、主讨论新 Thread、有效提及和原生 Stop。真实自部署、命名 profile 轮换、原生 queue 控件及移动布局仍未完整验证；当前精简回归使用公开入口、临时 CLI、隔离 HTTP/WebSocket 和宿主契约，不能当成新一轮真实宿主验收。
 
@@ -34,9 +34,9 @@ Paseo 0.17.4 恢复工作区可能以 60 秒时间戳回退唤醒其他隐藏讨
 
 每轮同步按 Multica 工作区复用 agents／members promise；Thread 显式打开时使用该次请求的目录，不另设 TTL。metadata 存量扫描在进程内成功一次后停止，失败由后续 bootstrap 重试；导入和恢复单独补写。
 
-Thread renderer 挂载仍调用 thread.open，正常不显示说明卡；主讨论也保留不可见的加载条目。仅本进程实际打开的 Thread 继续补读正文；描述由 provider 订阅推送。展开活跃 Run 每两秒更新，终态只读一次。
+Thread renderer 挂载仍调用 thread.open，正常不显示说明卡；主讨论也保留不可见的加载条目。仅本进程实际打开的 Thread 继续补读评论正文；描述由 provider 订阅推送。父 provider 协商 session.subsession，讨论打开（含导入、history:skip）立即重新发出全部归属 Run 子会话与缓存；RunDetails 只为本进程实际打开过的讨论补读远端执行消息，每两秒刷新活跃 Run，终态成功补齐一次后停止。
 
-描述与 Run 缓存读取共用 revision／offset 校验及有界切片。run.read 通过 kind 区分 messages／metadata，分别保留 revision；评论事件保持 thread.event 单次读取。缓存读取不依赖当前 CLI 登录，远端刷新仍核对原连接与 Run 归属。
+RunProjection 将执行文本、工具输入／结果、错误及远端目录推送到只读子时间线；原始消息缓存去重并保持序号，活跃期序号缺口后的消息等待补齐，终态按可得源顺序呈现。父讨论仅发出一次固定 completed 的 sub_agent 位置标记，子会话 toolCallId 指向它；history:skip 不重复父标记。Run 细分活动状态变化追加说明，completed／failed／cancelled 对应子会话 completed／failed／canceled；聚合父 turn 和原生 Stop 边界保持。旧 multica:run:<runId> 行、renderer 及 run.open／run.read／run.observe RPC 均移除。描述保留 revision／offset 切片，评论事件仍单次读取。缓存重放不依赖 CLI 登录，远端补读仍核对原连接与 Run 归属。
 
 恢复 history:skip 会话仍完整分页读回原生时间线，再按来源 messageId／自身 clientMessageId、角色及全文确认缺失原文。Paseo 0.17.4 的普通消息 item ID 去重仅在 provider 会话内存中，不能跨重启信任；失败、gap 或 epoch 改变时不盲目重放，见 ADR 0005。
 
@@ -44,11 +44,19 @@ StateStore 首次读取校验后缓存，只返回只读约定的共享快照；
 
 ## 精简界面与取消的保证
 
-只有设置页：连接（含 `SettingsSelect` profile 下拉框、切换确认 `Modal`、清理阶段提示与含用户自建工作区的保留 Project 区块）、Multica 工作区与筛选规则、有隐藏项时的人工恢复。工作区按已启用优先分组，编辑与启用走带固定底栏的弹窗；默认选择未开始／进行中整类，编辑器保留整类与部分具体状态的选择，目录按连接缓存并由只读 `workspace.preview` 预览匹配与移出项（不写状态、不进同步队列），`workspace.list` 的 `importedCount` 与预览均按未归档映射计数。保存成功即关闭弹窗并显示非错误回执；后台错误独立显示在同步行，停用行显示待归档任务。设置页同步期间每 2 秒读取进度，空闲恢复 10 秒；只有仍有未归档的已停用任务时才显示归档阶段，归档数量不计 Project 移除。提及只走 composer 选择器。主讨论发送成功仅提示可在侧栏打开新 Thread；Thread 内成功不显示额外内容。
+只有设置页：连接（含 `SettingsSelect` profile 下拉框、切换确认 `Modal`、清理阶段提示与含用户自建工作区的保留 Project 区块）、Multica 工作区与筛选规则、数据重建、有隐藏项时的人工恢复。工作区按已启用优先分组，编辑与启用走带固定底栏的弹窗；默认选择未开始／进行中整类，编辑器保留整类与部分具体状态的选择，目录按连接缓存并由只读 `workspace.preview` 预览匹配与移出项（不写状态、不进同步队列），`workspace.list` 的 `importedCount` 与预览均按未归档映射计数。保存成功即关闭弹窗并显示非错误回执；后台错误独立显示在同步行，停用行显示待归档任务。设置页同步期间每 2 秒读取进度，空闲恢复 10 秒；只有仍有未归档的已停用任务时才显示归档阶段，归档数量不计 Project 移除。提及只走 composer 选择器。主讨论发送成功仅提示可在侧栏打开新 Thread；Thread 内成功不显示额外内容。
 
 - **取消保证 A**：删除持久投递原文、核实／显式重发与 7 天保证。网络或 5xx 用相同 Idempotency-Key 最多三次，失败只追加错误；不由插件跨重启恢复失败输入。
 - **取消保证 B**：删除停止记录、清理四态、跨 tab 单 Run 重试及 Stop epoch 栅栏；Stop 只处理当前活跃 Run。
 - **取消保证 C**：删除独立只读快照和失权二次取证，完整列表缺失统一按 filter_exit 归档，写入 403／404 直接透传。原生历史与已读缓存保留。
+
+## 设置页数据重建（ADR 0011）
+
+DataRebuild 在 daemon 内保存当前连接的预检、作业进度和结果，不落盘进度或做断点恢复。仅 ready 连接可启动；本地缓存的五类活跃 Run 会阻塞，返回具体讨论和 Run。预检完整分页核对宿主插件讨论（含归档）、工作区和项目，不计含用户自建活跃工作区的保留项目。设置页以原生 Modal 二次确认，明确规则／启用状态保留、人工隐藏清除；进行中无取消，可离开页面后重新查看。
+
+SidebarSynchronizer.exclusive 使在途同步在规则版本边界让出，串行暂停后台同步与规则写入。重建先暂停执行明细补读、关闭当前连接的本地讨论投影，依次 deleteAgent → archiveWorkspace → removeProject，最后仅保留该连接 rules 并按规则重导；不调用 archiveAgent 或 session.interrupt，不修改其他连接。项目删除前再次完整核对活跃工作区。每个重导任务使用随机的新 workspaceId，创建键包含此新 ID，避开宿主空归档工作区占用的旧凭据；provider handle 重用但 agent 记录和时间线全新。导入预取匹配总数，逐任务更新 x/N；0 启用规则只清理并以 0/0 完成。成功或失败后恢复同步，再次启动从发现原生对象开始。重建后 Run owner 会按新的完整远端快照重新固定。
+
+本次仅使用隔离 HTTP、宿主 SDK 契约及编译后设置页交互测试，没有安装或 reload 真实 daemon；0.15.x Subagents UI 和真实数据重建仍需宿主验收。
 
 ## AskUser（#20–#27）
 
