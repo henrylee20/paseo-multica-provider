@@ -19,11 +19,11 @@ export default function contribute(client: PluginClientContext) {
   async function bootstrap() {
     if (disposed || inFlight) return;
     inFlight = true;
-    try { if ((await client.rpc(syncBootstrap, {})).status === "ready") clearInterval(timer); } catch { /* Retry on the next connection opportunity. */ }
+    try { await client.rpc(syncBootstrap, {}); } catch { /* Retry on the next connection opportunity. */ }
     finally { inFlight = false; }
   }
   void bootstrap();
-  // Retry only until the daemon has accepted bootstrap.
+  // The contribution survives reconnects; a restarted daemon needs bootstrap again.
   const timer = setInterval(() => { void bootstrap(); }, 10_000);
   // The composer's agent picker needs Paseo 0.16.
   const composerItem = composerItemRegistrar(client);

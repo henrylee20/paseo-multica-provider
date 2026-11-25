@@ -48,20 +48,24 @@ it("the host-compiled client entry offers only the Multica settings screen", asy
   expect(entries).toEqual([]);
 });
 
-it("client contribution bootstraps without opening management and retries after a disconnected RPC", async () => {
+it("client bootstrap keeps running through successful connections and daemon restarts", async () => {
   const setup = await bundledContribution("../index.client.tsx", { "@getpaseo/plugin/client": {}, "@getpaseo/plugin/client/ui": {}, "react-native": {} });
   vi.useFakeTimers();
   try {
     const calls: string[] = [];
-    const dispose = setup({ rpc: async (contract: { name: string }) => { calls.push(contract.name); if (calls.length === 1) throw new Error("disconnected"); return { status: "ready" }; },
+    const dispose = setup({ rpc: async (contract: { name: string }) => { calls.push(contract.name); if (calls.length === 1 || calls.length === 4) throw new Error("daemon restarted"); return { status: "ready" }; },
       addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: () => () => {} });
     await Promise.resolve();
     expect(calls).toEqual(["sync.bootstrap"]);
     await vi.advanceTimersByTimeAsync(10_000);
     expect(calls).toEqual(["sync.bootstrap", "sync.bootstrap"]);
     await vi.advanceTimersByTimeAsync(20_000);
-    expect(calls).toHaveLength(2);
+    expect(calls).toHaveLength(4);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(calls).toHaveLength(5);
     dispose();
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(calls).toHaveLength(5);
   } finally { vi.useRealTimers(); }
 });
 
