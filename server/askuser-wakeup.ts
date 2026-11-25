@@ -1,3 +1,4 @@
+import { askuserUnavailableReason } from "./askuser-policy.js";
 import type { AskUsers } from "./askuser.js";
 import type { AuthenticatedConnection } from "./connection.js";
 import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
@@ -7,7 +8,8 @@ import type { RunAddress } from "./runs.js";
 import { StateStore } from "./state.js";
 
 /** Load pending questions through the host's non-interrupting interactive path.
- * The host restores opening permissions before ready; it owns attention policy. */
+ * Cached permissions replay before ready. Fresh initial permissions wait for
+ * native registration acknowledgement; the host then owns attention policy. */
 export class AskuserWakeups {
   private readonly pending = new Map<string, Promise<void>>();
   private readonly attemptedAt = new Map<string, number>();
@@ -38,11 +40,10 @@ export class AskuserWakeups {
   }
 
   private async eligible(address: RunAddress) {
-    if (this.lifecycle.unavailable(address) || this.lifecycle.loaded(address)) return;
     const local = (await this.store.read()).connections[address.connectionKey];
     const issue = local?.issues[address.issueId];
-    if (!issue?.workspaceCreated || !local.rules[issue.remoteWorkspaceId]?.enabled || issue.access?.status === "inaccessible" ||
-      issue.archiveReason || issue.archivePending || issue.manualHidden.workspace || issue.manualHidden.discussions.includes(address.rootId)) return;
+    if (!issue?.workspaceCreated || !local.rules[issue.remoteWorkspaceId]?.enabled ||
+      askuserUnavailableReason(issue, address.rootId, this.lifecycle, address.connectionKey, address.issueId)) return;
     const agentId = issue.threads[address.rootId]?.agentId;
     if (!agentId || !(await this.askusers.cards(address)).some(card => card.status === "pending" && !card.readOnly && !card.collapsed && !card.statusError)) return;
     return { issue, agentId };
@@ -51,6 +52,7 @@ export class AskuserWakeups {
   private async load(connection: AuthenticatedConnection, address: RunAddress, host: NativeHost, key: string, explicit: boolean) {
     const candidate = await this.eligible(address);
     if (!candidate) return;
+    if (this.lifecycle.loaded(address) && !this.askusers.hasDeferredFresh(address)) return;
     const now = this.now().getTime();
     if (!explicit && now - (this.attemptedAt.get(key) ?? -Infinity) < 60_000) return;
     const native = (await host.fetchAgent(candidate.agentId))?.agent;
@@ -63,5 +65,6 @@ export class AskuserWakeups {
     // Unlike refreshAgent, listCommands reuses an existing runtime, including
     // an active Run, and opens an unloaded session with no history-only purpose.
     await host.listCommands(candidate.agentId);
+    await this.askusers.announceFresh(address);
   }
 }

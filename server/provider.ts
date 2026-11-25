@@ -1,4 +1,4 @@
-import { askuserPermission, askuserPermissionId, isEmptyAskuserDismiss } from "./askuser-answers.js";
+import { askuserPermission, askuserPermissionId, isLocalAskuserDismiss } from "./askuser-answers.js";
 import type { AskuserCardData } from "../shared/askuser.js";
 import type { AskUsers } from "./askuser.js";
 import { randomUUID } from "node:crypto";
@@ -150,18 +150,27 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
             }
             const address = { connectionKey: parsed.data.data.connectionKey, issueId: parsed.data.data.issueId, rootId: parsed.data.data.discussion === "thread" ? parsed.data.data.rootId : "main" };
             addresses.set(input.sessionId, address);
-            const projectPermission = (card: AskuserCardData) => {
+            let opening = true;
+            const deferredFresh = new Set<string>();
+            const projectPermission = (card: AskuserCardData, announceFresh = false) => {
               if (!capabilities.includes("permission")) return;
               const permissionId = askuserPermissionId(card);
               const pending = permissions.get(input.sessionId) ?? new Map();
               permissions.set(input.sessionId, pending);
               if (card.status === "pending" && !card.collapsed && !card.readOnly && !lifecycle.unavailable(address)) {
-                if (!pending.has(permissionId)) { pending.set(permissionId, card); emit({ type: "session.permission", sessionId: input.sessionId, request: askuserPermission(card) }); }
+                if (askusers.isFresh(card) && opening) { deferredFresh.add(permissionId); askusers.deferFresh(card); }
+                // Ready only finishes provider replay. The native manager may still
+                // be registering this session until import/listCommands returns.
+                if (deferredFresh.has(permissionId) && !announceFresh) return;
+                if (!pending.has(permissionId)) {
+                  pending.set(permissionId, card); emit({ type: "session.permission", sessionId: input.sessionId, request: askuserPermission(card) });
+                  deferredFresh.delete(permissionId); askusers.projectedFresh(card);
+                }
               } else if (pending.delete(permissionId)) emit({ type: "session.permission_resolved", sessionId: input.sessionId, permissionId });
             };
-            const projectAskuser = (item: import("@getpaseo/plugin/server/provider").ProviderTimelineItem, card: AskuserCardData) => {
+            const projectAskuser = (item: import("@getpaseo/plugin/server/provider").ProviderTimelineItem, card: AskuserCardData, announceFresh: boolean) => {
               emit({ type: "timeline.item", sessionId: input.sessionId, item });
-              projectPermission(card);
+              projectPermission(card, announceFresh);
             };
             askuserSubscriptions.set(input.sessionId, askusers.subscribe(address, projectAskuser));
             for (const item of await askusers.rows(address)) emit({ type: "timeline.item", sessionId: input.sessionId, item });
@@ -221,6 +230,7 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
             });
             runSubscriptions.set(input.sessionId, runs.subscribe(address, owned => projectRuns(owned)));
             emit({ type: "session.ready", requestId: input.requestId, sessionId: input.sessionId });
+            opening = false;
             return;
           }
           if (input.type === "session.close") {
@@ -259,7 +269,7 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
             const address = addresses.get(input.sessionId);
             if (!address || lifecycle.unavailable(address)) throw new Error("讨论不可写。");
             const target = { connectionKey: address.connectionKey, issueId: address.issueId, commentId: card.commentId, attachmentId: card.attachmentId };
-            if (input.response.behavior === "deny" || isEmptyAskuserDismiss(card, input.response.updatedInput)) { await askusers.collapse(target); return; }
+            if (input.response.behavior === "deny" || isLocalAskuserDismiss(card, input.response.updatedInput)) { await askusers.collapse(target); return; }
             const record = await askusers.submit(target, input.response.updatedInput, deliveries);
             const row = deliveryInput(record);
             if (rememberOriginal(input.sessionId, row)) emit({ type: "timeline.item", sessionId: input.sessionId, item: projectRow(address, row) });

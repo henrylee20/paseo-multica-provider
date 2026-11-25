@@ -41,6 +41,18 @@ export const askuserSkip = defineRpc({ name: "askuser.skip", input: askuserAddre
 export const askuserRead = defineRpc({ name: "askuser.read", input: askuserAddress.extend({ revision: z.string(), offset: z.number().int().nonnegative() }),
   output: z.object({ text: z.string(), nextOffset: z.number().int().nonnegative().nullable() }) });
 
+/** Requiredness over canonical answer strings, shared by submit and observed replies. */
+export function isAskuserQuestionRequired(questions: AskuserDocument["questions"], question: AskuserDocument["questions"][number], answers: readonly string[]) {
+  if (question.type !== "text") return true;
+  if (!question.required_when) return question.required !== false;
+  const condition = question.required_when;
+  const parentIndex = questions.findIndex(item => item.id === condition.question_id);
+  const parent = questions[parentIndex];
+  const value = answers[parentIndex] ?? "";
+  const matches = parent?.type === "single" ? parent.options.filter(option => value === option.label || value.startsWith(`${option.label}（补充：`)) : [];
+  return matches.length !== 1 || condition.option_ids.includes(matches[0].id);
+}
+
 /** Match complete direct replies after undoing Markdown punctuation escaping. */
 export function isAskuserReplyValid(document: AskuserDocument, reply: { content: string; actor_type?: string; actor_id?: string; delegated_by?: string | null }) {
   const body = reply.content.trim().replace(/\\([!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~])/g, "$1");
@@ -58,17 +70,7 @@ export function isAskuserReplyValid(document: AskuserDocument, reply: { content:
     if (matches.length !== 1) return false;
     answers.push(matches[0].slice(prefix.length).trim());
   }
-  return document.questions.every((question, index) => {
-    let required = question.type !== "text" || question.required !== false && !question.required_when;
-    if (question.type === "text" && question.required_when) {
-      const condition = question.required_when;
-      const parentIndex = document.questions.findIndex(item => item.id === condition.question_id);
-      const parent = document.questions[parentIndex];
-      const matches = parent?.type === "single" ? parent.options.filter(option => answers[parentIndex] === option.label || answers[parentIndex].startsWith(`${option.label}（补充：`)) : [];
-      required = matches.length !== 1 || condition.option_ids.includes(matches[0].id);
-    }
-    return !required || answers[index] !== "" && answers[index] !== "未回答";
-  });
+  return document.questions.every((question, index) => !isAskuserQuestionRequired(document.questions, question, answers) || answers[index] !== "" && answers[index] !== "未回答");
 }
 
 

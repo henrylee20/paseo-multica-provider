@@ -57,17 +57,18 @@ async function fixture() {
   const agents: Agent[] = [];
   const workspaces: Array<{ id: string; cwd: string; projectId: string; archivedAt: string | null }> = [];
   const events: ProviderEvent[] = [];
+  const registrationOrder: string[] = [];
   const wakes: string[] = [];
   const refreshes: string[] = [];
   const opened = new Set<string>();
   const wakeControl = { fail: new Set<string>(), before: undefined as (() => Promise<void>) | undefined, load: true };
-  const nativeControl = { beforeFetchAgent: undefined as ((id: string) => Promise<void>) | undefined };
+  const nativeControl = { beforeRegister: undefined as (() => Promise<void>) | undefined, autoOpenImport: false, beforeFetchAgent: undefined as ((id: string) => Promise<void>) | undefined };
   let server: FakeServer;
   let provider: ProviderConnection | undefined;
   async function connect() {
     if (!provider) {
       provider = await server.providers.get("multica")!.connect({ versions: [1], capabilities: ["session.persistence", "timeline.plugin", "permission"] });
-      provider.onEvent(event => { events.push(event); if (event.type === "session.opened") opened.add(event.sessionId); if (event.type === "session.closed") opened.delete(event.sessionId); });
+      provider.onEvent(event => { events.push(event); registrationOrder.push(event.type); if (event.type === "session.opened") opened.add(event.sessionId); if (event.type === "session.closed") opened.delete(event.sessionId); });
     }
     return provider;
   }
@@ -75,6 +76,8 @@ async function fixture() {
     if (opened.has(agent.id)) return;
     await (await connect()).send({ type: "session.open", requestId: `open-${agent.id}`, sessionId: agent.id, history: "replay", persistence: JSON.parse(agent.handle.slice(7)),
       config: { cwd: agent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
+    await nativeControl.beforeRegister?.();
+    registrationOrder.push(`registered:${agent.id}`);
   }
   const listCommands: NativeHost["listCommands"] = async input => {
     const id = typeof input === "string" ? input : input.agentId;
@@ -94,7 +97,7 @@ async function fixture() {
     fetchAgents: async () => ({ entries: agents.map(agent => ({ agent: { provider: "multica", ...agent } })), pageInfo: { hasMore: false } }),
     importAgent: async (input: { workspaceId: string; cwd: string; labels: Record<string, string>; providerHandleId: string }) => {
       const agent = { id: `native-${agents.length}`, workspaceId: input.workspaceId, cwd: input.cwd, labels: input.labels, handle: input.providerHandleId, archivedAt: null, status: "idle", activeTurn: null };
-      agents.push(agent); return agent;
+      agents.push(agent); if (nativeControl.autoOpenImport) await open(agent); return agent;
     }, updateAgent: async () => {}, close: async () => {},
     fetchAgent: async (id: string) => { await nativeControl.beforeFetchAgent?.(id); return { agent: { provider: "multica", ...agents.find(agent => agent.id === id)! } }; },
     refreshAgent: async (id: string) => { refreshes.push(id); throw new Error("Wake must not refresh"); },
@@ -116,23 +119,79 @@ async function fixture() {
   const question = (root = "root", issueId = "issue", document: unknown = card) => {
     const source = comments.get(issueId)!.find(c => c.id === root)!; source.attachments = [attachment(root)]; documents.set(root, document);
   };
-  return { ...started, start, connect, open, agents, workspaces, thread, question, events, wakes, refreshes, requests, comments, timelines, runs, issues, documents, remote, wakeControl, nativeControl, paseo,
+  return { ...started, start, connect, open, agents, workspaces, thread, question, events, registrationOrder, wakes, refreshes, requests, comments, timelines, runs, issues, documents, remote, wakeControl, nativeControl, paseo,
     setClock: (value: Date) => { clock = value; }, sync: () => server.rpc(syncBootstrap, {}, paseo),
     disconnect: async () => { await provider?.close(); provider = undefined; opened.clear(); } };
 }
 
-it("loads an unopened answerable Thread through listCommands and restores its native pending question", async () => {
+it("announces a first unopened discovery only after native registration and listCommands completes", async () => {
   const f = await fixture();
   expect(f.events).toEqual([]); expect(f.wakes).toEqual([]);
   f.question();
-  expect(await f.sync()).toEqual({ status: "ready" });
+  let release!: () => void; let reached!: () => void;
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  const opening = new Promise<void>(resolve => { reached = resolve; });
+  f.nativeControl.beforeRegister = async () => { reached(); await blocked; };
+  const syncing = f.sync(); await opening;
+  const premature = f.events.filter(event => event.type === "session.permission");
+  expect(f.events.some(event => event.type === "session.ready")).toBe(true);
+  release(); expect(await syncing).toEqual({ status: "ready" });
+  expect(premature).toEqual([]);
   expect(f.wakes).toEqual([f.thread().id]);
   expect(f.events).toContainEqual(expect.objectContaining({ type: "session.permission", sessionId: f.thread().id, request: expect.objectContaining({ kind: "question", title: card.title, description: card.description }) }));
   expect(f.events.filter(e => e.type === "session.opened").map(e => e.sessionId)).toEqual([f.thread().id]);
   const permissionIndex = f.events.findIndex(e => e.type === "session.permission");
-  expect(permissionIndex).toBeLessThan(f.events.findIndex(e => e.type === "session.ready"));
+  expect(permissionIndex).toBeGreaterThan(f.events.findIndex(e => e.type === "session.ready"));
+  expect(f.registrationOrder.indexOf("session.permission")).toBeGreaterThan(f.registrationOrder.indexOf(`registered:${f.thread().id}`));
+  // The fresh marker was consumed by that live projection. A new provider
+  // connection restores it as opening history, even in the same process.
+  await f.disconnect(); f.events.length = 0; await f.open(f.thread()); await f.sync();
+  expect(f.events.filter(event => event.type === "session.permission")).toHaveLength(1);
+  expect(f.events.findIndex(event => event.type === "session.permission")).toBeLessThan(f.events.findIndex(event => event.type === "session.ready"));
+  expect(f.wakes).toEqual([f.thread().id]);
   expect(f.refreshes).toEqual([]);
   expect(f.requests.filter(r => r.method !== "GET")).toEqual([]);
+});
+
+it("keeps fresh auto-imported permissions deferred across post-ready publications until native loading acknowledges registration", async () => {
+  const f = await fixture(); f.question(); await f.sync();
+  const original = f.events.find((event): event is Extract<ProviderEvent, { type: "session.permission" }> => event.type === "session.permission")!;
+  await (await f.connect()).send({ type: "session.permission", sessionId: f.thread().id, permissionId: original.request.id, response: { behavior: "deny" } });
+  f.comments.get("issue")!.push(comment("issue", "fresh", [attachment("fresh")])); f.documents.set("fresh", card);
+  f.nativeControl.autoOpenImport = true;
+  let release!: () => void; let reached!: () => void;
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  const opening = new Promise<void>(resolve => { reached = resolve; });
+  f.nativeControl.beforeRegister = async () => { reached(); await blocked; };
+  const syncing = f.sync(); await opening;
+  const freshId = f.thread("fresh").id;
+  // Reopening another card publishes the entire Issue after the new provider
+  // session is ready, while native import has deliberately not returned.
+  const reopening = f.server.rpc(askuserReopen, { connectionKey: f.thread().labels["multica.connection"], issueId: "issue", commentId: "root", attachmentId: "root" }, f.paseo);
+  let premature: ProviderEvent[] = [];
+  try {
+    await expect.poll(() => f.events.filter(event => event.type === "session.permission" && event.sessionId === f.thread().id)).toHaveLength(2);
+    premature = f.events.filter(event => event.type === "session.permission" && event.sessionId === freshId);
+  } finally { release(); }
+  await Promise.all([syncing, reopening]); await f.sync();
+  expect(premature).toEqual([]);
+  expect(f.events.filter(event => event.type === "session.permission" && event.sessionId === freshId)).toHaveLength(1);
+  expect(f.wakes).toEqual([f.thread().id, freshId]);
+  expect(f.registrationOrder.lastIndexOf("session.permission")).toBeGreaterThan(f.registrationOrder.indexOf(`registered:${freshId}`));
+  expect(f.requests.filter(request => request.method !== "GET")).toEqual([]);
+});
+
+it("replays cached pending questions quietly before ready on restart and after a new provider connection", async () => {
+  const f = await fixture(); f.question(); await f.sync();
+  await f.dispose(); await f.disconnect(); f.start(); f.events.length = 0;
+  f.setClock(new Date("2026-11-24T10:10:00Z")); await f.sync(); await f.sync();
+  const threadEvents = () => f.events.filter(event => "sessionId" in event && event.sessionId === f.thread().id);
+  expect(threadEvents().filter(event => event.type === "session.permission")).toHaveLength(1);
+  expect(threadEvents().findIndex(event => event.type === "session.permission")).toBeLessThan(threadEvents().findIndex(event => event.type === "session.ready"));
+  await f.disconnect(); f.events.length = 0; await f.open(f.thread()); await f.sync();
+  expect(threadEvents().filter(event => event.type === "session.permission")).toHaveLength(1);
+  expect(threadEvents().findIndex(event => event.type === "session.permission")).toBeLessThan(threadEvents().findIndex(event => event.type === "session.ready"));
+  expect(f.requests.filter(request => request.method !== "GET")).toEqual([]);
 });
 
 it("immediately re-expands a dismissed question after the native host evicts its idle session", async () => {
