@@ -345,6 +345,8 @@ it("renders each run's agent and actual state as a bounded summary and observes 
     const text = renderedText(tree);
     expect(text).toContain("Build Agent");
     expect(text).toContain("waiting_local_directory");
+    expect(text).not.toContain("Run ");
+    expect(text).not.toContain("Agent agent");
     expect(calls).toEqual([]);
     for (const effect of effects) effect();
     await Promise.resolve();
@@ -422,25 +424,23 @@ it.each(["messages", "empty", "unavailable"])("expands source Run metadata with 
     const text = render();
     expect(text).toContain("Runtime failed before streaming");
     expect(text).toContain("local_directory_error");
-    expect(text).toContain("REMOTE · work_dir");
-    expect(text).toContain("REMOTE · relative_work_dir");
+    expect(text).toContain("远端目录");
+    expect(text).not.toContain("REMOTE");
     expect(text).toContain("/remote/agent/../checkout with spaces");
     expect(text).toContain("../checkout with spaces");
-    expect(text).toContain("与 Paseo 本地占位目录不同");
     expect(calls.filter(call => call.name === "run.metadata.read").map(call => call.input.offset)).toEqual([0, 40]);
     if (mode === "messages") {
       expect(text).toContain("Run text");
       expect(text.indexOf("Run thought")).toBeGreaterThan(text.indexOf("Run text"));
       expect(text.indexOf("Exact output")).toBeGreaterThan(text.indexOf("code.ts"));
       expect(text.indexOf("Source error")).toBeGreaterThan(text.indexOf("Partial output"));
-      expect(text).toContain("结果序号 #4");
-      expect(text).toContain("输入序号 #3");
-      expect(text).toContain("调用关联未知");
+      expect(text).not.toContain("调用 ID");
+      expect(text).not.toContain("调用关联");
       expect(text).toContain("工具输入缺失");
-      expect(text).toContain("输出完整性未知");
+      expect(text).not.toContain("输出完整性未知");
+      expect(text).not.toContain("来源标记输出完整");
       expect(text).toContain("源端已截断");
       expect(text).toContain("输出缺失");
-      expect(text).toContain("调用 ID：ambiguous · 调用关联未知（调用 ID 不唯一）");
       messages.push({ task_id: "run", issue_id: "issue", seq: 13, type: "text", content: "Live update" });
       await vi.advanceTimersByTimeAsync(2100);
       expect(render()).toContain("Live update");
@@ -621,7 +621,7 @@ it("management lists shared hidden objects and offers separate workspace and sel
     expect(page.indexOf("Closed Task")).toBeLessThan(page.indexOf("Stopped Task"));
     h.action("读取缓存历史").onPress();
     await vi.waitFor(() => expect(h.render()).toContain("Original cached comment"));
-    for (const text of ["Preserved output", "Preserved goal", "Cached task failure", "REMOTE · work_dir", "/remote/cache/../original", "运行中"]) expect(h.render()).toContain(text);
+    for (const text of ["Preserved output", "Preserved goal", "Cached task failure", "远端目录", "/remote/cache/../original", "运行中"]) expect(h.render()).toContain(text);
     expect(h.calls).toContainEqual({ name: "issue.history.read", input: { connectionKey: "old-connection", issueId: "issue", revision: "cache-revision", offset: 0 } });
     h.action("核实原投递").onPress();
     await vi.waitFor(() => expect(h.calls).toContainEqual({ name: "delivery.verify", input: { connectionKey: "old-connection", issueId: "issue", rootId: "root", clientMessageId: "uncertain-input" } }));
@@ -636,7 +636,7 @@ it("management lists shared hidden objects and offers separate workspace and sel
     h.action("继续此 Thread").onPress();
     expect(h.navigation).toEqual([{ agentId: "new-thread-agent", serverId: "host" }]);
     h.selects.find(select => select.label === "任务")!.onValueChange(JSON.stringify(["old-connection", "issue"]));
-    await vi.waitFor(() => expect(h.render()).toContain("[@Agent A](mention://agent/agent-id)"));
+    await vi.waitFor(() => expect(h.render()).toContain("Agent A"));
     h.action("复制引用").onPress();
     await vi.waitFor(() => expect(h.copied).toEqual(["[@Agent A](mention://agent/agent-id)"]));
     expect(h.render()).toContain("已复制");
@@ -654,8 +654,8 @@ it("management hides empty record sections, and settings links to management ins
   try {
     await vi.waitFor(() => expect(management.render()).toContain("当前没有可用的 Multica 工作区"));
     const page = management.render();
-    for (const text of ["Multica 连接", "已连接", "Lin", "lin@example.test · ID me", "https://api.example.test", "Multica 工作区与筛选规则"]) expect(page).toContain(text);
-    for (const text of ["人工隐藏", "停止结果", "评论投递", "只读历史", "历史连接", "提及 Agent", "恢复 CLI 登录"]) expect(page).not.toContain(text);
+    for (const text of ["Multica 连接", "已连接 · Lin", "https://api.example.test", "Multica 工作区与筛选规则"]) expect(page).toContain(text);
+    for (const text of ["人工隐藏", "停止结果", "评论投递", "只读历史", "历史连接", "提及 Agent", "恢复 CLI 登录", readyStatus.configPath, "凭据来源", "ID me"]) expect(page).not.toContain(text);
   } finally { management.dispose(); }
   const settings = await managementHarness(answer);
   try {
@@ -780,7 +780,7 @@ it("a lost CLI login shows the recovery command with a copy action instead of an
   try {
     await vi.waitFor(() => expect(h.render()).toContain("恢复 CLI 登录"));
     const page = h.render();
-    for (const text of ["未登录", "multica --profile work login", "尚未验证", "连接就绪后可配置"]) expect(page).toContain(text);
+    for (const text of ["未登录", "multica --profile work login", "CLI 配置", "连接就绪后可配置"]) expect(page).toContain(text);
     h.action("复制命令").onPress();
     await vi.waitFor(() => expect(h.copied).toEqual(["multica --profile work login"]));
     expect(h.render()).toContain("已复制");

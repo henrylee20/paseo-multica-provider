@@ -11,7 +11,6 @@ import { CardBody, Notice, SubHeading } from "./ui-kit.js";
 type Summary = z.infer<typeof deliverySummary>;
 type Theme = PluginSurfaceProps["theme"];
 type Target = { connectionKey: string; issueId: string; title: string };
-const labels = { received: "插件已接收：输入已持久保存，等待远端结果。", saved: "评论已保存；是否执行请查看独立 Run 状态。", failed: "投递失败：原输入已保留。", pending_verification: "投递结果待核实：原输入已保留；仅在已核实的去重保证内恢复。" };
 const shortLabels = { received: "已接收", saved: "已保存", failed: "失败", pending_verification: "待核实" };
 const needsDecision = (record: Summary) => record.status === "failed" || record.status === "pending_verification";
 /** Settled deliveries stay reachable ("继续此 Thread") without pushing the rest of the page down. */
@@ -41,10 +40,8 @@ export function DeliveryStatus({ item, theme, openManagement }: PluginTimelineIt
   if (!needsDecision(record)) return record.status === "saved" && record.rootId === "main"
     ? <Text style={{ color: theme.colors.foregroundMuted }}>新 Thread 已建立，可在侧边栏打开。</Text> : null;
   return <View style={{ gap: 6 }}>
-    <Text style={{ color: needsDecision(record) ? theme.colors.statusDanger : theme.colors.foregroundMuted }}>{labels[record.status]}</Text>
+    <Text style={{ color: needsDecision(record) ? theme.colors.statusDanger : theme.colors.foregroundMuted }}>{record.status === "failed" ? "投递失败，原输入已保留。" : "投递结果待核实，原输入已保留。"}</Text>
     {record.message ? <Text style={{ color: theme.colors.foregroundMuted }}>{record.message}</Text> : null}
-    {record.retryOf ? <Text selectable style={{ color: theme.colors.foregroundMuted }}>另一次明确重发 · 原请求：{record.retryOf}</Text> : null}
-    {record.commentId ? <Text selectable style={{ color: theme.colors.foregroundMuted }}>评论：{record.commentId}</Text> : null}
     {needsDecision(record) ? <PreservedInput record={record} theme={theme} /> : null}
     {openManagement ? <Pressable accessibilityRole="button" onPress={openManagement}><Text style={{ color: theme.colors.foreground }}>查看投递记录</Text></Pressable> : null}
   </View>;
@@ -96,26 +93,25 @@ export function DeliveryManagement({ theme, navigation, host, refreshKey }: Pick
   const card = (record: Summary) => {
     const confirmingThis = confirming?.key === record.idempotencyKey;
     return <SettingsCard key={`${record.connectionKey}:${record.issueId}:${record.idempotencyKey}`}>
-      <SettingsRow label={titleOf(record)} hint={`${formatTime(record.createdAt)} · ${record.rootId === "main" ? "主讨论新 Thread" : `Thread ${record.rootId}`}`}>
+      <SettingsRow label={titleOf(record)} hint={`${formatTime(record.createdAt)} · ${record.rootId === "main" ? "主讨论" : "Thread"}`}>
         <Text style={{ color: toneOf(record) }}>{shortLabels[record.status]}</Text>
       </SettingsRow>
       <CardBody>
         <DeliveryStatus item={{ type: "plugin", kind: "comment-delivery", version: 1, data: record }} theme={theme} host={host} layout={{ compact: false, platform: "web" }} agentId="" timestamp={new Date(record.createdAt)} />
-        <Text selectable style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>连接 {record.connectionKey} · 请求 {record.idempotencyKey}</Text>
       </CardBody>
       {needsDecision(record) ? [
-        <SettingsAction key="verify" label="查询原回执" hint="只查询原评论回执，不会重新发送。" actionLabel="核实原投递" disabled={busy !== null} onPress={() => { void check(record); }} />,
+        <SettingsAction key="verify" label="查询原回执" hint="查询原评论的保存结果。" actionLabel="核实原投递" disabled={busy !== null} onPress={() => { void check(record); }} />,
         confirmingThis ? <CardBody key="warning"><Text accessibilityRole="alert" style={{ color: theme.colors.statusDanger }}>原评论可能已经发表。另发一次可能重复触发执行；请先在原服务核实，再决定是否创建新请求。</Text></CardBody> : null,
-        confirmingThis ? <SettingsAction key="confirm" label="另发一次" hint="沿用原正文、讨论和连接，创建独立的新请求；原记录保留。" actionLabel="确认另发一次" disabled={busy !== null} onPress={() => { void sendAgain(record); }} /> : null,
+        confirmingThis ? <SettingsAction key="confirm" label="另发一次" hint="另发一条相同评论。" actionLabel="确认另发一次" disabled={busy !== null} onPress={() => { void sendAgain(record); }} /> : null,
         confirmingThis ? <SettingsAction key="cancel" label="保留原记录" hint="不创建新请求。" actionLabel="取消重发" disabled={busy !== null} onPress={() => setConfirming(null)} /> : null,
-        !confirmingThis ? <SettingsAction key="resend" label="另发一次" hint="由你明确决定创建新投递；可能重复评论及执行。" actionLabel="重新发送…" disabled={busy !== null}
+        !confirmingThis ? <SettingsAction key="resend" label="另发一次" hint="可能重复评论及执行。" actionLabel="重新发送…" disabled={busy !== null}
           onPress={() => setConfirming({ key: record.idempotencyKey, requestId: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}` })} /> : null,
       ] : null}
-      {record.status === "saved" && record.threadAgentId && navigation ? <SettingsAction label="新 Thread 已建立" hint={`Thread ${record.threadRootId}`} actionLabel="继续此 Thread"
+      {record.status === "saved" && record.threadAgentId && navigation ? <SettingsAction label="新 Thread 已建立" hint="打开已建立的 Thread。" actionLabel="继续此 Thread"
         onPress={() => navigation.openAgent({ agentId: record.threadAgentId!, serverId: host.id })} /> : null}
     </SettingsCard>;
   };
-  return <SettingsSection title="评论投递" info="插件接收、评论保存和远端执行分别报告。恢复先查回执；仅在已验证的服务保证和 7 天期限内沿用原请求自动重试，停止后的旧输入需要你处理。">
+  return <SettingsSection title="评论投递" info="核实失败或待确认的投递结果。">
     {loadFailed ? <Notice theme={theme}>无法读取投递记录，已显示的记录仍保留。</Notice> : null}
     {error ? <Notice theme={theme}>{error}</Notice> : null}
     {pending.length ? <SubHeading theme={theme}>需要处理 · {pending.length}</SubHeading> : null}
@@ -158,16 +154,16 @@ export function MentionReferences({ theme, refreshKey, mentionPicker = false }: 
   const failedCopy = agents.find(agent => copied?.id === agent.id && !copied.ok);
   // Paseo's own `@` suggestions are files, which a plugin cannot replace; the composer control is the picker.
   const route = mentionPicker
-    ? "讨论输入框提供「提及 Agent」选择器：搜索当前任务的 agent，完整身份引用会插入输入框。也可以选择任务后复制引用。"
-    : "当前 Paseo 不提供输入框内的提及选择器（需要 Paseo 0.16.0 及以上）。选择任务后复制完整身份引用，粘贴到原生输入框。";
-  return <SettingsSection title="提及 Agent" info={`${route}同名 agent 按 ID 区分；普通 @名字不代表已选定接收者。`}>
+    ? "在讨论输入框使用「提及 Agent」，或在此复制引用。"
+    : "输入框选择器需要 Paseo 0.16.0，可在此复制完整身份引用。";
+  return <SettingsSection title="提及 Agent" info={route}>
     {error ? <Notice theme={theme}>{error}</Notice> : null}
     {issues.length ? <SettingsCard>
       <SettingsSelect label="任务" hint="读取此任务可提及的 agent 身份。" value={selected} onValueChange={value => { void choose(value); }}
         options={[{ label: "选择任务", value: "" }, ...issues.map(issue => ({ label: issue.title, value: targetKey(issue) }))]} />
       {loading ? <SettingsRow key="loading" label="正在读取可提及身份…" /> : null}
       {selected && !loading && !agents.length && !error ? <SettingsRow key="none" label="此任务没有可提及的 agent" /> : null}
-      {agents.map(agent => <SettingsAction key={agent.id} label={agent.name} hint={`ID ${agent.id}\n${agent.reference}`}
+      {agents.map(agent => <SettingsAction key={agent.id} label={agent.name}
         actionLabel={copied?.id === agent.id && copied.ok ? "已复制" : "复制引用"} error={copied?.id === agent.id && !copied.ok ? "无法写入剪贴板，请手动选择下方引用。" : null}
         onPress={() => { void copy(agent); }} />)}
       {failedCopy ? <CardBody key="manual"><Text selectable style={{ color: theme.colors.foreground }}>{failedCopy.reference}</Text></CardBody> : null}
