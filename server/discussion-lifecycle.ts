@@ -7,6 +7,7 @@ export class DiscussionLifecycle {
   private readonly held = new Map<string, number>();
   private readonly sessions = new Map<string, Set<() => void | Promise<void>>>();
   unavailable(address: RunAddress) { return this.held.has(key(address)); }
+  loaded(address: RunAddress) { return this.sessions.has(key(address)); }
   subscribe(address: RunAddress, close: () => void | Promise<void>) {
     const id = key(address);
     const sessions = this.sessions.get(id) ?? new Set();
