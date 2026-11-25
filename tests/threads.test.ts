@@ -785,3 +785,17 @@ it("skip restoration acknowledges existing comments without retroactive dividers
   const rows = f.timelines.get(parent.id)!;
   expect(rows.slice(-2)).toMatchObject([{ type: "plugin", kind: "comment-divider" }, { type: "assistant_message", text: "River: \n\nNew comment" }]);
 });
+
+it("separates a new comment immediately after skip restart before native history reconciliation", async () => {
+  const f = await fixture();
+  const parent = f.native.agents[1], address = JSON.parse(parent.handle.slice(7)).data;
+  await f.server.rpc(threadOpen, address, f.paseo);
+  await f.dispose(); const restarted = f.start();
+  const boundary = f.providerEvents.length;
+  await f.reconnect();
+  f.comments.push(comment("immediate", "root", "Before reconciliation", "member-other"));
+  await restarted.server.rpc(threadOpen, address, f.paseo);
+  const dividers = f.providerEvents.slice(boundary).filter(event => event.type === "timeline.item" && event.sessionId === parent.id && event.item.type === "plugin" && event.item.kind === "comment-divider");
+  expect(dividers).toMatchObject([{ item: { id: "multica:divider:immediate" } }]);
+  expect(f.timelines.get(parent.id)!.slice(-2)).toMatchObject([{ type: "plugin", kind: "comment-divider" }, { type: "assistant_message", text: "River: \n\nBefore reconciliation" }]);
+});

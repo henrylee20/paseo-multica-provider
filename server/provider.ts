@@ -121,7 +121,9 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
               emit({ type: "request.failed", requestId: input.requestId, error: { code: "unmapped_issue", message: "请在 Multica 设置启用任务工作区后打开已导入的主讨论。" } });
               return;
             }
-            const session: SessionContext = { address: openingAddress, emittedRows: new Set(), originalIdentities: new Set(), hasComment: false, inputComments: new Set(), subscriptions: [], interrupts: new Set(), permissions: new Map() };
+            const history = openingAddress.rootId === "main" ? issue.mainHistory : issue.threads[openingAddress.rootId];
+            const hasComment = input.history !== "replay" && history.rows.some(row => row.role !== "event");
+            const session: SessionContext = { address: openingAddress, emittedRows: new Set(), originalIdentities: new Set(), hasComment, inputComments: new Set(), subscriptions: [], interrupts: new Set(), permissions: new Map() };
             sessions.set(input.sessionId, session);
             const address = session.address;
             emit({ type: "session.opened", requestId: input.requestId, sessionId: input.sessionId, capabilities,
