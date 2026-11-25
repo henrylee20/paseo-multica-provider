@@ -597,9 +597,6 @@ it("management lists shared hidden objects and offers separate workspace and sel
     if (name === "issue.history.list") return { issues: [{ connectionKey: "old-connection", issueId: "issue", workspaceId: "workspace", title: "Read-only Task", status: "inaccessible", reason: "forbidden", lastSuccessAt: "2026-11-24T10:00:00Z", checkedAt: "2026-11-24T11:00:00Z", revision: "cache-revision" }] };
     if (name === "issue.history.read") return { text: JSON.stringify({ title: "Read-only Task", description: "Preserved goal", discussions: [{ rootId: "root", title: "Original thread", rows: [{ id: "comment", role: "user", text: "Original cached comment" }] }], runs: [{ id: "run", agentName: "Original agent", status: "running", ownerRootId: "root", metadata: { error: "Cached task failure", work_dir: "/remote/cache/../original" }, messages: [{ task_id: "run", issue_id: "issue", seq: 1, type: "text", content: "Preserved output" }] }], deliveries: [], stops: [] }), nextOffset: null };
     if (name === "connection.history") return { connections: [{ connectionKey: "old-connection", apiUrl: "https://original.example.test", user: { id: "original-user", name: "Original account", email: "" }, profiles: ["office"], projectCount: 1, issueCount: 2, hiddenCount: 1, pendingDeliveryCount: 1, stopWarningCount: 1 }] };
-    if (name === "stop.list") return { records: [{ connectionKey: "old-connection", issueId: "issue", rootId: "root", runId: "failed-run", title: "Closed Task", status: "running", cleanup: "unknown", retryable: true, message: "cancel failed" },
-      { connectionKey: "old-connection", issueId: "issue", rootId: "root", runId: "cancelled-run", title: "Stopped Task", status: "cancelled", cleanup: "pending", retryable: false }] };
-    if (name === "stop.retry") return { status: "ready" };
     if (name === "delivery.list") return { records: [{ connectionKey: "old-connection", issueId: "issue", rootId: "main", clientMessageId: "native-input", idempotencyKey: "key", body: "Saved input", createdAt: "2026-11-24T10:00:00Z", status: "saved", threadRootId: "new-root", threadAgentId: "new-thread-agent" }, { connectionKey: "old-connection", issueId: "issue", rootId: "root", clientMessageId: "uncertain-input", idempotencyKey: "uncertain-key", body: "Please verify original", createdAt: "2026-11-24T10:00:00Z", status: "pending_verification" }] };
     if (name === "delivery.verify") return { status: "pending_verification", message: "Original remains uncertain" };
     if (name === "delivery.resend") return { clientMessageId: "new-input", idempotencyKey: "new-key" };
@@ -613,12 +610,9 @@ it("management lists shared hidden objects and offers separate workspace and sel
   });
   try {
     await vi.waitFor(() => { expect(h.render()).toContain("人工隐藏"); expect(h.render()).toContain("Task · Root"); });
-    await vi.waitFor(() => expect(h.render()).toContain("停止结果"));
     const page = h.render();
-    for (const text of ["历史连接", "Original account", "https://original.example.test", "待核实输入 1", "cancel failed", "进程清理尚待确认", "新 Thread 已建立", "需要处理 · 1", "只读历史", "Read-only Task", "访问受限"])
+    for (const text of ["历史连接", "Original account", "https://original.example.test", "待核实输入 1", "新 Thread 已建立", "需要处理 · 1", "只读历史", "Read-only Task", "访问受限"])
       expect(page).toContain(text);
-    // The stop that still needs a decision is listed before the settled one.
-    expect(page.indexOf("Closed Task")).toBeLessThan(page.indexOf("Stopped Task"));
     h.action("读取缓存历史").onPress();
     await vi.waitFor(() => expect(h.render()).toContain("Original cached comment"));
     for (const text of ["Preserved output", "Preserved goal", "Cached task failure", "远端目录", "/remote/cache/../original", "运行中"]) expect(h.render()).toContain(text);
@@ -640,8 +634,6 @@ it("management lists shared hidden objects and offers separate workspace and sel
     h.action("复制引用").onPress();
     await vi.waitFor(() => expect(h.copied).toEqual(["[@Agent A](mention://agent/agent-id)"]));
     expect(h.render()).toContain("已复制");
-    h.action("重试此 Run").onPress();
-    await vi.waitFor(() => expect(h.calls).toContainEqual({ name: "stop.retry", input: { connectionKey: "old-connection", issueId: "issue", rootId: "root", runId: "failed-run" } }));
     expect(h.actions.map(action => action.actionLabel)).toContain("仅恢复 Paseo 工作区");
     h.action("恢复此讨论").onPress();
     await vi.waitFor(() => expect(h.calls).toContainEqual({ name: "hidden.restore", input: { connectionKey: "old-connection", issueId: "issue", rootId: "root" } }));

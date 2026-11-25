@@ -169,12 +169,6 @@ async function fixture(initialRuns: Run[] = []) {
   return { ...started, beforeAgents: (handler: () => Promise<void>) => { beforeAgents = handler; }, matching: (value: boolean) => { matching = value; }, host, archiveAgent, cancel: (handler: typeof cancel) => { cancel = handler; }, native, timelines, comments, requests, paseo, home, start, connect, eventsReady, signal, runs, providerEvents, failRuns: (value: boolean) => { failRuns = value; }, failDiscovery: (value: boolean) => { failDiscovery = value; }, discoveryPages: (pages: Comment[][]) => { discoveryPages = pages; }, truncated: (value: boolean) => { truncated = value; }, paginate: () => { paginate = true; }, failHistory: (value: boolean) => { failHistory = value; } };
 }
 
-const stopList = defineRpc({ name: "stop.list", input: z.object({}), output: z.object({ records: z.array(z.object({
-  connectionKey: z.string(), issueId: z.string(), rootId: z.string(), runId: z.string(), title: z.string(),
-  status: z.string().optional(), cleanup: z.string(), retryable: z.boolean(), message: z.string().optional(),
-})) }) });
-const stopRetry = defineRpc({ name: "stop.retry", input: z.object({ connectionKey: z.string(), issueId: z.string(), rootId: z.string(), runId: z.string() }),
-  output: z.object({ status: z.enum(["ready", "unavailable"]), message: z.string().optional() }) });
 const run = (id: string, status: string, root = "root"): Run => ({ id, status, issue_id: "issue", agent_id: "owned-agent", trigger_comment_id: root });
 
 it("native Stop cancels exactly the current tab's five unfinished statuses as whole runs", async () => {
@@ -190,7 +184,7 @@ it("native Stop cancels exactly the current tab's five unfinished statuses as wh
   expect(f.runs.filter(run => run.status === "running").map(run => run.id)).toEqual(["other-tab"]);
 });
 
-it("reads actual terminal race outcomes and keeps task status separate from cleanup evidence", async () => {
+it("reads actual terminal race outcomes without tracking cleanup evidence", async () => {
   const f = await fixture([run("finished", "running"), run("failed", "queued"), run("pending", "running"), run("unknown", "deferred"), run("confirmed", "running"), run("unconfirmed", "running"), run("opaque-result", "running")]);
   f.cancel(async id => ({ body: { ...f.runs.find(run => run.id === id), status: id === "finished" || id === "opaque-result" ? "completed" : id === "failed" ? "failed" : "cancelled",
     ...(id === "pending" ? { result: { process_cleanup_pending: true } } : {}),
@@ -201,11 +195,6 @@ it("reads actual terminal race outcomes and keeps task status separate from clea
   const thread = f.native.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
   await (await f.connect()).send({ type: "session.interrupt", requestId: "stop", sessionId: thread.id });
   expect(f.providerEvents).toContainEqual({ type: "request.completed", requestId: "stop" });
-  const records = (await f.server.rpc(stopList, {}, f.paseo)).records;
-  expect(records.map(record => [record.runId, record.status, record.cleanup, record.retryable])).toEqual([
-    ["finished", "completed", "unknown", false], ["failed", "failed", "unknown", false], ["pending", "cancelled", "pending", false],
-    ["unknown", "cancelled", "unknown", false], ["confirmed", "cancelled", "confirmed", false], ["unconfirmed", "cancelled", "unconfirmed", false], ["opaque-result", "completed", "unknown", false],
-  ]);
   const summaries = f.timelines.get(thread.id)!.filter(row => row.type === "plugin" && row.kind === "run-summary");
   expect(summaries.map(row => row.type === "plugin" ? row.data : null)).toEqual(expect.arrayContaining([
     expect.objectContaining({ runId: "finished", status: "completed" }), expect.objectContaining({ runId: "failed", status: "failed" }),
@@ -226,7 +215,7 @@ it("keeps available failure metadata from a per-Run Stop receipt when execution 
   expect(f.providerEvents.some(event => event.type === "timeline.item" && event.item.type === "assistant_message")).toBe(false);
 });
 
-it("reports partial failure natively and retains per-run retry after tab closure, restart and offline listing", async () => {
+it("reports partial failures natively without expanding the cancellation set", async () => {
   const f = await fixture([run("ok", "running"), run("unresolved", "queued"), run("still-active", "deferred")]);
   let release: () => void = () => {};
   const blocked = new Promise<void>(resolve => { release = resolve; });
@@ -245,26 +234,7 @@ it("reports partial failure natively and retains per-run retry after tab closure
   expect(f.providerEvents.filter(event => event.type === "session.turn" && event.sessionId === thread.id)).toEqual([original]);
   expect(f.requests.filter(request => request.method === "POST").map(request => request.url)).toEqual(["ok", "unresolved", "still-active"].map(id => `/api/issues/issue/tasks/${id}/cancel`));
   expect(f.runs.find(run => run.id === "later")?.status).toBe("running");
-  await f.archiveAgent(thread.id);
-  await f.dispose();
-  const restarted = f.start();
-  const records = (await restarted.server.rpc(stopList, {}, f.paseo)).records;
-  expect(records.filter(record => record.retryable).map(record => record.runId)).toEqual(["unresolved", "still-active"]);
-  const config = await readFile(join(f.home, ".multica", "config.json"), "utf8");
-  await writeFile(join(f.home, ".multica", "config.json"), "{}");
-  expect((await restarted.server.rpc(stopList, {}, f.paseo)).records).toEqual(records);
-  const retry = records.find(record => record.runId === "unresolved")!;
-  expect(await restarted.server.rpc(stopRetry, retry, f.paseo)).toMatchObject({ status: "unavailable" });
-  expect((await restarted.server.rpc(stopList, {}, f.paseo)).records.find(record => record.runId === "unresolved")?.retryable).toBe(true);
-  await writeFile(join(f.home, ".multica", "config.json"), config);
-  f.cancel(async id => ({ body: { ...f.runs.find(run => run.id === id), status: "cancelled" } }));
-  const before = f.requests.filter(request => request.method === "POST").length;
-  expect(await restarted.server.rpc(stopRetry, retry, f.paseo)).toEqual({ status: "ready" });
-  expect(f.requests.filter(request => request.method === "POST").slice(before)).toEqual([{ method: "POST", url: "/api/issues/issue/tasks/unresolved/cancel", slug: "product" }]);
-  expect(thread.archivedAt).toBeTruthy();
-  expect(f.native.effects).toEqual([]);
-  expect((await restarted.server.rpc(hiddenList, {}, f.paseo)).objects).toEqual([expect.objectContaining({ rootId: "root", agentId: thread.id, kind: "thread" })]);
-  expect((await restarted.server.rpc(stopList, {}, f.paseo)).records.filter(record => record.retryable).map(record => record.runId)).toEqual(["still-active"]);
+
 });
 
 it("settles the interrupted native turn and keeps later runs active without expanding cancellation", async () => {
@@ -288,7 +258,6 @@ it("settles the interrupted native turn and keeps later runs active without expa
   expect(turns()).toEqual([original]);
   release(); await interrupt;
   expect(f.requests.filter(request => request.method === "POST").map(request => request.url)).toEqual(["/api/issues/issue/tasks/first/cancel", "/api/issues/issue/tasks/second/cancel"]);
-  expect((await f.server.rpc(stopList, {}, f.paseo)).records.map(record => record.runId)).toEqual(["first", "second"]);
   expect(f.runs.find(run => run.id === "later")?.status).toBe("running");
   // The native host captured the original turn's settlement before interrupt.
   // Its terminal event must precede acknowledgement; later activity needs a new ID.
@@ -296,8 +265,7 @@ it("settles the interrupted native turn and keeps later runs active without expa
   const later = turns()[2];
   expect(later.turnId).not.toBe(original.turnId);
   expect(f.providerEvents.indexOf(later)).toBeLessThan(f.providerEvents.findIndex(event => event.type === "request.completed" && event.requestId === "fixed"));
-  const record = (await f.server.rpc(stopList, {}, f.paseo)).records[0];
-  await f.server.rpc(runObserve, record, f.paseo);
+  await f.server.rpc(runObserve, JSON.parse(thread.handle.slice(7)).data, f.paseo);
   await f.server.rpc(syncBootstrap, {}, f.paseo);
   expect(turns()).toEqual([original, { ...original, state: "completed" }, later]);
   f.runs.find(run => run.id === "later")!.status = "completed";
@@ -340,7 +308,6 @@ it("never cancels on whole-workspace archive, replay, session lifecycle or conne
   await restarted.server.rpc(syncBootstrap, {}, f.paseo);
   expect(f.requests.filter(request => request.method !== "GET")).toEqual([]);
   expect(f.runs[0].status).toBe("running");
-  expect((await restarted.server.rpc(stopList, {}, f.paseo)).records).toEqual([]);
 });
 
 it("never cancels when filtering a running Issue out or disabling its workspace rule", async () => {
@@ -360,9 +327,6 @@ it("retains unknown or malformed per-run results without preventing cancellation
   const thread = f.native.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
   await (await f.connect()).send({ type: "session.interrupt", requestId: "invalid", sessionId: thread.id });
   expect(f.providerEvents).toContainEqual(expect.objectContaining({ type: "request.failed", requestId: "invalid" }));
-  expect((await f.server.rpc(stopList, {}, f.paseo)).records.map(record => [record.runId, record.status, record.retryable])).toEqual([
-    ["wrong-id", "running", true], ["bad-body", "running", true], ["ok", "cancelled", false],
-  ]);
   expect(f.requests.filter(request => request.method === "POST")).toHaveLength(3);
 });
 

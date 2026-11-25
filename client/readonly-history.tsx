@@ -53,10 +53,7 @@ function SnapshotView({ issue, snapshot, theme }: { issue: Summary; snapshot: Sn
         <Markdown>{record.body}</Markdown>
       </View>)}
     </View> : null}
-    {snapshot.stops.length ? <View style={{ gap: 6 }}>
-      <SubHeading theme={theme}>停止记录</SubHeading>
-      {snapshot.stops.map(record => <Text key={record.runId} selectable style={muted}>Run {record.runId} · {runStatusLabel(record.status)} · 清理 {record.cleanup}{record.message ? ` · ${record.message}` : ""}</Text>)}
-    </View> : null}
+
   </View>;
 }
 

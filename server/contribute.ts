@@ -20,7 +20,6 @@ import { threadOpen, commentEventDetail, threadResolve } from "../shared/threads
 import { ManualHiding } from "./hiding.js";
 import { hiddenList, hiddenRestore } from "../shared/hiding.js";
 import { StopCoordinator } from "./stops.js";
-import { stopList, stopRetry } from "../shared/stops.js";
 import { CommentDelivery } from "./delivery.js";
 import { deliveryList, deliveryRead, deliveryTargets, deliveryMentions, deliveryVerify, deliveryResend } from "../shared/delivery.js";
 import { issueHistoryList, issueHistoryRead } from "../shared/access.js";
@@ -98,7 +97,7 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       return { ...connection.identity, connectionKey, profiles: connection.identity?.profiles ?? [], projectCount: Object.keys(connection.projects).length, issueCount: issues.length,
         hiddenCount: issues.reduce((count, issue) => count + Number(issue.manualHidden.workspace) + issue.manualHidden.discussions.length, 0),
         pendingDeliveryCount: issues.reduce((count, issue) => count + Object.values(issue.deliveries).filter(record => record.status === "received" || record.status === "pending_verification").length, 0),
-        stopWarningCount: issues.reduce((count, issue) => count + Object.values(issue.stopRecords).filter(record => record.retryable || record.cleanup === "pending" || record.cleanup === "unconfirmed").length, 0) };
+      };
     }) }));
     const lifecycle = new DiscussionLifecycle();
     const askusers = new AskUsers(store, connection, lifecycle);
@@ -126,8 +125,8 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     const runs = new RunSynchronizer(store);
     const runDetails = new RunDetails(store, connection);
     const stops = new StopCoordinator(store, connection, runs);
-    server.handle(askuserSkip, input => askusers.skip(input, stops, lifecycle));
-    const deliveries = new CommentDelivery(store, connection, stops, () => synchronizer.reconcile(), dependencies.now, record => askusers.deliveryChanged(record), lifecycle);
+    server.handle(askuserSkip, input => askusers.skip(input, lifecycle));
+    const deliveries = new CommentDelivery(store, connection, () => synchronizer.reconcile(), dependencies.now, record => askusers.deliveryChanged(record), lifecycle);
     threads.coordinateDeliveries(() => deliveries.waitForPosts());
     server.handle(deliveryVerify, async input => deliveries.verify(input));
     server.handle(deliveryResend, async input => deliveries.resend(input));
@@ -135,11 +134,6 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     server.handle(deliveryRead, async input => deliveries.read(input));
     server.handle(deliveryTargets, async () => deliveries.targets());
     server.handle(deliveryMentions, async input => deliveries.mentions(input));
-    server.handle(stopList, async () => stops.list());
-    server.handle(stopRetry, async input => {
-      try { await stops.retry(input); return { status: "ready" as const }; }
-      catch (error) { return { status: "unavailable" as const, message: error instanceof Error ? error.message : "停止重试失败。" }; }
-    });
     const descriptions = new TaskDescriptions(store);
     server.registerProvider(createMulticaProvider(store, threads, runs, stops, deliveries, descriptions, lifecycle, askusers));
     server.handle(observeTaskDescription, input => descriptions.observe(input));

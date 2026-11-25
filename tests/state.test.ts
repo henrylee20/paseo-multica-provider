@@ -60,3 +60,16 @@ it("retries a failed initial load after the underlying file is repaired", async 
     expect(Object.keys((await store.read()).connections)).toEqual(["recovered"]);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
+
+it("reads old state while stripping removed fields without migration", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "multica-state-"));
+  try {
+    const issue = { remoteWorkspaceId: "remote", workspaceId: "native", cwd: directory, title: "Task", description: "Goal",
+      stopEpochs: { main: 9 }, stopRecords: { old: { cleanup: "unknown" } } };
+    await writeFile(join(directory, "state.json"), JSON.stringify({ version: 1, connections: { old: { rules: {}, projects: {}, issues: { task: issue } } } }));
+    const state = await new StateStore(directory).read();
+    expect(state.connections.old.issues.task.title).toBe("Task");
+    expect(state.connections.old.issues.task).not.toHaveProperty("stopEpochs");
+    expect(state.connections.old.issues.task).not.toHaveProperty("stopRecords");
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});

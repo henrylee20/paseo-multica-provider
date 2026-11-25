@@ -5,7 +5,6 @@ import { remoteFetch, type AuthenticatedConnection } from "./connection.js";
 import type { DeliveryRecord } from "./delivery-state.js";
 import type { RunAddress } from "./runs.js";
 import { StateStore } from "./state.js";
-import type { StopCoordinator } from "./stops.js";
 import { remoteJson, workspaceSchema, type RemoteWorkspace } from "./sync.js";
 import { nativeOriginals, hasNativeOriginal } from "./projection-recovery.js";
 import type { NativeHost } from "./native-host.js";
@@ -39,8 +38,7 @@ export class CommentDelivery {
   private readonly listeners = new Map<string, Set<{ deliver(record: DeliveryRecord, includeOriginal?: boolean): void; recovery: boolean }>>();
   private readonly posts = new Map<string, Promise<void>>();
   private readonly operations = new Set<Promise<void>>();
-  constructor(private readonly store: StateStore, private readonly connection: () => Promise<AuthenticatedConnection>, private readonly stops: StopCoordinator,
-    private readonly onSaved: () => Promise<void>, private readonly now: () => Date = () => new Date(), private readonly onChanged?: (record: DeliveryRecord) => Promise<void>, private readonly lifecycle?: DiscussionLifecycle) {}
+  constructor(private readonly store: StateStore, private readonly connection: () => Promise<AuthenticatedConnection>, private readonly onSaved: () => Promise<void>, private readonly now: () => Date = () => new Date(), private readonly onChanged?: (record: DeliveryRecord) => Promise<void>, private readonly lifecycle?: DiscussionLifecycle) {}
   private writable(record: RunAddress & { askuserAnswerTo?: string }, issue: IssueMapping | undefined) {
     assertWritableIssue(issue);
     if (record.askuserAnswerTo) assertAskuserWritable(issue, record, this.lifecycle);
@@ -153,11 +151,10 @@ export class CommentDelivery {
     void post.finally(() => { this.posts.delete(record.idempotencyKey); this.operations.delete(post); }).catch(() => {});
     return post;
   }
-  async admit(address: RunAddress, prompt: ProviderPrompt, target: { parentCommentId?: string; askuserAnswerTo?: string } = {}, receivedEpoch?: number): Promise<DeliveryRecord> {
+  async admit(address: RunAddress, prompt: ProviderPrompt, target: { parentCommentId?: string; askuserAnswerTo?: string } = {}): Promise<DeliveryRecord> {
     const body = prompt.input.type === "message" && prompt.input.content.every(part => part.type === "text" && !("mimeType" in part))
       ? prompt.input.content.map(part => part.type === "text" ? part.text : "").join("") : undefined;
     if (body === undefined || !body.trim() || prompt.outputSchema !== undefined) throw new Error("仅支持非空文本评论；请移除附件或结构化输出。 ");
-    const stopEpoch = receivedEpoch ?? await this.stops.epoch(address);
     let record!: DeliveryRecord;
     await this.store.update(state => {
       const issue = state.connections[address.connectionKey]?.issues[address.issueId];
@@ -169,7 +166,7 @@ export class CommentDelivery {
         record = existing; return;
       }
       this.writable({ ...address, ...target }, issue);
-      record = issue.deliveries[id] = { ...address, ...target, remoteWorkspaceId: issue.remoteWorkspaceId, clientMessageId: prompt.clientMessageId, idempotencyKey: randomUUID(), body, createdAt: this.now().toISOString(), stopEpoch, nativeDelivery: prompt.delivery, status: "received", retryCount: 0 };
+      record = issue.deliveries[id] = { ...address, ...target, remoteWorkspaceId: issue.remoteWorkspaceId, clientMessageId: prompt.clientMessageId, idempotencyKey: randomUUID(), body, createdAt: this.now().toISOString(), nativeDelivery: prompt.delivery, status: "received", retryCount: 0 };
     });
     this.publish(record); return record;
   }
@@ -204,7 +201,7 @@ export class CommentDelivery {
       if (!this.withinRetention(record)) { await this.halt(record, "已达到 7 天回执保证期限或原始时间无法核实；需要用户决定重新发送。"); return; }
       await connection.assertCurrent?.();
       let claimed = false;
-      await this.stops.guardDelivery(record, record.stopEpoch, state => {
+      await this.store.update(state => {
         this.writable(record, state.connections[record.connectionKey]?.issues[record.issueId]);
         const current = state.connections[record.connectionKey].issues[record.issueId].deliveries[deliveryKey(record.rootId, record.clientMessageId)];
         if (retry ? !["received", "pending_verification"].includes(current.status) || current.recoveryHalted || current.retryCount > 0 : current.status !== "received" || current.claimedAt) return;
@@ -278,7 +275,6 @@ export class CommentDelivery {
   }
   async resend(address: RunAddress & { clientMessageId: string; requestId: string; acknowledgeDuplicateRisk: true }) {
     const original = await this.record(address);
-    const receivedEpoch = original.askuserAnswerTo ? await this.stops.epoch(original) : undefined;
     // Revalidate the original identity before accepting a new user-authorized attempt.
     await this.context(original);
     await this.posts.get(original.idempotencyKey);
@@ -298,7 +294,7 @@ export class CommentDelivery {
       next = issue.deliveries[deliveryKey(original.rootId, clientMessageId)] = {
         connectionKey: original.connectionKey, issueId: original.issueId, rootId: original.rootId, parentCommentId: original.parentCommentId, askuserAnswerTo: original.askuserAnswerTo, remoteWorkspaceId: original.remoteWorkspaceId ?? issue.remoteWorkspaceId,
         clientMessageId, idempotencyKey: randomUUID(), retryOf: original.idempotencyKey, body: original.body,
-        createdAt: this.now().toISOString(), stopEpoch: receivedEpoch ?? issue.stopEpochs[original.rootId] ?? 0,
+        createdAt: this.now().toISOString(),
         nativeDelivery: "auto", status: "received", retryCount: 0,
       };
     });

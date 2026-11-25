@@ -10,7 +10,6 @@ import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { ProviderConnection, ProviderEvent } from "@getpaseo/plugin/server/provider";
 import { workspaceEnable, syncBootstrap, connectionStatus, connectionHistory as historyRpc, multicaSettings, workspaceList } from "../shared/contracts.js";
 import { deliveryList, deliveryMentions } from "../shared/delivery.js";
-import { stopList, stopRetry } from "../shared/stops.js";
 import { hiddenList } from "../shared/hiding.js";
 import { threadOpen } from "../shared/threads.js";
 import { createServerContribution } from "../server/contribute.js";
@@ -153,7 +152,7 @@ it("management retains verified service and account history after logout without
   await f.server.rpc(connectionStatus, {}, f.paseo);
   const history = defineRpc({ name: "connection.history", input: z.object({}), output: z.object({ connections: z.array(z.object({
     connectionKey: z.string(), apiUrl: z.string().optional(), user: z.object({ id: z.string(), name: z.string(), email: z.string() }).optional(), profiles: z.array(z.string()),
-    projectCount: z.number(), issueCount: z.number(), hiddenCount: z.number(), pendingDeliveryCount: z.number(), stopWarningCount: z.number(),
+    projectCount: z.number(), issueCount: z.number(), hiddenCount: z.number(), pendingDeliveryCount: z.number(),
   })) }) });
   const result = await f.server.rpc(history, {}, f.paseo);
   expect(result.connections).toEqual(expect.arrayContaining([
@@ -180,8 +179,6 @@ it("credential rotation reuses history while account and service switches isolat
   originalThread.archivedAt = "2026-11-24T10:05:00Z";
   await f.server.hook("agent.archive.after", { agent: { id: originalThread.id, provider: "multica", workspaceId: originalThread.workspaceId, cwd: originalThread.cwd, parentAgentId: null, title: null }, archivedAt: originalThread.archivedAt }, f.paseo);
   const hidden = await f.server.rpc(hiddenList, {}, f.paseo);
-  const warnings = await f.server.rpc(stopList, {}, f.paseo);
-  expect(warnings.records).toEqual([expect.objectContaining({ ...original, runId: "run", retryable: true })]);
   const originalIds = { projects: f.projects.map(value => value.projectId), workspaces: f.workspaces.map(value => value.id), agents: f.agents.map(value => value.id) };
 
   await f.login(1);
@@ -206,7 +203,6 @@ it("credential rotation reuses history while account and service switches isolat
   await f.server.rpc(threadOpen, f.address(other.connectionKey), f.paseo);
   expect(f.events).toContainEqual(expect.objectContaining({ type: "timeline.item", sessionId: otherThread.id, item: expect.objectContaining({ type: "assistant_message", text: "Lin: \n\nOriginal Lin comment" }) }));
   const beforeRetry = f.posts.length;
-  expect(await f.server.rpc(stopRetry, { ...original, runId: "run" }, f.paseo)).toMatchObject({ status: "unavailable" });
   await f.send("old-tab-new-account");
   await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records.find(record => record.clientMessageId === "old-tab-new-account")?.status).toBe("failed");
   expect(f.posts.length).toBe(beforeRetry);
@@ -233,11 +229,10 @@ it("credential rotation reuses history while account and service switches isolat
     .toMatchObject({ ...immutableDelivery, status: "pending_verification" });
   const retainedIntents = Object.values((JSON.parse(await f.persisted()) as LocalState).connections[original.connectionKey].issues.issue.deliveries);
   expect(retainedIntents.find(record => record.clientMessageId === "pending-input")).toMatchObject({
-    ...immutableDelivery, stopEpoch: originalIntent.stopEpoch, nativeDelivery: originalIntent.nativeDelivery,
+    ...immutableDelivery, nativeDelivery: originalIntent.nativeDelivery,
     remoteWorkspaceId: originalIntent.remoteWorkspaceId, status: "pending_verification",
   });
   expect(await f.server.rpc(hiddenList, {}, f.paseo)).toEqual(hidden);
-  expect(await f.server.rpc(stopList, {}, f.paseo)).toEqual(warnings);
 
   await f.login(1);
   await f.server.rpc(syncBootstrap, {}, f.paseo);
@@ -245,18 +240,18 @@ it("credential rotation reuses history while account and service switches isolat
   expect(f.agents).toHaveLength(6);
   expect(originalThread.archivedAt).toBeTruthy();
   const history = await f.server.rpc(historyRpc, {}, f.paseo);
-  expect(history.connections.find(connection => connection.connectionKey === original.connectionKey)).toMatchObject({ hiddenCount: 1, pendingDeliveryCount: 1, stopWarningCount: 1 });
+  expect(history.connections.find(connection => connection.connectionKey === original.connectionKey)).toMatchObject({ hiddenCount: 1, pendingDeliveryCount: 1 });
   expect(f.secretAbsent([history, f.events, await f.persisted()])).toBe(true);
 });
 
-it("an account switch during Stop setup preserves the original warning without sending an old cancellation", async () => {
+it("an account switch during Stop setup fails without sending an old cancellation", async () => {
   const f = await fixture();
   const gate = pause(); f.blockWorkspaces(gate.handler);
   const thread = f.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
   const stopping = (await f.connect()).send({ type: "session.interrupt", requestId: "switch-during-stop", sessionId: thread.id });
   await gate.waiting; await f.login(2); gate.release(); await stopping;
   expect(f.posts).toEqual([]);
-  expect((await f.server.rpc(stopList, {}, f.paseo)).records).toEqual([expect.objectContaining({ ...f.address(), runId: "run", retryable: true })]);
+  expect(f.events).toContainEqual(expect.objectContaining({ type: "request.failed", requestId: "switch-during-stop" }));
 });
 
 it("a management action opened under an old account cannot enable rules for a newly selected account", async () => {

@@ -20,5 +20,4 @@ export const cachedIssueSnapshot = z.object({
   runs: z.array(z.object({ id: z.string(), agentName: z.string(), status: z.string(), ownerRootId: z.string().optional(), metadata: runMetadataSchema.optional(), messages: z.array(runMessageSchema).optional() })),
   askuserCards: z.array(askuserCardSchema).default([]),
   deliveries: z.array(z.object({ clientMessageId: z.string(), idempotencyKey: z.string(), body: z.string(), status: z.string(), createdAt: z.string(), message: z.string().optional() })),
-  stops: z.array(z.object({ runId: z.string(), status: z.string(), cleanup: z.string(), message: z.string().optional() })),
 });

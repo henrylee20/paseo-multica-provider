@@ -611,19 +611,6 @@ it.each(["designated user", "different account", "logged out", "inaccessible", "
   expect(f.skips).toEqual([]); expect(f.posts).toEqual([]);
 });
 
-it("honors the original Stop fence when a skip preflight is waiting on remote access verification", async () => {
-  const f = await fixture(); f.comments[0].attachments = [attachment("stopped-skip")]; f.documents.set("stopped-skip", card); await f.sync();
-  let entered!: () => void; let release!: () => void;
-  const arrived = new Promise<void>(resolve => { entered = resolve; }); const blocked = new Promise<void>(resolve => { release = resolve; });
-  f.remote.beforeIssueCheck = async () => { entered(); await blocked; };
-  const action = f.server.rpc(skipCard, { ...f.address(), commentId: "root", attachmentId: "stopped-skip", confirmed: true }, f.paseo);
-  const settled = action.then(value => ({ value }), error => ({ error }));
-  await arrived;
-  await (await f.connect()).send({ type: "session.interrupt", requestId: "stop-skip", sessionId: f.agents[1].id });
-  release();
-  expect(await settled).toMatchObject({ error: expect.objectContaining({ message: "Delivery was stopped" }) });
-  expect(f.skips).toEqual([]); expect(f.posts).toEqual([]);
-});
 
 it.each([200, 202, 204])("reads skip timestamp and operator only from confirmed timeline metadata after HTTP %s", async status => {
   const f = await fixture(); f.comments[0].attachments = [attachment("skip-metadata")]; f.documents.set("skip-metadata", card); await f.sync();
@@ -766,21 +753,6 @@ it("Stop resolves pending native cards locally and preserves a reopen entry with
   expect(f.posts).toEqual([]); expect(f.skips).toEqual([]);
 });
 
-
-it("fences an answer received before Stop while its identity preflight is still waiting", async () => {
-  const f = await fixture(); f.comments[0].attachments = [attachment("stopped-answer")]; f.documents.set("stopped-answer", card); await f.sync();
-  let entered!: () => void; let release!: () => void;
-  const arrived = new Promise<void>(resolve => { entered = resolve; }); const blocked = new Promise<void>(resolve => { release = resolve; });
-  await f.refreshLogin();
-  f.remote.beforeMe = async () => { entered(); await blocked; };
-  const submitted = answer(f, ["停止前收到的回答"]).then(value => ({ value }), error => ({ error }));
-  await arrived;
-  await (await f.connect()).send({ type: "session.interrupt", requestId: "stop-answer", sessionId: f.agents[1].id });
-  release();
-  expect(await submitted).toMatchObject({ error: expect.objectContaining({ message: "Delivery was stopped" }) });
-  expect(f.posts).toEqual([]); expect(f.skips).toEqual([]);
-  expect((await f.server.rpc(deliveryList, {}, f.paseo)).records).toMatchObject([{ status: "failed", body: expect.stringContaining("停止前收到的回答") }]);
-});
 
 
 it.each(["thread hide", "workspace hide", "forbidden", "not found", "rule disabled", "filter exit"])("immediately resolves every live permission after %s while preserving cached cards", async reason => {
@@ -988,18 +960,3 @@ it("clears old-service permissions and never borrows a newly selected service to
 });
 
 
-it("fences an explicit answer resend received before Stop while its workspace preflight waits", async () => {
-  const f = await fixture(); f.comments[0].attachments = [attachment("stop-resend")]; f.documents.set("stop-resend", card); await f.sync();
-  f.remote.postStatus = 403; await expect(answer(f, ["原始回答"])).rejects.toThrow();
-  const original = (await f.server.rpc(deliveryList, {}, f.paseo)).records[0];
-  let entered!: () => void; let release!: () => void;
-  const arrived = new Promise<void>(resolve => { entered = resolve; }); const blocked = new Promise<void>(resolve => { release = resolve; });
-  f.remote.beforeWorkspaces = async () => { entered(); await blocked; };
-  const decision = f.server.rpc(deliveryResend, { ...original, requestId: "stopped-resend", acknowledgeDuplicateRisk: true }, f.paseo);
-  await arrived;
-  await (await f.connect()).send({ type: "session.interrupt", requestId: "stop-resend", sessionId: f.agents[1].id });
-  f.remote.postStatus = 200; release(); await decision;
-  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[1]?.status).toBe("failed");
-  expect((await f.server.rpc(deliveryList, {}, f.paseo)).records[1]).toMatchObject({ body: original.body, message: "Delivery was stopped" });
-  expect(f.posts).toHaveLength(1); expect(f.skips).toEqual([]);
-});

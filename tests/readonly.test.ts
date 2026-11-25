@@ -12,7 +12,6 @@ import { workspaceEnable, syncBootstrap, syncStatus } from "../shared/contracts.
 import { threadOpen } from "../shared/threads.js";
 import { runOpen, runRead } from "../shared/runs.js";
 import { hiddenList, hiddenRestore } from "../shared/hiding.js";
-import { stopList, stopRetry } from "../shared/stops.js";
 import { createServerContribution } from "../server/contribute.js";
 import { FakeServer } from "./support/fake-server.js";
 
@@ -348,7 +347,6 @@ it("closes only the hidden projection before rearchiving a host-restored tab and
   expect(f.events).toContainEqual(expect.objectContaining({ type: "request.failed", requestId: "late-closed-interrupt" }));
   expect(f.posts).toEqual([]);
   expect(f.runs[0].status).toBe("running");
-  expect((await f.server.rpc(stopList, {}, f.paseo)).records).toEqual([]);
   expect((await f.server.rpc(hiddenList, {}, f.paseo)).objects).toContainEqual(expect.objectContaining({ ...address, agentId: thread.id }));
   await (await f.connect()).send({ type: "session.open", requestId: "cached-hidden-open", sessionId: thread.id, history: "skip", persistence: JSON.parse(thread.handle.slice(7)), config: { cwd: thread.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
   expect(f.events).toContainEqual(expect.objectContaining({ type: "session.opened", requestId: "cached-hidden-open" }));
@@ -380,7 +378,6 @@ it.each([undefined, "main"])("manual restore of %s preserves every unselected hi
   expect((await f.server.rpc(hiddenList, {}, f.paseo)).objects.map(object => object.rootId).sort()).toEqual(selectedRoot ? ["other", "root"] : ["main", "other", "root"]);
   expect(f.agents.map(agent => ({ id: agent.id, cwd: agent.cwd, handle: agent.handle }))).toEqual(original);
   expect(f.runs[0].status).toBe("running"); expect(f.posts).toEqual([]);
-  expect((await f.server.rpc(stopList, {}, f.paseo)).records).toEqual([]);
 });
 
 it.each(["automatic", "manual"])("an explicit Stop accepted before %s hidden projection closure finishes independently", async restore => {
@@ -416,7 +413,6 @@ it.each(["automatic", "manual"])("an explicit Stop accepted before %s hidden pro
   expect(f.events).toContainEqual({ type: "session.closed", sessionId: thread.id });
   expect(f.posts.map(post => post.path)).toEqual(["/api/issues/issue/tasks/run/cancel"]);
   expect(f.events).toContainEqual({ type: "request.completed", requestId: "accepted-explicit-stop" });
-  expect((await f.server.rpc(stopList, {}, f.paseo)).records).toContainEqual(expect.objectContaining({ runId: "run", status: "cancelled" }));
 });
 
 it("a lost workspace restore acknowledgement still reapplies unselected hiding before releasing its guard", async () => {
@@ -462,8 +458,6 @@ it("object permission loss keeps cached Run output, failed stops and manual hidi
   expect(await f.server.rpc(runOpen, { ...address, runId: "run" }, f.paseo)).toMatchObject({ status: "cached", revision: output.revision });
   expect((await f.server.rpc(runRead, { ...address, runId: "run", revision: output.revision!, offset: 0 }, f.paseo)).text).toContain("Cached execution output");
   await (await f.connect()).send({ type: "session.interrupt", sessionId: thread.id, requestId: "readonly-stop" });
-  expect((await f.server.rpc(stopList, {}, f.paseo)).records).toHaveLength(1);
-  expect(await f.server.rpc(stopRetry, { ...address, runId: "run" }, f.paseo)).toMatchObject({ status: "unavailable" });
   expect(await f.server.rpc(hiddenRestore, address, f.paseo)).toMatchObject({ status: "unavailable" });
   expect(f.posts).toHaveLength(count);
   expect(f.requests.slice(beforeReads).some(path => path.includes("/comments?") || path.includes("/messages"))).toBe(false);
@@ -475,7 +469,6 @@ it("object permission loss keeps cached Run output, failed stops and manual hidi
   await f.server.rpc(syncBootstrap, {}, f.paseo);
   expect(f.native.archived).toBe(false); expect(thread.archivedAt).toBeTruthy();
   expect((await f.server.rpc(hiddenList, {}, f.paseo)).objects).toContainEqual(expect.objectContaining({ rootId: "root", agentId: thread.id }));
-  expect((await f.server.rpc(stopList, {}, f.paseo)).records).toHaveLength(1);
 });
 
 it("access loss while an accepted send waits prevents its claim and retains the immutable failed input", async () => {

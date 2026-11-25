@@ -243,7 +243,7 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
                 if (interruptedTurnId) interruptSettlements.get(input.sessionId)?.(interruptedTurnId);
                 emit({ type: "request.completed", requestId: input.requestId });
               } catch (error) {
-                emit({ type: "request.failed", requestId: input.requestId, error: { code: "stop_incomplete", message: error instanceof Error ? error.message : "停止失败，请在管理页重试。" } });
+                emit({ type: "request.failed", requestId: input.requestId, error: { code: "stop_incomplete", message: error instanceof Error ? error.message : "停止失败，请重试。" } });
               }
             })();
             const accepted = acceptedInterrupts.get(input.sessionId) ?? new Set();

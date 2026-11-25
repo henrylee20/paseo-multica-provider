@@ -6,7 +6,6 @@ import { connectionStatus, multicaSettings, workspaceList, workspaceEnable, type
 import { useSyncStatus } from "./sync-status.js";
 import { describeRule, WorkspaceRuleEditor } from "./workspace-rule.js";
 import { HiddenObjects } from "./hidden-objects.js";
-import { StopResults } from "./stop-results.js";
 import { DeliveryManagement, MentionReferences } from "./delivery-status.js";
 import { ConnectionHistory } from "./connection-history.js";
 import { ReadonlyHistory } from "./readonly-history.js";
@@ -184,7 +183,6 @@ export function ConnectionScreen({ host, theme, layout, navigation, scope = "man
     {/* Records that need a decision come right after the connection; recovery and tools follow the rules. */}
     {connection}
     <DeliveryManagement theme={theme} navigation={navigation} host={host} refreshKey={refreshKey} />
-    <StopResults theme={theme} refreshKey={refreshKey} />
     {rules}
     <HiddenObjects theme={theme} refreshKey={refreshKey} />
     <ReadonlyHistory theme={theme} />

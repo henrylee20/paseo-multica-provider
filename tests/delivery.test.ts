@@ -261,25 +261,6 @@ it("unknown saved echo stays pending verification after response loss and never 
   expect(f.posts).toHaveLength(1);
 });
 
-it("native Stop fences a received input before its initial POST and preserves that input", async () => {
-  const f = await fixture(true);
-  let release: () => void = () => {}, reached: () => void = () => {};
-  const blocked = new Promise<void>(resolve => { release = resolve; }), waiting = new Promise<void>(resolve => { reached = resolve; });
-  f.beforeMe(async () => { reached(); await blocked; });
-  const configPath = join(f.home, ".multica/config.json");
-  await writeFile(configPath, `${await readFile(configPath, "utf8")}\n`);
-  await f.send("root", "Old pending input", "stopped-input", "steer");
-  await waiting;
-  const thread = f.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
-  const stop = (await f.connect()).send({ type: "session.interrupt", requestId: "stop", sessionId: thread.id });
-  // Stop's durable epoch update precedes its own /api/me wait.
-  await new Promise(resolve => setTimeout(resolve, 20));
-  release(); await stop;
-  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[0]?.status).toBe("failed");
-  expect(f.posts.map(post => post.path)).toEqual(["/api/issues/issue/tasks/run/cancel"]);
-  expect((await f.server.rpc(deliveryList, {}, f.paseo)).records[0]).toMatchObject({ body: "Old pending input", message: "Delivery was stopped" });
-});
-
 it("explicit mentions contain typed service identities and same-name agents remain distinct", async () => {
   const f = await fixture();
   const address = { connectionKey: f.agents[0].labels["multica.connection"], issueId: "issue" };
@@ -425,27 +406,6 @@ it("a missing receipt at the seven-day bound stays pending despite a currently w
   await f.server.rpc(syncBootstrap, {}, f.paseo);
   expect(f.posts).toHaveLength(2);
   expect((await f.server.rpc(deliveryList, {}, f.paseo)).records[1]).toMatchObject({ idempotencyKey: original.idempotencyKey, createdAt: original.createdAt, status: "pending_verification", message: expect.stringContaining("7 天") });
-});
-
-
-it("Stop during receipt recovery fences the old retry while preserving pending input", async () => {
-  const f = await fixture(true, true);
-  await f.send("root", "Receipt anchor before Stop", "stop-anchor", "steer");
-  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[0]?.status).toBe("saved");
-  f.post(async () => ({ status: 503 }));
-  await f.send("root", "Do not execute after Stop", "stop-retry", "steer");
-  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[1]?.status).toBe("pending_verification");
-  const original = (await f.server.rpc(deliveryList, {}, f.paseo)).records[1];
-  let release!: () => void, reached!: () => void;
-  const blocked = new Promise<void>(resolve => { release = resolve; }), waiting = new Promise<void>(resolve => { reached = resolve; });
-  f.beforeLookup(async key => { if (key === original.idempotencyKey) { reached(); await blocked; } });
-  const refresh = f.server.rpc(syncBootstrap, {}, f.paseo);
-  await waiting;
-  const thread = f.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
-  await (await f.connect()).send({ type: "session.interrupt", requestId: "stop-recovery", sessionId: thread.id });
-  release(); await refresh;
-  expect(f.posts.filter(post => post.path.endsWith("/comments"))).toHaveLength(2);
-  expect((await f.server.rpc(deliveryList, {}, f.paseo)).records[1]).toMatchObject({ body: "Do not execute after Stop", status: "pending_verification", message: expect.stringContaining("stopped") });
 });
 
 

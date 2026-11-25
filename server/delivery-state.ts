@@ -2,7 +2,7 @@ import { z } from "zod";
 
 export const deliveryRecordSchema = z.object({
   connectionKey: z.string(), issueId: z.string(), rootId: z.string(), clientMessageId: z.string(),
-  idempotencyKey: z.string(), body: z.string(), createdAt: z.string(), stopEpoch: z.number().int().nonnegative(),
+  idempotencyKey: z.string(), body: z.string(), createdAt: z.string(),
   nativeDelivery: z.enum(["auto", "steer"]), status: z.enum(["received", "saved", "failed", "pending_verification"]),
   parentCommentId: z.string().optional(), askuserAnswerTo: z.string().optional(),
   remoteWorkspaceId: z.string().optional(), retryOf: z.string().optional(),

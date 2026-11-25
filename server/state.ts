@@ -3,7 +3,6 @@ import { join } from "node:path";
 import { z } from "zod";
 import { storedRunSchema } from "./run-state.js";
 import { runMessageSchema } from "../shared/runs.js";
-import { stopRecordSchema } from "./stop-state.js";
 import { threadSchema } from "./thread-state.js";
 import { deliveryRecordSchema } from "./delivery-state.js";
 import { connectionIdentitySchema, taskRuleSchema } from "../shared/contracts.js";
@@ -21,8 +20,6 @@ const issueSchema = z.object({
   threads: z.record(z.string(), threadSchema).default({}),
   runs: z.record(z.string(), storedRunSchema).default({}),
   runDetails: z.record(z.string(), z.object({ messages: z.array(runMessageSchema) })).default({}),
-  stopEpochs: z.record(z.string(), z.number().int().nonnegative()).default({}),
-  stopRecords: z.record(z.string(), stopRecordSchema).default({}),
   askuserAttachments: z.record(z.string(), askuserAttachmentSchema).optional(),
   askuserCards: z.record(z.string(), storedAskuserCardSchema).optional(),
   deliveries: z.record(z.string(), deliveryRecordSchema).default({}),

@@ -10,7 +10,6 @@ import { StateStore, type IssueMapping } from "./state.js";
 import { remoteJson, workspaceSchema, type RemoteWorkspace } from "./sync.js";
 import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
 import { askuserUnavailableReason, assertAskuserWritable } from "./askuser-policy.js";
-import type { StopCoordinator } from "./stops.js";
 
 type Address = { connectionKey: string; issueId: string; rootId: string };
 type CardAddress = { connectionKey: string; issueId: string; commentId: string; attachmentId: string };
@@ -364,20 +363,14 @@ export class AskUsers {
     await this.publish(address.connectionKey, address.issueId);
     return bounded(this.data(address, (await this.store.read()).connections[address.connectionKey].issues[address.issueId]));
   }
-  skip(address: CardAddress, stops: StopCoordinator, lifecycle: DiscussionLifecycle) { return this.action(address, "skip", () => this.skipCard(address, stops, lifecycle)); }
-  private async skipCard(address: CardAddress, stops: StopCoordinator, lifecycle: DiscussionLifecycle) {
+  skip(address: CardAddress, lifecycle: DiscussionLifecycle) { return this.action(address, "skip", () => this.skipCard(address, lifecycle)); }
+  private async skipCard(address: CardAddress, lifecycle: DiscussionLifecycle) {
     const issue = (await this.store.read()).connections[address.connectionKey]?.issues[address.issueId];
     const rootId = issue?.askuserCards?.[cardKey(address.commentId, address.attachmentId)]?.rootId;
     if (!rootId) throw new Error("提问卡片不可用。");
-    const owner = { ...address, rootId };
-    // Capture the original fence before any identity or remote preflight awaits.
-    const epoch = issue!.stopEpochs[rootId] ?? 0;
     const { connection, workspace } = await this.actionContext(address, lifecycle);
     await connection.assertCurrent?.();
-    await stops.guardDelivery(owner, epoch, state => {
-      this.actionable(address, state.connections[address.connectionKey]?.issues[address.issueId], lifecycle);
-    });
-    // Keep the final CLI check before the durable fence, then issue POST immediately.
+    this.actionable(address, (await this.store.read()).connections[address.connectionKey]?.issues[address.issueId], lifecycle);
     let response: Response;
     try {
       response = await fetch(`${connection.apiUrl}/api/issues/${encodeURIComponent(address.issueId)}/comments/${encodeURIComponent(address.commentId)}/askuser-skip`, {
@@ -409,11 +402,6 @@ export class AskUsers {
     return this.action(address, "answer", () => this.submitAnswer(address, input, deliveries));
   }
   private async submitAnswer(address: CardAddress, input: unknown, deliveries: CommentDelivery) {
-    // Preserve the epoch from receipt, before credential or workspace awaits.
-    const received = (await this.store.read()).connections[address.connectionKey]?.issues[address.issueId];
-    const owner = received?.askuserCards?.[cardKey(address.commentId, address.attachmentId)]?.rootId;
-    if (!received || !owner) throw new Error("提问卡片不可用。");
-    const epoch = received.stopEpochs[owner] ?? 0;
     await this.checkConnection(address.connectionKey);
     const issue = (await this.store.read()).connections[address.connectionKey]?.issues[address.issueId];
     if (!issue) throw new Error("提问卡片不可用。");
@@ -424,7 +412,7 @@ export class AskUsers {
     const previous = attempts.at(-1);
     if ((!previous || previous.status === "failed") && (card.status !== "pending" || card.readOnly)) throw new Error(card.readOnlyReason || "提问卡片已解决。");
     const body = previous && previous.status !== "failed" ? previous.body : formatAskuserAnswers(card, input);
-    const record = previous && previous.status !== "failed" ? previous : await deliveries.admit({ connectionKey: address.connectionKey, issueId: address.issueId, rootId: card.rootId }, { clientMessageId: `${prefix}${attempts.length}`, delivery: "auto", input: { type: "message", content: [{ type: "text", text: body }] } }, { parentCommentId: address.commentId, askuserAnswerTo: address.commentId }, epoch);
+    const record = previous && previous.status !== "failed" ? previous : await deliveries.admit({ connectionKey: address.connectionKey, issueId: address.issueId, rootId: card.rootId }, { clientMessageId: `${prefix}${attempts.length}`, delivery: "auto", input: { type: "message", content: [{ type: "text", text: body }] } }, { parentCommentId: address.commentId, askuserAnswerTo: address.commentId });
     const current = await deliveries.settle(record);
     if (current.status === "failed") throw new Error(current.message || "回答未保存，请修正后重试。");
     if (current.status === "saved") await this.store.update(state => {
