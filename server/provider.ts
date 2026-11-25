@@ -80,13 +80,6 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
         // original. Canonical recovery also acknowledges originals it skips.
         const firstOriginal = row.role === "event" || rememberOriginal(sessionId, row);
         if ((includeOriginal && firstOriginal) || row.role === "event") emit({ type: "timeline.item", sessionId, item: projectRow(address, row), ...(timestamp && Number.isFinite(Date.parse(timestamp)) ? { timestamp } : {}) });
-        if (row.role !== "event") emit({ type: "timeline.item", sessionId, item: {
-          type: "plugin", id: `multica:comment-source:${row.commentId}`, pluginId: "multica", kind: "comment-event", version: 1,
-          data: { ...address, recordId: row.id, commentId: row.commentId, category: "source", truncated: false,
-            text: row.sourceCreatedAt || row.sourceUpdatedAt ? "首次读取时的来源记录。" : "远端记录未提供来源时间。",
-            ...(row.sourceCreatedAt ? { sourceCreatedAt: row.sourceCreatedAt } : {}), ...(row.sourceUpdatedAt ? { sourceUpdatedAt: row.sourceUpdatedAt } : {}),
-          },
-        } });
       };
       return {
         version: 1, capabilities,
@@ -144,7 +137,7 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
                   id: `multica:description:${parsed.data.data.issueId}`, data } });
               }));
               const address = { connectionKey: parsed.data.data.connectionKey, issueId: parsed.data.data.issueId, rootId: "main" };
-              emit({ type: "timeline.item", sessionId: input.sessionId, item: { type: "plugin", id: `multica:thread:main:${address.issueId}`, pluginId: "multica", kind: "thread", version: 1, data: { ...address, title: "任务事件" } } });
+              emit({ type: "timeline.item", sessionId: input.sessionId, item: { type: "plugin", id: `multica:thread:main:${address.issueId}`, pluginId: "multica", kind: "thread", version: 1, data: { ...address, title: "主讨论" } } });
               if (input.history === "replay") for (const row of issue.mainHistory.rows) emitRow(input.sessionId, address, row);
               subscriptions.set(input.sessionId, threads.subscribe(address, (row, includeOriginal) => emitRow(input.sessionId, address, row, includeOriginal), input.history !== "replay"));
             }

@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
-import { Text, View } from "react-native";
-import { useRpc, type PluginTimelineItemProps } from "@getpaseo/plugin/client";
+import { useRpc } from "@getpaseo/plugin/client";
 import { syncStatus, type SyncStatus } from "../shared/contracts.js";
 import { formatTime } from "./format.js";
 
@@ -51,14 +50,4 @@ export function useSyncStatus() {
     return () => { active = false; clearInterval(timer); };
   }, [read]);
   return describeSync(status, disconnected);
-}
-
-export function SyncState({ theme }: Pick<PluginTimelineItemProps, "theme">) {
-  const sync = useSyncStatus();
-  const muted = { color: theme.colors.foregroundMuted };
-  return <View style={{ gap: 4 }}>
-    <Text style={muted}>{sync.label}</Text>
-    {sync.message && sync.tone !== "danger" ? <Text style={muted}>{sync.message}</Text> : null}
-    {sync.lastSuccess ? <Text style={muted}>上次完成核对：{sync.lastSuccess}</Text> : null}
-  </View>;
 }

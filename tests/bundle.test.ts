@@ -276,7 +276,7 @@ it.each(["task-description", "comment-delivery"])("the compiled %s reader stops 
   } finally { for (const cleanup of cleanups) cleanup?.(); dispose(); vi.useRealTimers(); }
 });
 
-it("the native thread renderer lazily opens history and comment events render as independent records", async () => {
+it.each(["root", "main"])("the invisible %s thread renderer still opens history and comment events render independently", async rootId => {
   const effects: Array<() => unknown> = [];
   const calls: Array<{ name: string; input: unknown }> = [];
   const renderers: Array<{ kind: string; schema: zod.ZodType; Component: (props: any) => any }> = [];
@@ -289,26 +289,23 @@ it("the native thread renderer lazily opens history and comment events render as
     addTimelineRenderer: (renderer: any) => { renderers.push(renderer); return () => {}; } });
   expect(renderers.map(renderer => renderer.kind)).toEqual(["task-description", "thread", "run-summary", "comment-event", "askuser", "comment-delivery"]);
   expect(calls).toEqual([]);
-  const address = { connectionKey: "connection", issueId: "issue", rootId: "root" };
+  const address = { connectionKey: "connection", issueId: "issue", rootId };
   const theme = { colors: { foreground: "black", foregroundMuted: "gray" } };
   const threadRenderer = renderers.find(renderer => renderer.kind === "thread")!;
   const eventRenderer = renderers.find(renderer => renderer.kind === "comment-event")!;
-  threadRenderer.Component({ item: { data: threadRenderer.schema.parse({ ...address, title: "Thread" }) }, theme });
-  for (const effect of effects.splice(0)) effect();
+  expect(threadRenderer.Component({ item: { data: threadRenderer.schema.parse({ ...address, title: "Thread" }) }, theme })).toBeNull();
+  const cleanups = effects.splice(0).map(effect => effect());
   await Promise.resolve();
-  expect(calls).toEqual([{ name: "thread.open", input: address }]);
+  expect(calls).toEqual([{ name: "sync.status", input: {} }, { name: "thread.open", input: address }]);
+  for (const cleanup of cleanups) if (typeof cleanup === "function") cleanup();
   const event = eventRenderer.Component({ item: { data: eventRenderer.schema.parse({ ...address, recordId: "correction", commentId: "root", category: "correction", text: "Updated text", sourceUpdatedAt: "2026-11-24T12:00:00Z", truncated: false }) }, theme });
   expect(JSON.stringify(event)).toContain("评论更正");
   expect(JSON.stringify(event)).toContain("Updated text");
   expect(JSON.stringify(event)).toContain("2026-11-24T12:00:00Z");
-  const source = eventRenderer.Component({ item: { data: eventRenderer.schema.parse({ ...address, recordId: "original", commentId: "root", category: "source", text: "First observed snapshot", sourceCreatedAt: "2020-01-01T00:00:00Z", sourceUpdatedAt: "2026-11-24T12:00:00Z", truncated: false }) }, theme });
-  expect(JSON.stringify(source)).toContain("评论来源");
-  expect(JSON.stringify(source)).toContain("2020-01-01T00:00:00Z");
-  expect(JSON.stringify(source)).toContain("2026-11-24T12:00:00Z");
   dispose();
 });
 
-it("delivery rows distinguish durable input, saved comments and unknown results without claiming a Run started", async () => {
+it("delivery rows show failures and a brief main-discussion Thread hint while hiding successful replies", async () => {
   const renderers: Array<{ kind: string; schema: zod.ZodType; Component: (props: any) => any }> = [];
   const setup = await bundledContribution("../index.client.tsx", {
     "@getpaseo/plugin/client": { useRpc: () => async () => ({}) }, "@getpaseo/plugin/client/ui": {},
@@ -320,10 +317,10 @@ it("delivery rows distinguish durable input, saved comments and unknown results 
     const renderer = renderers.find(renderer => renderer.kind === "comment-delivery");
     expect(renderer).toBeDefined();
     const base = { connectionKey: "connection", issueId: "issue", rootId: "main", clientMessageId: "input", idempotencyKey: "key", createdAt: "2026-11-24T10:00:00Z", body: "Preserved input" };
-    const render = (status: string) => renderedText(renderer!.Component({ item: { data: renderer!.schema.parse({ ...base, status }) }, theme: { colors: { foreground: "black", foregroundMuted: "gray", statusDanger: "red" } } }));
-    expect(render("received")).toContain("插件已接收");
-    expect(render("saved")).toContain("评论已保存");
-    expect(render("saved")).toContain("Run 状态");
+    const render = (status: string, rootId = "main") => renderedText(renderer!.Component({ item: { data: renderer!.schema.parse({ ...base, status, rootId }) }, theme: { colors: { foreground: "black", foregroundMuted: "gray", statusDanger: "red" } } }));
+    expect(render("received")).toBe("");
+    expect(render("saved")).toBe("新 Thread 已建立，可在侧边栏打开。");
+    expect(render("saved", "root")).toBe("");
     expect(render("pending_verification")).toContain("待核实");
     expect(render("failed")).toContain("投递失败");
   } finally { dispose(); }
@@ -618,7 +615,7 @@ it("management lists shared hidden objects and offers separate workspace and sel
     await vi.waitFor(() => { expect(h.render()).toContain("人工隐藏"); expect(h.render()).toContain("Task · Root"); });
     await vi.waitFor(() => expect(h.render()).toContain("停止结果"));
     const page = h.render();
-    for (const text of ["历史连接", "Original account", "https://original.example.test", "待核实输入 1", "cancel failed", "进程清理尚待确认", "评论已保存", "需要处理 · 1", "只读历史", "Read-only Task", "访问受限"])
+    for (const text of ["历史连接", "Original account", "https://original.example.test", "待核实输入 1", "cancel failed", "进程清理尚待确认", "新 Thread 已建立", "需要处理 · 1", "只读历史", "Read-only Task", "访问受限"])
       expect(page).toContain(text);
     // The stop that still needs a decision is listed before the settled one.
     expect(page.indexOf("Closed Task")).toBeLessThan(page.indexOf("Stopped Task"));
@@ -851,7 +848,8 @@ it("the native discussion shows the same daemon sync failure and cached-history 
     await Promise.resolve();
     expect(render()).toContain("同步未完成");
     expect(render()).toContain("保留已读缓存");
-    expect(render()).toContain(`上次完成核对：${formatTime("2026-11-24T10:00:00Z")}`);
+    expect(render()).toContain("可阅读已读历史");
+    expect(render()).not.toContain("上次完成核对");
     for (const cleanup of unmount) cleanup();
   } finally { dispose(); }
 });

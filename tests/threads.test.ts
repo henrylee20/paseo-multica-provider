@@ -343,15 +343,6 @@ it("keeps large correction records bounded in native rows with their full conten
 });
 
 
-it("exposes each original comment's source date separately from the native ingestion clock", async () => {
-  const f = await fixture();
-  const thread = f.native.agents[1];
-  const address = JSON.parse(thread.handle.slice(7)).data;
-  await f.server.rpc(threadOpen, address, f.paseo);
-  expect(f.timelines.get(thread.id)).toContainEqual(expect.objectContaining({ type: "plugin", kind: "comment-event", data: expect.objectContaining({ category: "source", commentId: "root", sourceCreatedAt: stamp, sourceUpdatedAt: stamp }) }));
-});
-
-
 it("duplicate authenticated comment events append one correction and discover new tabs without opening their history", async () => {
   const f = await fixture();
   const thread = f.native.agents[1];
@@ -740,14 +731,14 @@ it("catches real task-message invalidations through incremental reads without du
 });
 
 
-it("reconciles a cached original missing after process loss against complete native source IDs without trusting its surviving source marker", async () => {
+it("reconciles a cached original missing after process loss against complete native source IDs", async () => {
   const f = await fixture();
   const thread = f.native.agents[1];
   const address = JSON.parse(thread.handle.slice(7)).data;
   f.droppedOriginals.add("root");
   await f.server.rpc(threadOpen, address, f.paseo);
   expect(f.timelines.get(thread.id)?.some(row => row.type === "user_message" && row.messageId === "root")).toBe(false);
-  expect(f.timelines.get(thread.id)?.some(row => row.type === "plugin" && row.id === "multica:comment-source:root")).toBe(true);
+  expect(f.timelines.get(thread.id)?.some(row => row.type === "plugin" && row.id.startsWith("multica:comment-source:"))).toBe(false);
   await f.dispose();
   const restarted = f.start();
   f.droppedOriginals.clear();

@@ -581,7 +581,7 @@ it("the main discussion replays a stable task description row without participan
     persistence: JSON.parse(agent.handle.slice("plugin:".length)),
     config: { cwd: agent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
   expect(events.some(event => event.type === "timeline.item" && event.item.type === "plugin" && event.item.kind === "task-description")).toBe(false);
-  expect(events).toContainEqual(expect.objectContaining({ type: "timeline.item", item: expect.objectContaining({ type: "plugin", kind: "thread" }) }));
+  expect(events).toContainEqual(expect.objectContaining({ type: "timeline.item", item: expect.objectContaining({ type: "plugin", kind: "thread", data: expect.objectContaining({ rootId: "main" }) }) }));
   await connection.close();
   expect(f.requests).toHaveLength(beforeClose);
 });

@@ -38,13 +38,15 @@ function PreservedInput({ record, theme }: { record: Summary; theme: Theme }) {
 
 export function DeliveryStatus({ item, theme, openManagement }: PluginTimelineItemProps<Summary> & { openManagement?: () => void }) {
   const record = item.data;
+  if (!needsDecision(record)) return record.status === "saved" && record.rootId === "main"
+    ? <Text style={{ color: theme.colors.foregroundMuted }}>新 Thread 已建立，可在侧边栏打开。</Text> : null;
   return <View style={{ gap: 6 }}>
     <Text style={{ color: needsDecision(record) ? theme.colors.statusDanger : theme.colors.foregroundMuted }}>{labels[record.status]}</Text>
     {record.message ? <Text style={{ color: theme.colors.foregroundMuted }}>{record.message}</Text> : null}
     {record.retryOf ? <Text selectable style={{ color: theme.colors.foregroundMuted }}>另一次明确重发 · 原请求：{record.retryOf}</Text> : null}
     {record.commentId ? <Text selectable style={{ color: theme.colors.foregroundMuted }}>评论：{record.commentId}</Text> : null}
     {needsDecision(record) ? <PreservedInput record={record} theme={theme} /> : null}
-    {openManagement ? <Pressable accessibilityRole="button" onPress={openManagement}><Text style={{ color: theme.colors.foreground }}>{record.status === "saved" && record.rootId === "main" ? "在管理页继续新 Thread" : "查看投递记录"}</Text></Pressable> : null}
+    {openManagement ? <Pressable accessibilityRole="button" onPress={openManagement}><Text style={{ color: theme.colors.foreground }}>查看投递记录</Text></Pressable> : null}
   </View>;
 }
 
