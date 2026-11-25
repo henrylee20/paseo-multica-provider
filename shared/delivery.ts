@@ -3,6 +3,7 @@ import { z } from "zod";
 
 export const deliveryAddress = z.object({ connectionKey: z.string(), issueId: z.string(), rootId: z.string(), clientMessageId: z.string() });
 export const deliverySummary = deliveryAddress.extend({
+  parentCommentId: z.string().optional(), askuserAnswerTo: z.string().optional(),
   retryOf: z.string().optional(), idempotencyKey: z.string(), body: z.string(), truncated: z.boolean().default(false), createdAt: z.string(),
   status: z.enum(["received", "saved", "failed", "pending_verification"]), commentId: z.string().optional(), threadRootId: z.string().optional(), threadAgentId: z.string().optional(), message: z.string().optional(),
 });

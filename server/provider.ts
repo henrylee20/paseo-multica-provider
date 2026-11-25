@@ -1,3 +1,5 @@
+import { askuserPermission, askuserPermissionId } from "./askuser-answers.js";
+import type { AskuserCardData } from "../shared/askuser.js";
 import type { AskUsers } from "./askuser.js";
 import { randomUUID } from "node:crypto";
 import { isActiveRun, runSummary, type RunSynchronizer } from "./runs.js";
@@ -17,7 +19,7 @@ import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
 const persistenceSchema = z.object({ version: z.literal(1), data: z.object({
   connectionKey: z.string(), issueId: z.string(),
 }).and(z.discriminatedUnion("discussion", [z.object({ discussion: z.literal("main") }), z.object({ discussion: z.literal("thread"), rootId: z.string() })])) });
-const supported = ["prompt.message", "prompt.steer", "session.persistence", "session.list", "timeline.plugin", "session.archive", "session.unarchive"];
+const supported = ["prompt.message", "prompt.steer", "session.persistence", "session.list", "timeline.plugin", "session.archive", "session.unarchive", "permission"];
 
 /** A Multica discussion projection, never a local code execution engine. */
 export function createMulticaProvider(store: StateStore, threads: ThreadSynchronizer, runs: RunSynchronizer, stops: StopCoordinator, deliveries: CommentDelivery, descriptions: TaskDescriptions, lifecycle: DiscussionLifecycle, askusers: AskUsers): ProviderRegistration {
@@ -33,6 +35,7 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
       const runSubscriptions = new Map<string, () => void>();
       const descriptionSubscriptions = new Map<string, () => void>();
       const subscriptions = new Map<string, () => void>();
+      const permissions = new Map<string, Map<string, AskuserCardData>>();
       const askuserSubscriptions = new Map<string, () => void>();
       const deliverySubscriptions = new Map<string, () => void>();
       const activeTurns = new Map<string, string>();
@@ -42,6 +45,8 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
       let closed = false;
       const emit = (event: ProviderEvent) => { if (!closed) for (const listener of listeners) listener(event); };
       const releaseSession = (sessionId: string) => {
+        for (const permissionId of permissions.get(sessionId)?.keys() ?? []) emit({ type: "session.permission_resolved", sessionId, permissionId });
+        permissions.delete(sessionId);
         askuserSubscriptions.get(sessionId)?.(); askuserSubscriptions.delete(sessionId);
         sessions.delete(sessionId);
         emittedRows.delete(sessionId);
@@ -145,8 +150,22 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
             }
             const address = { connectionKey: parsed.data.data.connectionKey, issueId: parsed.data.data.issueId, rootId: parsed.data.data.discussion === "thread" ? parsed.data.data.rootId : "main" };
             addresses.set(input.sessionId, address);
+            const projectPermission = (card: AskuserCardData) => {
+              if (!capabilities.includes("permission")) return;
+              const permissionId = askuserPermissionId(card);
+              const pending = permissions.get(input.sessionId) ?? new Map();
+              permissions.set(input.sessionId, pending);
+              if (card.status === "pending" && !card.readOnly && !lifecycle.unavailable(address)) {
+                if (!pending.has(permissionId)) { pending.set(permissionId, card); emit({ type: "session.permission", sessionId: input.sessionId, request: askuserPermission(card) }); }
+              } else if (pending.delete(permissionId)) emit({ type: "session.permission_resolved", sessionId: input.sessionId, permissionId });
+            };
+            const projectAskuser = (item: import("@getpaseo/plugin/server/provider").ProviderTimelineItem, card: AskuserCardData) => {
+              emit({ type: "timeline.item", sessionId: input.sessionId, item });
+              projectPermission(card);
+            };
+            askuserSubscriptions.set(input.sessionId, askusers.subscribe(address, projectAskuser));
             for (const item of await askusers.rows(address)) emit({ type: "timeline.item", sessionId: input.sessionId, item });
-            askuserSubscriptions.set(input.sessionId, askusers.subscribe(address, item => emit({ type: "timeline.item", sessionId: input.sessionId, item })));
+            for (const card of await askusers.cards(address)) projectPermission(card);
             lifecycleSubscriptions.set(input.sessionId, lifecycle.subscribe(address, async () => {
               // A Stop accepted before this resource began closing retains its
               // result before session.closed rejects outstanding host requests.
@@ -231,6 +250,17 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
           }
           if (input.type === "session.archive" || input.type === "session.unarchive") {
             emit({ type: "request.completed", requestId: input.requestId });
+            return;
+          }
+          if (input.type === "session.permission") {
+            const card = permissions.get(input.sessionId)?.get(input.permissionId);
+            if (!card || input.response.behavior !== "allow") throw new Error("提问权限不可用。");
+            const address = addresses.get(input.sessionId);
+            if (!address || lifecycle.unavailable(address)) throw new Error("讨论不可写。");
+            const record = await askusers.submit({ connectionKey: address.connectionKey, issueId: address.issueId, commentId: card.commentId, attachmentId: card.attachmentId }, input.response.updatedInput, deliveries);
+            const row = deliveryInput(record);
+            if (rememberOriginal(input.sessionId, row)) emit({ type: "timeline.item", sessionId: input.sessionId, item: projectRow(address, row) });
+            if (permissions.get(input.sessionId)?.delete(input.permissionId)) emit({ type: "session.permission_resolved", sessionId: input.sessionId, permissionId: input.permissionId });
             return;
           }
           if (input.type === "session.prompt") {
