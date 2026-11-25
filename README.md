@@ -6,7 +6,7 @@
 
 ## 构建与安装
 
-宿主要求为 **Paseo >=0.15.3**，不设最高版本。开发 SDK 固定为 **0.15.4**；已取得实际 daemon 0.15.3、0.17.4 的运行证据。构建需要 Node.js、npm 和 `tar`，安装时 daemon 主机需能下载锁定的 npm 依赖。
+宿主要求为 **Paseo >=0.15.3**，不设最高版本。输入框的提及选择器需要 **Paseo 0.16.0 及以上**；更早宿主不显示选择器，仍在管理页复制引用。开发 SDK 固定为 **0.15.4**；已取得实际 daemon 0.15.3、0.17.4 的运行证据。构建需要 Node.js、npm 和 `tar`，安装时 daemon 主机需能下载锁定的 npm 依赖。
 
 从仓库构建：
 
@@ -61,7 +61,7 @@ multica setup self-host --server-url https://api.example.com --app-url https://a
 
 本人普通评论显示为原生 user，其他成员及 agent 为带作者名称的 assistant；assistant 表示呈现角色。系统变化、已观察到的编辑和删除追加独立事件，不覆盖原始消息。首次导入只代表源端当前可获取的快照。历史与长正文按需分页，保留文本、Markdown 和已有附件链接；上传、编辑、删除评论及 Issue 状态修改仍在 Multica 完成。
 
-在主讨论发送创建新 Thread，在真实 Thread 发送回复根评论。管理页 **提及 Agent** 选择任务后可 **复制引用**，得到带 ID 的完整引用，不能用同名裸 `@名字` 代替身份。投递区分 **插件已接收**、**评论已保存**、**Run 状态**；评论保存可能没有执行。主讨论已保存投递可用 **继续此 Thread** 进入对应 tab。
+在主讨论发送创建新 Thread，在真实 Thread 发送回复根评论。Paseo 0.16.0 及以上的讨论输入框提供 **提及 Agent** 选择器：搜索当前 Multica 工作区的 agent，选择后把带 ID 的完整引用插入光标处，随评论一起发送。Paseo 0.15 宿主没有该选择器，仍在管理页 **提及 Agent** 选择任务后 **复制引用** 并粘贴。引用不能用同名裸 `@名字` 代替身份；宿主输入框的 `@` 候选是 Paseo 内置的工作区文件引用，插件不能替换为 agent。投递区分 **插件已接收**、**评论已保存**、**Run 状态**；评论保存可能没有执行。主讨论已保存投递可用 **继续此 Thread** 进入对应 tab。
 
 每个 Run 只有一个持久展示归属，后补关联和重连不迁移、不复制。一个 tab 的多个未结束 Run 聚合为原生活动；展开执行段读取任务错误、失败原因、来源原样的远端执行路径，以及日志和工具信息。远端路径明确标为 REMOTE，与 Paseo 本地占位目录分开呈现；执行消息为空或不可用时仍显示已有任务元数据，未提供的调用 ID、缺口、完整性与截断状态明确呈现。最终 agent 评论仍走普通评论通道，不把执行日志重复成回复。
 
@@ -93,6 +93,6 @@ multica setup self-host --server-url https://api.example.com --app-url https://a
 - [交付验收记录](docs/acceptance.md)：版本、实际结果、自动化范围和未验证项。
 - [GitHub 规格正文](docs/github-spec.md)、[首版规格](docs/spec.md)、[实现计划](docs/implementation-plan.md)。
 - [术语表](GLOSSARY.md)、[设计与原始证据](docs/design.md)、[实现上下文](CONTEXT.md)。
-- [架构决定](docs/adr)：[Thread](docs/adr/0001-thread-as-paseo-session.md)、[目录](docs/adr/0002-use-existing-paseo-with-placeholder-directories.md)、[Run 归属](docs/adr/0003-unique-run-display-ownership.md)、[Stop](docs/adr/0004-native-interrupt-stops-remote-run.md)、[历史](docs/adr/0005-preserve-native-comment-history.md)、[身份](docs/adr/0006-isolate-connection-identities.md)、[幂等恢复](docs/adr/0007-retry-comments-only-with-deduplication.md)、[CLI 登录](docs/adr/0008-reuse-multica-cli-authentication.md)。
+- [架构决定](docs/adr)：[Thread](docs/adr/0001-thread-as-paseo-session.md)、[目录](docs/adr/0002-use-existing-paseo-with-placeholder-directories.md)、[Run 归属](docs/adr/0003-unique-run-display-ownership.md)、[Stop](docs/adr/0004-native-interrupt-stops-remote-run.md)、[历史](docs/adr/0005-preserve-native-comment-history.md)、[身份](docs/adr/0006-isolate-connection-identities.md)、[幂等恢复](docs/adr/0007-retry-comments-only-with-deduplication.md)、[CLI 登录](docs/adr/0008-reuse-multica-cli-authentication.md)、[提及选择器](docs/adr/0009-composer-mention-picker.md)。
 
 CLI 兼容依据为 Multica CLI 0.6.3 固定提交 [`18fa9f7`](https://github.com/multica-ai/multica/tree/18fa9f728a9e25f2465df2789631edb2a75442ad)。开发检查使用真实锁定 SDK、临时 CLI 配置、隔离 HTTP/WebSocket 和公开贡献／provider／RPC 边界；这些测试覆盖故障与竞态，但不能代替真实宿主或真实服务验收。构建后 `dist` 中的副本不进入类型检查或测试发现。
