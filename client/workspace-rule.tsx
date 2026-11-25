@@ -1,8 +1,8 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Pressable, Text, View } from "react-native";
 import { useRpc, type PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { Icon, Modal, ScrollView, TextInput } from "@getpaseo/plugin/client/ui";
-import { workspaceCatalog, workspaceEnable, workspaceRule, type TaskRule } from "../shared/contracts.js";
+import { workspaceCatalog, workspaceEnable, workspacePreview, workspaceRule, type TaskRule } from "../shared/contracts.js";
 import { RuleButton } from "./ui-kit.js";
 import type { z } from "zod";
 
@@ -11,6 +11,8 @@ type Theme = PluginSurfaceProps["theme"];
 type Category = TaskRule["statusCategories"][number];
 type Choice = { id: string; name: string; group?: string; missing?: boolean };
 type StatusSelection = { whole: Set<Category>; picked: Set<string> };
+type Preview = z.output<typeof workspacePreview.output>;
+const largeImportThreshold = 30;
 const categories: Array<{ id: Category; name: string }> = [
   { id: "unstarted", name: "未开始" }, { id: "started", name: "进行中" }, { id: "done", name: "已完成" }, { id: "closed", name: "已关闭" }];
 const actorNames = { member: "成员", agent: "Agent", squad: "Squad" };
@@ -168,17 +170,41 @@ export function WorkspaceRuleEditor(props: EditorProps & { catalog?: Catalog; ca
 
 function RuleEditor({ workspaceId, workspaceName, connectionKey, initialRule, catalog, theme, userId, enabling, onRuleSaved, onSaved, onCancel, onSavingChange }: EditorProps & { catalog: Catalog }) {
   const save = useRpc(workspaceRule), enable = useRpc(workspaceEnable);
+  const readPreview = useRpc(workspacePreview);
   const [rule, setRule] = useState(initialRule);
   const [selection, setSelection] = useState(() => readStatuses(initialRule, catalog));
   const [saved, setSaved] = useState<TaskRule | null>(null);
   const [saveFailure, setSaveFailure] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [discard, setDiscard] = useState(false);
+  const [preview, setPreview] = useState<{ key: string; result?: Preview; failed?: boolean } | null>(null);
+  const [confirmKey, setConfirmKey] = useState<string | null>(null);
   const current = { ...rule, ...writeStatuses(selection, catalog) };
+  const currentKey = fingerprint(current);
+  useEffect(() => {
+    let active = true;
+    setPreview({ key: currentKey });
+    const timer = setTimeout(() => {
+      void readPreview({ workspaceId, connectionKey, rule: current }).then(result => {
+        if (active) setPreview({ key: currentKey, result });
+      }, () => { if (active) setPreview({ key: currentKey, failed: true }); });
+    }, 400);
+    return () => { active = false; clearTimeout(timer); };
+  }, [readPreview, workspaceId, connectionKey, currentKey]);
+  const result = preview?.key === currentKey ? preview.result : undefined;
+  const calculating = preview?.key !== currentKey || (!preview.result && !preview.failed);
+  const confirming = confirmKey === currentKey && result && result.leaving.length > 0;
   const baseline = saved ?? { ...initialRule, ...writeStatuses(readStatuses(initialRule, catalog), catalog) };
-  const dirty = fingerprint(current) !== fingerprint(baseline);
-  function close() { if (!saving) { if (dirty) setDiscard(true); else onCancel(); } }
+  const dirty = currentKey !== fingerprint(baseline);
+  function edited() { setDiscard(false); setConfirmKey(null); }
+  function close() { if (!saving) { setConfirmKey(null); if (dirty) setDiscard(true); else onCancel(); } }
+  function submit() {
+    if (saving || calculating) return;
+    if (result?.leaving.length) { setConfirmKey(currentKey); setDiscard(false); }
+    else void persist();
+  }
   async function persist() {
+    if (saving || calculating) return;
     setSaving(true); onSavingChange(true); setSaveFailure(null); setDiscard(false);
     try {
       // An enable failure can retry only that step while the saved rule is unchanged.
@@ -203,24 +229,42 @@ function RuleEditor({ workspaceId, workspaceName, connectionKey, initialRule, ca
       <ScrollView style={{ flexShrink: 1 }} contentContainerStyle={{ padding: 24, gap: 16 }}>
         {enabling ? <Text style={{ color: theme.colors.foregroundMuted, fontSize: 13 }}>启用后，按下面的条件把任务导入 Paseo。默认只导入“未开始”和“进行中”，其他条件不限；可以先缩小范围再导入。</Text> : null}
         <Text style={{ color: theme.colors.foregroundMuted, fontSize: 13 }}>各字段需同时满足，同一字段内任一命中即可，不选表示不限。</Text>
-        <StatusChoices value={selection} onChange={value => { setSelection(value); setDiscard(false); }} catalog={catalog} disabled={saving} theme={theme} />
+        <StatusChoices value={selection} onChange={value => { setSelection(value); edited(); }} catalog={catalog} disabled={saving} theme={theme} />
         {and}
         <Choices title="负责人" theme={theme} disabled={saving} values={rule.assignees.map(item => `${item.type}:${item.id}`)} groups={["成员", "Agent", "Squad"]}
           choices={actors.map(item => ({ id: `${item.type}:${item.id}`, name: item.type === "member" && item.id === userId ? `我 · ${item.name}` : item.name, group: actorNames[item.type] }))}
-          onChange={values => { setRule({ ...rule, assignees: values.map(value => { const index = value.indexOf(":"); return { type: value.slice(0, index) as TaskRule["assignees"][number]["type"], id: value.slice(index + 1) }; }) }); setDiscard(false); }} />
+          onChange={values => { setRule({ ...rule, assignees: values.map(value => { const index = value.indexOf(":"); return { type: value.slice(0, index) as TaskRule["assignees"][number]["type"], id: value.slice(index + 1) }; }) }); edited(); }} />
         <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>直接分配给成员，与分配给其 Agent／Squad 是不同条件，需分别选择。</Text>
         {and}
-        <Choices title="Multica 项目" theme={theme} choices={catalog.projects} values={rule.projectIds} disabled={saving} onChange={projectIds => { setRule({ ...rule, projectIds }); setDiscard(false); }} />
+        <Choices title="Multica 项目" theme={theme} choices={catalog.projects} values={rule.projectIds} disabled={saving} onChange={projectIds => { setRule({ ...rule, projectIds }); edited(); }} />
         {and}
-        <Choices title="标签" theme={theme} choices={catalog.labels} values={rule.labelIds} disabled={saving} onChange={labelIds => { setRule({ ...rule, labelIds }); setDiscard(false); }} />
+        <Choices title="标签" theme={theme} choices={catalog.labels} values={rule.labelIds} disabled={saving} onChange={labelIds => { setRule({ ...rule, labelIds }); edited(); }} />
       </ScrollView>
       <View style={{ paddingHorizontal: 24, paddingVertical: 16, borderTopWidth: 1, borderColor: theme.colors.border, gap: 8, backgroundColor: theme.colors.surface0 }}>
         {saveFailure ? <Text accessibilityRole="alert" style={{ color: theme.colors.statusDanger, fontSize: 13 }}>{saveFailure}</Text> : null}
-        <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
-          <Text style={{ flexGrow: 1, flexShrink: 1, color: discard ? theme.colors.statusWarning : theme.colors.foregroundMuted, fontSize: 12 }}>{discard ? "放弃未保存的修改？" : dirty ? "有未保存的修改" : ""}</Text>
-          {discard ? <><RuleButton theme={theme} onPress={() => setDiscard(false)}>继续编辑</RuleButton><RuleButton theme={theme} tone="danger" onPress={onCancel}>放弃修改</RuleButton></>
-            : <><RuleButton theme={theme} disabled={saving} onPress={close}>取消</RuleButton><RuleButton theme={theme} tone="primary" disabled={saving} onPress={() => { void persist(); }}>{saving ? "正在保存…" : enabling ? "启用并导入" : "保存"}</RuleButton></>}
-        </View>
+        {confirming ? <View style={{ gap: 10 }}>
+          <Text style={{ color: theme.colors.foreground }}>保存后 {result.leaving.length} 项任务将移出</Text>
+          <Text style={{ color: theme.colors.foreground, fontSize: 13 }}>它们不再符合新条件，对应的 Paseo 工作区会自动归档：</Text>
+          <ScrollView style={{ maxHeight: 180 }} contentContainerStyle={{ padding: 12, gap: 6, backgroundColor: theme.colors.surface1 }}>
+            {result.leaving.slice(0, 10).map(issue => <Text key={issue.id} style={{ color: theme.colors.foreground, fontSize: 13 }}>{issue.title}</Text>)}
+            {result.leaving.length > 10 ? <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>等 {result.leaving.length} 项</Text> : null}
+          </ScrollView>
+          <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>评论、执行记录和讨论身份都会保留，再次符合条件时恢复原工作区。不会取消远端 Run。</Text>
+          <View style={{ flexDirection: "row", justifyContent: "flex-end", flexWrap: "wrap", gap: 8 }}>
+            <RuleButton theme={theme} disabled={saving} onPress={() => setConfirmKey(null)}>返回修改</RuleButton>
+            <RuleButton theme={theme} tone="primary" disabled={saving} onPress={() => { void persist(); }}>{saving ? "正在保存…" : `保存并归档 ${result.leaving.length} 项`}</RuleButton>
+          </View>
+        </View> : <>
+          <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+            <View style={{ flexGrow: 1, flexShrink: 1, gap: 3 }}>
+              <Text style={{ color: discard ? theme.colors.statusWarning : theme.colors.foreground, fontSize: 13 }}>{discard ? "放弃未保存的修改？" : calculating ? "正在计算匹配数…" : result ? `将匹配 ${result.total} 项任务` : "无法预览匹配数"}</Text>
+              {!discard ? <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>{[result ? `当前已导入 ${result.imported} 项：新增 ${result.entering} · 移出 ${result.leaving.length}` : "", dirty ? "有未保存的修改" : ""].filter(Boolean).join(" · ")}</Text> : null}
+            </View>
+            {discard ? <><RuleButton theme={theme} onPress={() => setDiscard(false)}>继续编辑</RuleButton><RuleButton theme={theme} tone="danger" onPress={onCancel}>放弃修改</RuleButton></>
+              : <><RuleButton theme={theme} disabled={saving} onPress={close}>取消</RuleButton><RuleButton theme={theme} tone="primary" disabled={saving || calculating} onPress={submit}>{saving ? "正在保存…" : calculating ? "正在计算…" : enabling ? result ? `启用并导入 ${result.total} 项` : "启用并导入" : "保存"}</RuleButton></>}
+          </View>
+          {enabling && result && result.total > largeImportThreshold ? <Text style={{ color: theme.colors.statusWarning, fontSize: 12 }}>数量较多，可按负责人或标签缩小范围</Text> : null}
+        </>}
       </View>
     </Modal.Content>
   </Modal>;

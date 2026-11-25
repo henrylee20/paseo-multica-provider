@@ -6,7 +6,7 @@ import { workspaceCatalog, workspaceEnable, type ConnectionStatus, type TaskRule
 import { describeCatalogRule, describeRule, WorkspaceRuleEditor, type Catalog } from "./workspace-rule.js";
 import { Notice, RuleButton, SubHeading } from "./ui-kit.js";
 
-export type Workspace = { connectionKey: string; id: string; name: string; enabled: boolean; rule: TaskRule };
+export type Workspace = { connectionKey: string; id: string; name: string; enabled: boolean; rule: TaskRule; importedCount: number };
 type CatalogEntry = { data?: Catalog; failed?: boolean };
 
 export function WorkspaceList({ workspaces, read, failure, status, theme, onRuleSaved, onEnabled }: {
@@ -53,7 +53,7 @@ export function WorkspaceList({ workspaces, read, failure, status, theme, onRule
     info="显式启用后才导入任务，默认只导入“未开始”和“进行中”状态类别，可再组合负责人、具体状态、Multica 项目与标签。Multica 项目只限制任务范围，任务仍归入此 Multica 工作区对应的 Paseo 项目。每项任务使用独立的非 Git 占位目录，原生文件与终端打开的是占位目录。">
     {failure ? <Notice theme={theme}>{failure}</Notice> : null}
     {enabled.map(workspace => <SettingsCard key={workspace.id}>
-      <SettingsSwitch label={workspace.name} hint="已启用" value disabled={saving.includes(workspace.id)}
+      <SettingsSwitch label={workspace.name} hint={`已导入 ${workspace.importedCount} 项任务`} value disabled={saving.includes(workspace.id)}
         onValueChange={value => { if (!value) { setDisabling(workspace); setDisableFailure(null); } }} />
       <SettingsAction label={catalogs[workspace.id]?.data ? describeCatalogRule(workspace.rule, catalogs[workspace.id].data!, status?.user?.id) : describeRule(workspace.rule)}
         actionLabel="编辑筛选" disabled={saving.includes(workspace.id)} onPress={() => edit(workspace)} />
@@ -72,7 +72,7 @@ export function WorkspaceList({ workspaces, read, failure, status, theme, onRule
       onSaved={() => { if (!editor.enabled) onEnabled(editor, true); setEditor(null); }} /> : null}
     {disabling ? <Modal title={`停用 ${disabling.name}？`} open onOpenChange={open => { if (!open && !saving.includes(disabling.id)) setDisabling(null); }}>
       <Modal.Content>
-        <Text style={{ color: theme.colors.foreground }}>此 Multica 工作区已导入的任务会归档，空的 Paseo 项目会移除。</Text>
+        <Text style={{ color: theme.colors.foreground }}>此 Multica 工作区已导入的 {disabling.importedCount} 项任务会归档，空的 Paseo 项目会移除。</Text>
         <Text style={{ color: theme.colors.foregroundMuted }}>评论、执行记录、讨论身份和人工隐藏都会保留，重新启用后恢复。不会取消远端 Run。</Text>
         {disableFailure ? <Notice theme={theme}>{disableFailure}</Notice> : null}
         <View style={{ flexDirection: "row", justifyContent: "flex-end", gap: 8 }}>

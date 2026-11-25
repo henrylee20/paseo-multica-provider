@@ -4,10 +4,10 @@ import { RunDetails } from "./run-details.js";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { PluginServerContribution } from "@getpaseo/plugin/server";
-import { multicaSettings, connectionStatus, connectionHistory, syncBootstrap, syncStatus, workspaceList, workspaceEnable, workspaceRule, workspaceCatalog, taskRuleSchema, type ConnectionStatus } from "../shared/contracts.js";
+import { multicaSettings, connectionStatus, connectionHistory, syncBootstrap, syncStatus, workspaceList, workspaceEnable, workspaceRule, workspacePreview, workspaceCatalog, taskRuleSchema, type ConnectionStatus } from "../shared/contracts.js";
 import { createConnectionResolver, type AuthenticatedConnection, type ConnectionDependencies } from "./connection.js";
 import { StateStore, connectionState } from "./state.js";
-import { SidebarSynchronizer } from "./sync.js";
+import { SidebarSynchronizer, importedIssues } from "./sync.js";
 import { connectNativeHost, type NativeHost } from "./native-host.js";
 import { DiscussionMetadata } from "./discussion-metadata.js";
 import { workspaceCatalogs } from "./catalogs.js";
@@ -48,11 +48,11 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
         message: "Multica 插件设置无效，请重新选择 CLI profile。", loginCommand: "multica login" }; }
       return resolveStatus(state.values.profile);
     });
-    async function connection() {
+    async function connection(recordIdentity = true) {
       const state = await settings.read();
       if (state.status !== "ready") { resolve.invalidate(); await askusers.connectionChanged(); throw new Error("Multica settings unavailable"); }
       let authenticated: AuthenticatedConnection | undefined;
-      await resolveStatus(state.values.profile, value => { authenticated = value; });
+      await (recordIdentity ? resolveStatus : resolve)(state.values.profile, value => { authenticated = value; });
       if (!authenticated) throw new Error("Multica connection unavailable");
       return authenticated;
     }
@@ -197,9 +197,11 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     server.handle(workspaceList, async () => {
       const context = await connection();
       const workspaces = await synchronizer.workspaces(context);
-      const rules = (await store.read()).connections[context.connectionKey]?.rules;
-      return { connectionKey: context.connectionKey, workspaces: workspaces.map(workspace => ({ id: workspace.id, name: workspace.name, enabled: rules?.[workspace.id]?.enabled ?? false, rule: taskRuleSchema.parse(rules?.[workspace.id] ?? {}) })) };
+      const local = (await store.read()).connections[context.connectionKey];
+      return { connectionKey: context.connectionKey, workspaces: workspaces.map(workspace => ({ id: workspace.id, name: workspace.name, enabled: local?.rules[workspace.id]?.enabled ?? false,
+        rule: taskRuleSchema.parse(local?.rules[workspace.id] ?? {}), importedCount: importedIssues(local, workspace.id).length })) };
     });
+    server.handle(workspacePreview, input => synchronizer.preview(input.workspaceId, input.rule, input.connectionKey));
     server.handle(workspaceEnable, async (input, context) => {
       try { await synchronizer.enable(context.paseo, input.workspaceId, input.enabled, input.connectionKey); return { status: "ready" as const }; }
       catch { return { status: "unavailable" as const, message: "Multica 工作区规则保存或同步失败，请检查连接后重试。" }; }

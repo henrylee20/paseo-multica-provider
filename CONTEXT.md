@@ -136,6 +136,8 @@ PR #17 已合入 `main`（`2285008`）。用户要求直接在主干补齐停用
 
 2026-11-25 已在用户主 daemon（`srv_k4Tm0x9H1FtO`，0.17.4，listener `127.0.0.1:6767`）完成真实安装与验收：只 reload `multica`，编译约 5 秒，daemon PID `4116328` 不变；真实 daemon 提供 97,666 字节 client bundle（hash `67cb5fbd314a61f98657865dc5f904a7552fdef22851d85b1fdcdeef259705cf`，含 `multica-mention`）。启用现有 henrylee 规则后，HENR-1 主讨论、HENR-2 主讨论与已有 Thread 三个 agent 的 metadata 与 labels 一致；`delivery.mentions` 返回真实 agent 拉车的🫏（`5505d430-fd5c-416a-9455-2af92d34b67d`）。SDK 与 UI 各发送一条真实评论（`01a2114f-7f2b-776b-b5cc-c27e4c9153fe`、`01a21152-da7b-7cc4-afb7-9349a0a27879`），均触发该 agent 的 Run（`01a2114f-7f59-73ea-b55a-f8732a1cb38d`、`01a21152-da8b-74cb-a604-717a146eafdc`），原生 Stop 后服务端 cancelled、原生 idle（1401ms、667ms）。UI 使用独立 Electron user-data 的第二客户端连同一主 daemon，通过 CDP 打开已有 Thread、点击「提及 Agent」、搜索选择并发送；截图与状态见验收记录。隔离客户端已关闭，主 daemon／主窗口未重启；验收后规则保持启用、讨论保持活跃。剩余边界：Run cleanup UNKNOWN（未证明物理退出）、移动布局／原生溢出面板未验证、自部署服务未验证。
 
+2026-11-25 Multica 工作区与筛选规则界面分两阶段整理：设置页与管理页共用启用优先的 Multica 工作区列表，筛选改为带固定底栏的弹窗、可搜索多选与负责人分组；目录按连接缓存，轮询和规则保存复用。状态以整类与具体状态共同编辑，整类保存类别，存在部分选择时将整类展开后一并保存具体状态，旧混合规则按交集载入。启用先保存规则再启用，停用与筛选移出均需确认。新增只读 `workspace.preview`，复用同步的完整分页读取，不进入同步队列、不记录身份验证时间、不写状态或操作原生对象；客户端防抖并忽略过期响应。`workspace.list` 的 `importedCount` 与预览统一以该 Multica 工作区没有 `archiveReason` 的映射计数，未新增持久化字段。
+
 ## Issue #20：askuser（#21–#26）
 
 2026-11-25 集成基线 `7d45a7b027c80ecd4b60addd662eb82258d737ae` 已合入 #21–#25：自部署 `askuser.json` version `"1"` 的安全附件下载与持久缓存、完整 timeline 终态校验、稳定时间线及离线只读卡片、原生问题映射、精确中文回答与子回复目标、7 天投递核实、本地收起／重展、两步跳过、受保护的后台主动加载，以及 Stop／访问／归档／CLI 身份变化下的权限对齐。首次无关联 Run 仍属于本地主讨论；它生成的根卡片在新 Thread，不迁移 Run 展示归属。完整模拟结果与后续步骤见 [askuser 验收记录](docs/askuser-acceptance.md)，主动加载／限流／回放契约见 [askuser-wakeup](docs/askuser-wakeup.md)。

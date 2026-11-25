@@ -576,6 +576,11 @@ async function managementHarness(answer: Answer, host: { composerItems?: boolean
     },
     action(actionLabel: string) { const found = actions.find(action => action.actionLabel === actionLabel); expect(found, actionLabel).toBeDefined(); return found!; },
     press(label: string) { const found = pressables.find(item => item.accessibilityLabel === label); expect(found, label).toBeDefined(); expect(found!.disabled).not.toBe(true); found!.onPress(); },
+    async save(label = "保存", screen: "settings" | "management" = "management") {
+      let button: typeof pressables[number] | undefined;
+      await vi.waitFor(() => { this.render(screen); button = pressables.find(item => item.accessibilityLabel?.startsWith(label)); expect(button, label).toBeDefined(); expect(button!.disabled).not.toBe(true); });
+      button!.onPress();
+    },
     checkbox(label: string) { const found = pressables.find(item => item.accessibilityRole === "checkbox" && item.accessibilityLabel === label); expect(found, label).toBeDefined(); return found!; },
     dispose() { tree.unmount(); dispose(); },
   };
@@ -587,6 +592,7 @@ const defaultRule: TaskRule = { statusCategories: ["unstarted", "started"], stat
 const empty: Answer = name => ({
   "connection.history": { connections: [] }, "stop.list": { records: [] }, "hidden.list": { objects: [] }, "issue.history.list": { issues: [] },
   "delivery.list": { records: [] }, "delivery.targets": { issues: [] }, "sync.status": { status: "ready", stage: "idle", completedWorkspaces: 1, enabledWorkspaces: 1 },
+  "workspace.preview": { total: 0, imported: 0, entering: 0, leaving: [] },
 } as Record<string, unknown>)[name];
 
 it("management points at the composer's agent picker where the host has one, and at the copied reference elsewhere", async () => {
@@ -712,7 +718,7 @@ it("refreshing keeps the connection, rules and unsaved modal edits on screen", a
       if (++statusReads > 1) await new Promise<void>(resolve => { release = resolve; });
       return readyStatus;
     }
-    if (name === "workspace.list") return { connectionKey: "current", workspaces: [{ id: "ws", name: "Team space", enabled: true, rule: defaultRule }] };
+    if (name === "workspace.list") return { connectionKey: "current", workspaces: [{ id: "ws", name: "Team space", enabled: true, rule: defaultRule, importedCount: 2 }] };
     if (name === "workspace.catalog") return { assignees: [], statuses: [], projects: [], labels: [{ id: "bug", name: "Bug" }] };
     return empty(name, input);
   });
@@ -762,13 +768,14 @@ const filterCatalog = {
 async function filterHarness({ rule = defaultRule, catalog = filterCatalog, enabled = true, answer = () => undefined }: {
   rule?: TaskRule; catalog?: typeof filterCatalog; enabled?: boolean; answer?: Answer;
 } = {}) {
-  const workspace = { id: "ws", name: "Team space", enabled, rule };
+  const workspace = { id: "ws", name: "Team space", enabled, rule, importedCount: enabled ? 2 : 0 };
   return managementHarness((name, input) => {
     const result = answer(name, input);
     if (result !== undefined) return result;
     if (name === "connection.status") return readyStatus;
     if (name === "workspace.list") return { connectionKey: "current", workspaces: [workspace] };
     if (name === "workspace.catalog") return catalog;
+    if (name === "workspace.preview") return { total: 2, imported: workspace.importedCount, entering: 2 - workspace.importedCount, leaving: [] };
     if (name === "workspace.rule") { workspace.rule = (input as { rule: TaskRule }).rule; return { status: "ready" }; }
     if (name === "workspace.enable") { workspace.enabled = (input as { enabled: boolean }).enabled; return { status: "ready" }; }
     return empty(name, input);
@@ -793,9 +800,10 @@ it.each([
       expect(h.render()).toContain("只选了部分状态，规则将按具体状态保存；今后新增的状态不会自动纳入。");
     } else expect(h.render()).toContain("按类别 · 今后新增的状态自动纳入");
     expect(h.modalContents[0].scrollable).toBe(false);
-    h.press("保存");
+    await h.save();
     await vi.waitFor(() => expect(h.calls.filter(call => call.name === "workspace.rule")).toHaveLength(1));
     const saved = (h.calls.find(call => call.name === "workspace.rule")!.input as { rule: TaskRule }).rule;
+    expect(h.calls.filter(call => call.name === "workspace.preview").at(-1)?.input).toEqual({ workspaceId: "ws", connectionKey: "current", rule: saved });
     expect({ ...saved, statuses: [...saved.statuses].sort() }).toEqual({ ...defaultRule, ...expected, statuses: [...expected.statuses].sort() });
     await vi.waitFor(() => { h.render(); expect(h.modals).toHaveLength(0); });
   } finally { h.dispose(); }
@@ -811,7 +819,7 @@ it("legacy mixed rules load the intersection and keep empty catalog categories s
     expect(h.checkbox("In Progress").accessibilityState).toEqual({ checked: true });
     expect(h.checkbox("进行中").accessibilityState).toEqual({ checked: "mixed" });
     expect(h.render()).not.toContain("有未保存的修改");
-    h.press("保存");
+    await h.save();
     await vi.waitFor(() => expect(h.calls).toContainEqual({ name: "workspace.rule", input: { workspaceId: "ws", connectionKey: "current", rule: { ...defaultRule, statusCategories: [], statuses: ["progress"] } } }));
   } finally { h.dispose(); }
   const noStatuses = await filterHarness({ catalog: { ...filterCatalog, statuses: [] } });
@@ -821,7 +829,7 @@ it("legacy mixed rules load the intersection and keep empty catalog categories s
     await vi.waitFor(() => { noStatuses.render(); expect(noStatuses.modals[0]?.title).toBe("筛选条件 · Team space"); });
     expect(noStatuses.checkbox("未开始").accessibilityState).toEqual({ checked: true });
     expect(noStatuses.checkbox("进行中").accessibilityState).toEqual({ checked: true });
-    noStatuses.press("保存");
+    await noStatuses.save();
     await vi.waitFor(() => expect(noStatuses.calls).toContainEqual({ name: "workspace.rule", input: { workspaceId: "ws", connectionKey: "current", rule: defaultRule } }));
   } finally { noStatuses.dispose(); }
 });
@@ -864,7 +872,7 @@ it("search ignores case, keeps selected and missing values visible, and allows c
     h.press("gone-status（已不在目录）"); h.render();
     h.press("清除负责人"); h.render();
     h.press("清除Multica 项目"); h.render();
-    h.press("保存");
+    await h.save();
     await vi.waitFor(() => expect(h.calls).toContainEqual({ name: "workspace.rule", input: { workspaceId: "ws", connectionKey: "current", rule: { ...defaultRule, statusCategories: [] } } }));
   } finally { h.dispose(); }
 });
@@ -881,13 +889,13 @@ it("enabling opens the same editor and saves the rule before enabling; an enable
     expect(h.modals[0].title).toBe("启用 · Team space");
     expect(h.render()).toContain("默认只导入“未开始”和“进行中”，其他条件不限；可以先缩小范围再导入。");
     expect(h.calls.filter(call => call.name === "workspace.enable")).toEqual([]);
-    h.press("Bug"); h.render(); h.press("启用并导入");
+    h.press("Bug"); h.render(); await h.save("启用并导入");
     await vi.waitFor(() => expect(h.render()).toContain("启用失败，规则已保存"));
     let writes = h.calls.filter(call => ["workspace.rule", "workspace.enable"].includes(call.name));
     expect(writes.map(call => call.name)).toEqual(["workspace.rule", "workspace.enable"]);
     expect(writes[0].input).toEqual({ workspaceId: "ws", connectionKey: "current", rule: { ...defaultRule, labelIds: ["bug"] } });
     expect(h.render()).not.toContain("有未保存的修改");
-    h.press("启用并导入");
+    await h.save("启用并导入");
     await vi.waitFor(() => { h.render(); expect(h.modals).toHaveLength(0); });
     writes = h.calls.filter(call => ["workspace.rule", "workspace.enable"].includes(call.name));
     expect(writes.map(call => call.name)).toEqual(["workspace.rule", "workspace.enable", "workspace.enable"]);
@@ -902,10 +910,10 @@ it("a failed rule save keeps the error in the modal and does not enable the work
     await vi.waitFor(() => expect(h.render()).toContain("Team space"));
     h.action("启用…").onPress();
     await vi.waitFor(() => expect(h.render()).toContain("启用并导入"));
-    h.press("启用并导入");
+    await h.save("启用并导入");
     await vi.waitFor(() => expect(h.render()).toContain("无法保存规则"));
     expect(h.calls.filter(call => call.name === "workspace.enable")).toHaveLength(0);
-    h.press("启用并导入");
+    await h.save("启用并导入");
     await vi.waitFor(() => { h.render(); expect(h.modals).toHaveLength(0); });
     expect(h.calls.filter(call => ["workspace.rule", "workspace.enable"].includes(call.name)).map(call => call.name)).toEqual(["workspace.rule", "workspace.rule", "workspace.enable"]);
   } finally { h.dispose(); }
@@ -916,7 +924,7 @@ it("disabling needs confirmation and disables only that workspace while saving",
   const h = await managementHarness((name, input) => {
     if (name === "connection.status") return readyStatus;
     if (name === "workspace.list") return { connectionKey: "current", workspaces: [
-      { id: "off", name: "Off space", enabled: false, rule: defaultRule }, { id: "ws", name: "Team space", enabled: true, rule: defaultRule }, { id: "second", name: "Second space", enabled: true, rule: defaultRule },
+      { id: "off", name: "Off space", enabled: false, rule: defaultRule, importedCount: 0 }, { id: "ws", name: "Team space", enabled: true, rule: defaultRule, importedCount: 12 }, { id: "second", name: "Second space", enabled: true, rule: defaultRule, importedCount: 5 },
     ] };
     if (name === "workspace.catalog") return filterCatalog;
     if (name === "workspace.enable") return new Promise(resolve => { release = resolve; });
@@ -929,7 +937,7 @@ it("disabling needs confirmation and disables only that workspace while saving",
     h.switches.find(item => item.label === "Team space")!.onValueChange(false);
     page = h.render();
     expect(page).toContain("停用 Team space？");
-    for (const text of ["已导入的任务会归档", "空的 Paseo 项目会移除", "评论、执行记录、讨论身份和人工隐藏都会保留", "重新启用后恢复", "不会取消远端 Run"]) expect(page).toContain(text);
+    for (const text of ["已导入 12 项任务", "此 Multica 工作区已导入的 12 项任务会归档", "空的 Paseo 项目会移除", "评论、执行记录、讨论身份和人工隐藏都会保留", "重新启用后恢复", "不会取消远端 Run"]) expect(page).toContain(text);
     expect(h.calls.filter(call => call.name === "workspace.enable")).toHaveLength(0);
     h.press("取消"); h.render();
     expect(h.modals).toHaveLength(0);
@@ -981,7 +989,7 @@ it("ten-second polling and rule saves reuse the catalog; host changes and profil
     expect(h.calls.filter(call => call.name === "workspace.catalog")).toHaveLength(1);
     h.action("编辑筛选").onPress(); h.render("settings");
     expect(h.calls.filter(call => call.name === "workspace.catalog")).toHaveLength(1);
-    h.press("Bug"); h.render("settings"); h.press("保存");
+    h.press("Bug"); h.render("settings"); await h.save("保存", "settings");
     await vi.waitFor(() => { h.render("settings"); expect(h.modals).toHaveLength(0); });
     expect(h.calls.filter(call => call.name === "workspace.catalog")).toHaveLength(1);
     h.action("编辑筛选").onPress(); h.render("settings");
@@ -1011,6 +1019,112 @@ it("catalog failures fall back to counts, stay cached across polling, and can re
     fail = false; h.press("重试");
     await vi.waitFor(() => expect(h.render()).toContain("In Review"));
     expect(h.calls.filter(call => call.name === "workspace.catalog")).toHaveLength(2);
+  } finally { h.dispose(); vi.useRealTimers(); }
+});
+
+it("the preview debounces rule edits, shows footer counts and disables saving until the current result arrives", async () => {
+  let release!: (value: unknown) => void;
+  const h = await filterHarness({ answer: name => name === "workspace.preview" ? new Promise(resolve => { release = resolve; }) : undefined });
+  vi.useFakeTimers();
+  try {
+    await vi.waitFor(() => expect(h.render()).toContain("状态 未开始、进行中"));
+    h.action("编辑筛选").onPress();
+    expect(h.render()).toContain("正在计算匹配数…");
+    expect(h.pressables.find(item => item.accessibilityLabel === "正在计算…")?.disabled).toBe(true);
+    await vi.advanceTimersByTimeAsync(399);
+    expect(h.calls.filter(call => call.name === "workspace.preview")).toHaveLength(0);
+    h.press("Bug"); h.render();
+    await vi.advanceTimersByTimeAsync(399);
+    expect(h.calls.filter(call => call.name === "workspace.preview")).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(h.calls.filter(call => call.name === "workspace.preview")).toEqual([{ name: "workspace.preview", input: { workspaceId: "ws", connectionKey: "current", rule: { ...defaultRule, labelIds: ["bug"] } } }]);
+    expect(h.render()).toContain("正在计算匹配数…");
+    expect(h.calls.filter(call => call.name === "workspace.rule")).toHaveLength(0);
+    release({ total: 14, imported: 12, entering: 3, leaving: [{ id: "old", title: "旧任务" }] });
+    await vi.waitFor(() => expect(h.render()).toContain("将匹配 14 项任务"));
+    expect(h.render()).toContain("当前已导入 12 项：新增 3 · 移出 1 · 有未保存的修改");
+    expect(h.pressables.find(item => item.accessibilityLabel === "保存")?.disabled).toBe(false);
+  } finally { h.dispose(); vi.useRealTimers(); }
+});
+
+it.each(["success", "failure"])("an obsolete preview %s cannot replace the current rule's result", async outcome => {
+  const pending: Array<{ resolve(value: unknown): void; reject(error: Error): void }> = [];
+  const h = await filterHarness({ answer: name => name === "workspace.preview" ? new Promise((resolve, reject) => pending.push({ resolve, reject })) : undefined });
+  vi.useFakeTimers();
+  try {
+    await vi.waitFor(() => expect(h.render()).toContain("状态 未开始、进行中"));
+    h.action("编辑筛选").onPress(); h.render();
+    await vi.advanceTimersByTimeAsync(400);
+    h.press("Bug"); h.render();
+    await vi.advanceTimersByTimeAsync(400);
+    expect(pending).toHaveLength(2);
+    pending[1].resolve({ total: 7, imported: 2, entering: 5, leaving: [] });
+    await vi.waitFor(() => expect(h.render()).toContain("将匹配 7 项任务"));
+    if (outcome === "success") pending[0].resolve({ total: 99, imported: 99, entering: 0, leaving: [{ id: "stale", title: "过期任务" }] });
+    else pending[0].reject(new Error("stale error"));
+    await vi.advanceTimersByTimeAsync(0);
+    let page = h.render();
+    expect(page).toContain("将匹配 7 项任务");
+    expect(page).not.toContain("将匹配 99"); expect(page).not.toContain("无法预览匹配数");
+    h.press("Bug"); page = h.render();
+    expect(page).toContain("正在计算匹配数…");
+    expect(page).not.toContain("将匹配 7 项任务");
+    expect(h.pressables.find(item => item.accessibilityLabel === "正在计算…")?.disabled).toBe(true);
+  } finally { h.dispose(); vi.useRealTimers(); }
+});
+
+it("leaving tasks require an inline confirmation; returning and editing do not save, and the list shows at most ten titles", async () => {
+  const leaving = Array.from({ length: 12 }, (_, index) => ({ id: `old-${index}`, title: `将移出的任务 ${index + 1}。` }));
+  const h = await filterHarness({ answer: name => name === "workspace.preview" ? { total: 14, imported: 23, entering: 3, leaving } : undefined });
+  vi.useFakeTimers();
+  try {
+    await vi.waitFor(() => expect(h.render()).toContain("状态 未开始、进行中"));
+    h.action("编辑筛选").onPress();
+    await h.save();
+    let page = h.render();
+    expect(page).toContain("保存后 12 项任务将移出");
+    expect(page).toContain("它们不再符合新条件，对应的 Paseo 工作区会自动归档：");
+    expect(page).toContain("将移出的任务 10。"); expect(page).not.toContain("将移出的任务 11。"); expect(page).toContain("等 12 项");
+    expect(page).toContain("评论、执行记录和讨论身份都会保留，再次符合条件时恢复原工作区。不会取消远端 Run。");
+    expect(h.modals).toHaveLength(1);
+    expect(h.calls.filter(call => call.name === "workspace.rule")).toHaveLength(0);
+    h.press("返回修改");
+    expect(h.render()).not.toContain("保存后 12 项任务将移出");
+    expect(h.calls.filter(call => call.name === "workspace.rule")).toHaveLength(0);
+    await h.save(); h.render(); h.press("Bug");
+    page = h.render();
+    expect(page).not.toContain("保存后 12 项任务将移出");
+    expect(page).toContain("正在计算匹配数…");
+    await h.save(); h.render(); h.press("保存并归档 12 项");
+    await vi.waitFor(() => { h.render(); expect(h.modals).toHaveLength(0); });
+    expect(h.calls.filter(call => call.name === "workspace.rule")).toEqual([{ name: "workspace.rule", input: { workspaceId: "ws", connectionKey: "current", rule: { ...defaultRule, labelIds: ["bug"] } } }]);
+  } finally { h.dispose(); vi.useRealTimers(); }
+});
+
+it("a failed preview reports the failure and still allows saving", async () => {
+  const h = await filterHarness({ answer: name => name === "workspace.preview" ? Promise.reject(new Error("offline")) : undefined });
+  vi.useFakeTimers();
+  try {
+    await vi.waitFor(() => expect(h.render()).toContain("状态 未开始、进行中"));
+    h.action("编辑筛选").onPress();
+    await vi.waitFor(() => expect(h.render()).toContain("无法预览匹配数"));
+    h.press("保存");
+    await vi.waitFor(() => { h.render(); expect(h.modals).toHaveLength(0); });
+    expect(h.calls.filter(call => call.name === "workspace.rule")).toHaveLength(1);
+  } finally { h.dispose(); vi.useRealTimers(); }
+});
+
+it.each([{ total: 30, warning: false }, { total: 31, warning: true }])("enabling $total matches shows the count and warns only above the large-import threshold", async ({ total, warning }) => {
+  const h = await filterHarness({ enabled: false, answer: name => name === "workspace.preview" ? { total, imported: 0, entering: total, leaving: [] } : undefined });
+  vi.useFakeTimers();
+  try {
+    await vi.waitFor(() => expect(h.render()).toContain("Team space"));
+    h.action("启用…").onPress();
+    await vi.waitFor(() => expect(h.render()).toContain(`启用并导入 ${total} 项`));
+    expect(h.render().includes("数量较多，可按负责人或标签缩小范围")).toBe(warning);
+    h.press(`启用并导入 ${total} 项`);
+    await vi.waitFor(() => { h.render(); expect(h.modals).toHaveLength(0); });
+    expect(h.calls.filter(call => ["workspace.rule", "workspace.enable"].includes(call.name)).map(call => call.name)).toEqual(["workspace.rule", "workspace.enable"]);
   } finally { h.dispose(); vi.useRealTimers(); }
 });
 
