@@ -36,6 +36,10 @@ _Avoid_: 工具调用、执行过程
 已导入评论在 Multica 被编辑或删除后追加的通知，保留原始消息并说明后续变化。
 _Avoid_: 原位替换、新的参与者评论
 
+**Agent 提及（Agent mention）**：
+评论中以 agent ID 指向一个 Multica agent 的引用；Multica 据此决定是否启动该 agent 的执行，裸 `@名字` 或普通链接不构成有效提及。
+_Avoid_: 裸 @名字、执行成功
+
 **执行过程（Agent run）**：
 智能体对一项任务的一次执行活动，可以涉及零个、一个或多个任务讨论串。
 _Avoid_: Thread、Comment

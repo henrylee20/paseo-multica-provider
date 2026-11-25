@@ -24,9 +24,11 @@ export interface ConnectionScreenProps extends PluginSurfaceProps {
   /** Settings shows what configures the connection; management adds the records that need handling. */
   scope?: "settings" | "management";
   openManagement?(): void;
+  /** Whether this Paseo host draws the composer's agent picker (0.16 and later). */
+  mentionPicker?: boolean;
 }
 
-export function ConnectionScreen({ host, theme, layout, navigation, scope = "management", openManagement }: ConnectionScreenProps) {
+export function ConnectionScreen({ host, theme, layout, navigation, scope = "management", openManagement, mentionPicker = false }: ConnectionScreenProps) {
   const settings = useSettings(multicaSettings);
   const readStatus = useRpc(connectionStatus);
   const listWorkspaces = useRpc(workspaceList);
@@ -201,6 +203,6 @@ export function ConnectionScreen({ host, theme, layout, navigation, scope = "man
     <HiddenObjects theme={theme} refreshKey={refreshKey} />
     <ReadonlyHistory theme={theme} />
     <ConnectionHistory theme={theme} currentKey={status?.connectionKey} />
-    <MentionReferences theme={theme} refreshKey={refreshKey} />
+    <MentionReferences theme={theme} refreshKey={refreshKey} mentionPicker={mentionPicker} />
   </ScrollView>;
 }

@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { setTimeout } from "node:timers/promises";
 import { createHostClient } from "@getpaseo/client/node";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
+import { discussionKeys } from "../shared/discussion.js";
 import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
 
 /** These are the real low-level SDK methods, including explicit project placement. */
@@ -69,9 +70,9 @@ export async function restoreMappedDiscussion(host: NativeHost, lifecycle: Discu
   const agent = (await host.fetchAgent(agentId))?.agent;
   if (!agent || agent.cwd !== expected.cwd) throw new Error("Mapped native discussion unavailable");
   if (agent.workspaceId !== expected.workspaceId) {
-    const rootId = agent.labels["multica.discussion"];
-    if (agent.provider !== "multica" || !agent.workspaceId || !rootId || agent.labels["multica.connection"] !== address.connectionKey ||
-      agent.labels["multica.issue"] !== address.issueId || !agent.persistence?.sessionId.startsWith("plugin:")) throw new Error("Mapped native discussion cannot be moved");
+    const rootId = agent.labels[discussionKeys.discussion];
+    if (agent.provider !== "multica" || !agent.workspaceId || !rootId || agent.labels[discussionKeys.connection] !== address.connectionKey ||
+      agent.labels[discussionKeys.issue] !== address.issueId || !agent.persistence?.sessionId.startsWith("plugin:")) throw new Error("Mapped native discussion cannot be moved");
     // A native history query may have reopened the retired agent. Close its
     // local activity before archiving, so migration cannot interrupt a remote Run.
     const release = await lifecycle.hold([{ ...address, rootId }]);

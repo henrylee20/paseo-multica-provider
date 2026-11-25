@@ -4,9 +4,9 @@
 
 ## 交付版本与构建
 
-- manifest：`requirements.paseo = >=0.15.3`，没有最高版本；不修改 Paseo 核心。
+- manifest：`requirements.paseo = >=0.15.3`，没有最高版本；不修改 Paseo 核心。输入框提及选择器需要 Paseo 0.16.0 及以上；0.15 宿主不显示选择器，管理页保留复制引用。
 - 开发／插件依赖：`@getpaseo/plugin`、`client`、`protocol` 固定 `0.15.4`，由 `package-lock.json` 安装。
-- 实际宿主：早期原生验收为 `0.15.3`；应用在任务中更新为 `0.17.4` 后，在独立 daemon 上继续验收。早期版本证据没有改记为新版本通过。
+- 实际宿主：早期原生验收为 `0.15.3`；应用在任务中更新为 `0.17.4` 后，在独立 daemon 上继续验收。早期版本证据没有改记为新版本通过。2026-11-25 输入框提及选择器在用户主 daemon（`srv_k4Tm0x9H1FtO`，0.17.4，listener `127.0.0.1:6767`）上以本地目录安装重新加载；只 reload `multica` 插件，daemon 进程未重启（PID `4116328` 与 reload 前一致）。
 - 真实服务：当前 `https://api.multica.ai` 云实例，复用 daemon 用户默认 CLI 登录；CLI 为 `0.6.3`，提交 `18fa9f728`。云后端精确构建版本未获取，能力按本次实际响应记录。
 - 干净构建：在独立 worktree 中执行官方 npm registry 的 `npm ci --ignore-scripts`；`node_modules` 是独立目录，没有使用开发工作区的用户符号链接。类型检查和完整行为测试通过。
 - 最终代码 `7474cbad` 的类型检查、149 项测试、构建和校验通过；规范与规格两路独立评审的全部发现已修复并定向复核，剩余发现为 0。
@@ -27,6 +27,7 @@ Paseo 安装本地目录时引用该目录，**不执行 manifest build**；必�
 | 显式筛选、原生层级、主讨论 | project-only 规则只导入 HENR-2；project／workspace／main、描述行与独立 cwd 存在 | 0.15.3 原生分页、组合条件、退出重返、同 ID 恢复及隐藏优先通过 | 真实云限定范围通过；全组合来自隔离测试。 |
 | Thread 历史、原生角色、编辑／删除提示 | 新评论作为本人原生消息出现 | 0.15.3 原生 Thread／多作者／更正／删除／系统事件；长历史与分页完整性有自动化覆盖 | 未在云上执行编辑／删除或伪造旧版本。 |
 | 主讨论新 Thread、回复与有效 mention | 普通主讨论保存 1 评论，新增独立 Thread、无 Run；该 Thread 的 canonical agent mention 回复保存 1 评论并产生 1 Run | 稳定根 parent、同名 ID、回显与竞态测试通过 | 两类真实路由结果通过；仅触及授权 Issue。 |
+| 输入框提及选择器 | 现有 HENR-2 的 Thread：UI 选择器插入 canonical 引用，评论保存 1 条，mention 产生 1 Run（queued→running），原生 Stop 后服务端 cancelled、原生 idle | 真实 0.17.4 主 daemon 安装／reload、真实 SDK 类型检查、宿主编译器编译、0.17.4／0.15.3 双 SDK 加载与编译后客户端测试均通过 | 真实主 daemon＋真实云通过；选择器需要 Paseo 0.16.0+，0.15 回退复制引用；Run cleanup 记为 unknown，未证明进程物理退出。 |
 | 评论与回显去重 | 原生主讨论原输入一次，新 Thread 的根一次；精确同 key 重发远端仍一条评论 | 响应丢失、重启 replay、原 client ID／角色／全文核对测试通过 | 新 Thread 是独立会话，不当作重复回显删除。 |
 | 多 Run 唯一归属及聚合 turn | 真实单 Run 归属本 Thread，原生 running→idle | 0.15.3 多 Thread、交叉关联、无关联后补、并行／queued Run、后续周期 UUID 通过 | 云未制造多 Run；完整组合是实际宿主＋隔离服务证据。 |
 | 按需执行明细、日志／工具、缺口与截断 | 真实 run.open 成功，Stop 前消息数组为空 | 0.15.3 实际原生 RPC 分页往返 >200k 字符、序号缺口补读、工具 call ID 与完整性标记通过 | 真实丰富日志与视觉展开未验证；不从空输出推断工具支持。 |
@@ -71,8 +72,14 @@ Run 任务元数据回归覆盖执行前失败、空／不可用执行消息、�
 - `/tmp/paseo-multica-delivery-load-evidence.json`：干净产物依赖安装后的实际宿主编译／贡献加载检查；此项没有使用 daemon。
 - `/tmp/paseo-multica-delivery-runtime/install-evidence.json`：全新实际 `0.17.4` daemon 安装干净解压产物、catalog／隔离连接／零导入与精确停止清理的证据。
 - `/tmp/paseo-multica-final-combined-acceptance.md` 及 `/tmp/paseo-multica-runtime-egrktl_j/final-combined-acceptance75-evidence.json`：最终 `7474cbad` 的元数据、离线缓存、手动恢复及活动隐藏保护组合实测，全部通过且 0 远端 POST。
+- `/tmp/opencode/mention-picker/{host-load.mjs,typecheck-0174,host-load-result.txt,verification.json}`：本轮真实 0.17.4 SDK 声明类型检查、实际宿主编译器编译及 0.17.4／0.15.3 双 SDK 加载证据；不使用 daemon、不读写真实 Multica。
+- `/tmp/opencode/mention-picker/live/{install-evidence.json,enable-evidence.json,mirror-settle.json,mention-evidence.json,ui-picker-list.png,ui-sent.png,ui-acceptance-evidence.json,final-state.json}`：主 daemon 真实 reload、client bundle hash、metadata 镜像、SDK 与 UI 两条 mention／Run／Stop 及隔离客户端截图；主 daemon 与主窗口未重启。
 
-真实服务留下两条授权验收评论作为痕迹，mention 产生的唯一 Run 已取消。未清除评论、重置 Issue 或扩展至其他任务。宿主原生 queue／视觉、真实自部署、真实 CLI 凭据轮换、丰富真实执行输出、真实对象失权和物理进程清理确认仍是明确的未验收边界。
+真实服务早先留下两条授权验收评论作为痕迹；本轮又留下两条（SDK 发送与 UI 选择器各一条），mention 产生的 Run 均已取消。未清除评论、重置 Issue 或扩展至其他任务。宿主原生 queue／视觉、真实自部署、真实 CLI 凭据轮换、丰富真实执行输出、真实对象失权和物理进程清理确认仍是明确的未验收边界。
+
+2026-11-25 输入框提及选择器补充：宿主 `@` 候选只读工作区文件，插件没有 mention source，选择器因此使用 Paseo 0.16 的 composer item（ADR 0009）。验证使用 npm 发布的真实 0.17.4 `@getpaseo/plugin`、`client`、`protocol` 声明（61 个 `.d.ts`）检查新客户端与服务端代码，零错误；使用未修改的实际 0.17.4 宿主编译器（`compiler-build` 及支持源码私有 harness）编译客户端与服务端 bundle，并分别以真实 0.17.4、0.15.3 共享 SDK 加载（宿主 UI 模块以替身提供）：0.17.4 客户端注册 `multica-mention`，0.15.3 不注册，两者均注册设置、管理页、侧栏与 5 个 renderer，服务端 provider／settings 正常。编译后客户端 bundle 覆盖搜索、同名 ID 区分、大小写与空白过滤、失败重试、插入和隐藏条件；服务端 RPC 边界覆盖标签到 metadata 的镜像、分页与循环游标、旧宿主一次停用、失败重试和关闭等待；类型检查与 172 项测试通过。
+
+随后在用户主 daemon 完成真实安装与验收：`paseo plugin reload multica` 编译约 5 秒，daemon PID 不变；官方 SDK 读取到 97,666 字节 client bundle（hash `67cb5fbd314a61f98657865dc5f904a7552fdef22851d85b1fdcdeef259705cf`，含 `multica-mention`）。启用现有 henrylee 规则后，HENR-1 主讨论、HENR-2 主讨论与已有 Thread 的三个 agent metadata 与 labels 一致；`delivery.mentions` 返回真实 agent 拉车的🫏（`5505d430-fd5c-416a-9455-2af92d34b67d`）。两条评论均保存：SDK 发送 `01a2114f-7f2b-776b-b5cc-c27e4c9153fe` 与 UI 选择器发送 `01a21152-da7b-7cc4-afb7-9349a0a27879`，各自触发该 agent 的 Run（`01a2114f-7f59-73ea-b55a-f8732a1cb38d`、`01a21152-da8b-74cb-a604-717a146eafdc`），原生 Stop 后服务端 cancelled、原生 idle（1401ms、667ms）。UI 使用独立 Electron user-data 的第二客户端连同一主 daemon，通过 CDP 打开 HENR-2 的已有 Thread、点击「提及 Agent」、搜索并选择该 agent，输入框收到完整 canonical 引用后点击发送；截图见下条证据。隔离客户端已关闭，主 daemon 与主窗口未重启；验收后 henrylee 规则保持启用、两个任务的讨论保持活跃，便于在同一窗口试用。未验证物理进程退出（cleanup UNKNOWN）、移动布局、原生溢出面板与自部署服务。
 
 ## Standards
 
