@@ -93,14 +93,14 @@ export class SidebarSynchronizer {
     if (this.expectedServerId && this.expectedServerId !== serverId) throw new Error("Native host is not the owning daemon");
     this.expectedServerId = serverId;
   }
-  async bootstrap(paseo: PaseoApi): Promise<void> {
+  async bootstrap(paseo: PaseoApi, force = false): Promise<void> {
     await this.assertOwningDaemon(paseo);
     // A client connection starts daemon recovery even if the first remote read fails.
     if (!this.closed && !this.timer) {
       this.timer = setInterval(() => { void this.requestSync().catch(() => {}); }, this.options.intervalMs);
       this.timer.unref?.();
     }
-    if (this.syncState.status === "ready") return;
+    if (!force && this.syncState.status === "ready") return;
     return this.requestSync();
   }
   private requestSync(): Promise<void> {
@@ -139,9 +139,8 @@ export class SidebarSynchronizer {
       await this.options.store.update(state => {
         const rules = connectionState(state, connection.connectionKey).rules;
         rules[workspaceId] = { ...taskRuleSchema.parse(rules[workspaceId] ?? {}), enabled };
-        this.syncState.status = "idle";
       });
-    }).then(() => this.bootstrap(paseo));
+    }).then(() => this.bootstrap(paseo, true));
   }
   rule(paseo: PaseoApi, workspaceId: string, rule: TaskRule, expectedConnectionKey?: string): Promise<void> {
     return this.serialize(async () => {
@@ -151,9 +150,8 @@ export class SidebarSynchronizer {
       await this.options.store.update(state => {
         const rules = connectionState(state, connection.connectionKey).rules;
         rules[workspaceId] = { ...rule, enabled: rules[workspaceId]?.enabled ?? false };
-        this.syncState.status = "idle";
       });
-    }).then(() => this.bootstrap(paseo));
+    }).then(() => this.bootstrap(paseo, true));
   }
   private async archive(connectionKey: string, issueId: string, reason: "rule_disabled" | "filter_exit") {
     const issue = (await this.options.store.read()).connections[connectionKey].issues[issueId];
