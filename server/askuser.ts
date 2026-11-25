@@ -9,6 +9,7 @@ import { remoteFetch, type AuthenticatedConnection } from "./connection.js";
 import { StateStore, type IssueMapping } from "./state.js";
 import { remoteJson, workspaceSchema, type RemoteWorkspace } from "./sync.js";
 import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
+import { assertAskuserWritable } from "./askuser-policy.js";
 import type { StopCoordinator } from "./stops.js";
 
 type Address = { connectionKey: string; issueId: string; rootId: string };
@@ -33,9 +34,10 @@ const bounded = (data: AskuserCardData): AskuserCardData => {
     answer: data.answer && { ...data.answer, content: preview(data.answer.content, 800)!, actorId: preview(data.answer.actorId, 128), actorType: preview(data.answer.actorType, 32), delegatedBy: preview(data.answer.delegatedBy, 128) },
   };
 };
+class DeferredAttachment extends Error {}
 const revision = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
-export function cachedAskuserCard(address: CardAddress, issue: IssueMapping, context: { offline: boolean; userId?: string } = { offline: true }): AskuserCardData {
+export function cachedAskuserCard(address: CardAddress, issue: IssueMapping, context: { offline: boolean; userId?: string; unavailable?: boolean } = { offline: true }): AskuserCardData {
     const record = issue.askuserCards?.[cardKey(address.commentId, address.attachmentId)];
     if (!record) throw new Error("提问卡片缓存不可用。");
     const cached = issue.askuserAttachments?.[record.attachmentId];
@@ -47,7 +49,7 @@ export function cachedAskuserCard(address: CardAddress, issue: IssueMapping, con
     const offline = context.offline;
     const targetUser = document?.answer_user_id;
     const readOnlyReason = uncertain ? "回答保存结果待核实，请在 Multica 管理页核实原投递或明确重新发送；请勿重复提交。" : issue.access?.status === "inaccessible" ? "任务已不可访问，仅显示缓存。"
-      : issue.archiveReason || issue.archivePending || issue.manualHidden.workspace || issue.manualHidden.discussions.includes(record.rootId) ? "讨论已归档，仅显示缓存。"
+      : context.unavailable || issue.archiveReason || issue.archivePending || issue.manualHidden.workspace || issue.manualHidden.discussions.includes(record.rootId) ? "讨论已归档，仅显示缓存。"
       : record.deleted ? "原评论已删除，仅显示缓存。" : offline ? "离线缓存，仅供只读。"
       : targetUser && targetUser !== context.userId ? `仅指定用户 ${targetUser} 可作答；当前为只读。` : undefined;
     return { connectionKey: address.connectionKey, issueId: address.issueId, commentId: address.commentId, attachmentId: address.attachmentId, rootId: record.rootId, revision: revision([record, cached, delivery, offline, readOnlyReason]), title: document?.title ?? "askuser.json 提问卡片", description: document?.description,
@@ -62,14 +64,29 @@ export class AskUsers {
   private pending = new Map<string, Promise<void>>();
   private actions = new Map<string, { kind: string; operation: Promise<unknown> }>();
   private online = new Set<string>();
-  constructor(private readonly store: StateStore, private readonly connection: () => Promise<AuthenticatedConnection>) {}
+  private readonly availability = new Map<string, string>();
+  private readonly unsubscribe: () => void;
+  constructor(private readonly store: StateStore, private readonly connection: () => Promise<AuthenticatedConnection>, private readonly lifecycle: DiscussionLifecycle) {
+    // Durable availability changes must clear native needs_input even when sync
+    // will not reach this Issue again (hidden, archived, or inaccessible).
+    this.unsubscribe = store.subscribe(state => {
+      for (const [connectionKey, connection] of Object.entries(state.connections)) for (const [issueId, issue] of Object.entries(connection.issues)) {
+        const key = JSON.stringify([connectionKey, issueId]);
+        const availability = JSON.stringify([issue.access?.status, issue.archiveReason, issue.archivePending, issue.manualHidden]);
+        const previous = this.availability.get(key);
+        this.availability.set(key, availability);
+        if (previous !== availability) this.project(connectionKey, issueId, issue);
+      }
+    });
+  }
   subscribe(address: Address, listener: (row: ProviderTimelineItem, card: AskuserCardData) => void) {
     const key = discussionKey(address);
     const listeners = this.listeners.get(key) ?? new Set(); listeners.add(listener); this.listeners.set(key, listeners);
     return () => { listeners.delete(listener); if (!listeners.size) this.listeners.delete(key); };
   }
   private data(address: CardAddress, issue: IssueMapping) {
-    return cachedAskuserCard(address, issue, { offline: !this.online.has(address.connectionKey), userId: this.userIds.get(address.connectionKey) });
+    const rootId = issue.askuserCards?.[cardKey(address.commentId, address.attachmentId)]?.rootId;
+    return cachedAskuserCard(address, issue, { offline: !this.online.has(address.connectionKey), userId: this.userIds.get(address.connectionKey), unavailable: !!rootId && this.lifecycle.unavailable({ ...address, rootId }) });
   }
   private row(data: AskuserCardData): ProviderTimelineItem {
     return { type: "plugin", id: `multica:askuser:${data.commentId}:${data.attachmentId}`, pluginId: "multica", kind: "askuser", version: 1, data: bounded(data) };
@@ -85,7 +102,9 @@ export class AskUsers {
   }
   private async publish(connectionKey: string, issueId: string) {
     const issue = (await this.store.read()).connections[connectionKey]?.issues[issueId];
-    if (!issue) return;
+    if (issue) this.project(connectionKey, issueId, issue);
+  }
+  private project(connectionKey: string, issueId: string, issue: IssueMapping) {
     for (const card of Object.values(issue.askuserCards ?? {})) {
       const address = { connectionKey, issueId, rootId: card.rootId };
       const data = this.data({ ...address, commentId: card.commentId, attachmentId: card.attachmentId }, issue);
@@ -112,7 +131,7 @@ export class AskUsers {
         if (!cached && (issue.manualHidden.workspace || issue.manualHidden.discussions.includes(rootId) || issue.archiveReason || issue.access?.status === "inaccessible")) continue;
         if (!cached) {
           try { cached = { document: await this.download(connection, workspace, issueId, attachment.download_url, rootId) }; }
-          catch (error) { if (connection.signal?.aborted) this.online.delete(connection.connectionKey); cached = { error: error instanceof Error ? error.message.slice(0, 1000) : "附件下载或解析失败。" }; }
+          catch (error) { if (error instanceof DeferredAttachment) continue; if (connection.signal?.aborted) this.online.delete(connection.connectionKey); cached = { error: error instanceof Error ? error.message.slice(0, 1000) : "附件下载或解析失败。" }; }
           await this.store.update(state => { (state.connections[connection.connectionKey].issues[issueId].askuserAttachments ??= {})[attachment.id!] = cached!; });
         }
         await this.store.update(state => {
@@ -175,8 +194,7 @@ export class AskUsers {
     let url: URL;
     try { url = new URL(source, `${connection.apiUrl}/`); } catch { throw new Error("附件 download_url 无效。"); }
     if (url.origin !== new URL(connection.apiUrl).origin || url.username || url.password) throw new Error("拒绝跨源或含凭据的附件地址。");
-    const issue = (await this.store.read()).connections[connection.connectionKey]?.issues[issueId];
-    if (!issue || issue.access?.status === "inaccessible" || issue.archiveReason || issue.manualHidden.workspace || !!rootId && issue.manualHidden.discussions.includes(rootId)) throw new Error("任务不可访问或已归档，未下载附件。");
+    await this.assertDownloadAvailable(connection.connectionKey, issueId, rootId);
     const accessible = await remoteFetch(connection, `/api/issues/${encodeURIComponent(issueId)}`, { headers: { "X-Workspace-Slug": workspace.slug } });
     if (!accessible.ok) { await accessible.body?.cancel(); throw new Error(`任务访问核对失败（HTTP ${accessible.status}），未下载附件。`); }
     const object = z.object({ id: z.string(), workspace_id: z.string() }).parse(await accessible.json());
@@ -185,9 +203,10 @@ export class AskUsers {
     let response: Response;
     try {
       await connection.assertCurrent?.();
+      await this.assertDownloadAvailable(connection.connectionKey, issueId, rootId);
       response = await fetch(url, { headers: { Authorization: `Bearer ${connection.token}`, "X-Workspace-Slug": workspace.slug }, redirect: "error",
         signal: AbortSignal.any([AbortSignal.timeout(10_000), ...(connection.signal ? [connection.signal] : [])]) });
-    } catch { throw new Error("附件下载失败（网络、重定向或登录上下文已变化）。"); }
+    } catch (error) { if (error instanceof DeferredAttachment) throw error; throw new Error("附件下载失败（网络、重定向或登录上下文已变化）。"); }
     try {
       await connection.assertCurrent?.();
       if (!response.ok) throw new Error(`附件下载失败（HTTP ${response.status}）。`);
@@ -211,8 +230,21 @@ export class AskUsers {
       try { json = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { throw new Error("附件 JSON 正文不可解析。"); }
       const parsed = askuserDocumentSchema.safeParse(json);
       if (!parsed.success) throw new Error(`askuser.json schema 无效：${parsed.error.issues.map(issue => issue.path.join(".") || "document").join(", ").slice(0, 700)}`);
+      await this.assertDownloadAvailable(connection.connectionKey, issueId, rootId);
       return parsed.data;
     } finally { await response.body?.cancel().catch(() => {}); }
+  }
+  private async assertDownloadAvailable(connectionKey: string, issueId: string, rootId = "main") {
+    const issue = (await this.store.read()).connections[connectionKey]?.issues[issueId];
+    try { assertAskuserWritable(issue, { connectionKey, issueId, rootId }, this.lifecycle); }
+    catch (error) { throw new DeferredAttachment(error instanceof Error ? error.message : "讨论不可用，未下载附件。"); }
+  }
+  async connectionChanged(current?: { connectionKey: string; userId: string }) {
+    if (current ? this.online.size === 1 && this.online.has(current.connectionKey) && this.userIds.get(current.connectionKey) === current.userId : this.online.size === 0) return;
+    this.online.clear();
+    if (current) { this.online.add(current.connectionKey); this.userIds.set(current.connectionKey, current.userId); }
+    const state = await this.store.read();
+    for (const [connectionKey, connection] of Object.entries(state.connections)) for (const [issueId, issue] of Object.entries(connection.issues)) this.project(connectionKey, issueId, issue);
   }
   private async checkConnection(connectionKey: string) {
     try { const connection = await this.connection(); if (connection.connectionKey === connectionKey) { this.online.add(connectionKey); this.userIds.set(connectionKey, connection.userId); } else this.online.delete(connectionKey); }
@@ -235,6 +267,13 @@ export class AskUsers {
     this.actions.set(key, { kind, operation });
     void operation.finally(() => { if (this.actions.get(key)?.operation === operation) this.actions.delete(key); }).catch(() => {});
     return operation;
+  }
+  async collapsePending(address: Address) {
+    await this.store.update(state => {
+      const issue = state.connections[address.connectionKey]?.issues[address.issueId];
+      for (const card of Object.values(issue?.askuserCards ?? {})) if (card.rootId === address.rootId && card.status === "pending") card.collapsed = true;
+    });
+    await this.publish(address.connectionKey, address.issueId);
   }
   collapse(address: CardAddress) { return this.action(address, "collapse", () => this.collapseCard(address)); }
   private async collapseCard(address: CardAddress) {
@@ -326,6 +365,11 @@ export class AskUsers {
     return this.action(address, "answer", () => this.submitAnswer(address, input, deliveries));
   }
   private async submitAnswer(address: CardAddress, input: unknown, deliveries: CommentDelivery) {
+    // Preserve the epoch from receipt, before credential or workspace awaits.
+    const received = (await this.store.read()).connections[address.connectionKey]?.issues[address.issueId];
+    const owner = received?.askuserCards?.[cardKey(address.commentId, address.attachmentId)]?.rootId;
+    if (!received || !owner) throw new Error("提问卡片不可用。");
+    const epoch = received.stopEpochs[owner] ?? 0;
     await this.checkConnection(address.connectionKey);
     const issue = (await this.store.read()).connections[address.connectionKey]?.issues[address.issueId];
     if (!issue) throw new Error("提问卡片不可用。");
@@ -336,7 +380,7 @@ export class AskUsers {
     const previous = attempts.at(-1);
     if ((!previous || previous.status === "failed") && (card.status !== "pending" || card.readOnly)) throw new Error(card.readOnlyReason || "提问卡片已解决。");
     const body = previous && previous.status !== "failed" ? previous.body : formatAskuserAnswers(card, input);
-    const record = previous && previous.status !== "failed" ? previous : await deliveries.admit({ connectionKey: address.connectionKey, issueId: address.issueId, rootId: card.rootId }, { clientMessageId: `${prefix}${attempts.length}`, delivery: "auto", input: { type: "message", content: [{ type: "text", text: body }] } }, { parentCommentId: address.commentId, askuserAnswerTo: address.commentId });
+    const record = previous && previous.status !== "failed" ? previous : await deliveries.admit({ connectionKey: address.connectionKey, issueId: address.issueId, rootId: card.rootId }, { clientMessageId: `${prefix}${attempts.length}`, delivery: "auto", input: { type: "message", content: [{ type: "text", text: body }] } }, { parentCommentId: address.commentId, askuserAnswerTo: address.commentId }, epoch);
     const current = await deliveries.settle(record);
     if (current.status === "failed") throw new Error(current.message || "回答未保存，请修正后重试。");
     if (current.status === "saved") await this.store.update(state => {
@@ -358,5 +402,5 @@ export class AskUsers {
     const end = Math.min(text.length, address.offset + 8192);
     return { text: text.slice(address.offset, end), nextOffset: end < text.length ? end : null };
   }
-  async close() { await Promise.allSettled([...this.pending.values(), ...[...this.actions.values()].map(action => action.operation)]); this.listeners.clear(); }
+  async close() { this.unsubscribe(); await Promise.allSettled([...this.pending.values(), ...[...this.actions.values()].map(action => action.operation)]); this.listeners.clear(); }
 }

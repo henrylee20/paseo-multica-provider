@@ -235,7 +235,8 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
               try {
                 const address = addresses.get(input.sessionId);
                 if (!address || lifecycle.unavailable(address)) throw new Error("Discussion unavailable");
-                await stops.interrupt(address);
+                try { await stops.interrupt(address); }
+                finally { await askusers.collapsePending(address); }
                 if (interruptedTurnId) interruptSettlements.get(input.sessionId)?.(interruptedTurnId);
                 emit({ type: "request.completed", requestId: input.requestId });
               } catch (error) {
@@ -274,6 +275,9 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
               if (!address) throw new Error("请在 Multica 管理页启用任务工作区后打开已导入的讨论。");
               if (lifecycle.unavailable(address)) throw new Error("此隐藏讨论正在核对本地归档状态，请稍后重试。");
               const record = await deliveries.admit(address, input.prompt);
+              // Newer hosts may request local permission clearing on chat. This
+              // is local collapse only; the prompt remains an ordinary comment.
+              if ("clearPendingPermissions" in input.prompt && input.prompt.clearPendingPermissions === true) await askusers.collapsePending(address);
               emit({ type: "timeline.item", sessionId: input.sessionId, item: projectRow(address, deliveryInput(record)) });
               emit({ type: "session.prompt_result", sessionId: input.sessionId, clientMessageId: input.prompt.clientMessageId,
                 result: input.prompt.delivery === "steer" && capturedTurnId ? { type: "steer", turnId: capturedTurnId } : { type: "completed" } });
