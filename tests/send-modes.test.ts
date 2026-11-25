@@ -84,7 +84,7 @@ async function fixture() {
   provider = await server.providers.get("multica")!.connect({ versions: [1], capabilities: ["session.persistence", "prompt.message", "prompt.steer", "timeline.plugin"] });
   provider.onEvent(event => events.push(event));
   cleanup.push(() => provider.close());
-  await server.rpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, paseo);
+  await server.syncRpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, paseo);
   const thread = agents.find(agent => agent.labels["multica.discussion"] === "root")!;
   const address = { connectionKey: thread.labels["multica.connection"], issueId: "issue", rootId: "root" };
   const prompt = (text: string, clientMessageId: string, delivery: "auto" | "steer") => provider.send({ type: "session.prompt", sessionId: thread.id, prompt: { clientMessageId, delivery, input: { type: "message", content: [{ type: "text", text }] } } });

@@ -118,7 +118,7 @@ async function fixture(active = false, idempotent = false) {
     return { server, dispose };
   };
   const started = start(); cleanup.push(async () => { await provider?.close(); });
-  await server!.rpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, paseo);
+  await server!.syncRpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, paseo);
   const send = async (rootId: string, text: string, clientMessageId: string, delivery: "auto" | "steer" = "auto") => {
     const agent = agents.find(agent => agent.labels["multica.discussion"] === rootId)!;
     await (await connect()).send({ type: "session.prompt", sessionId: agent.id, prompt: { clientMessageId, delivery, input: { type: "message", content: [{ type: "text", text }] } } });

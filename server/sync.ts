@@ -53,6 +53,9 @@ export function workspaceMembers(connection: AuthenticatedConnection, workspace:
 
 export class SidebarSynchronizer {
   private pending: Promise<unknown> = Promise.resolve();
+  private mutationPending: Promise<unknown> = Promise.resolve();
+  private ruleVersion = 0;
+  private syncDirty = false;
   private host?: NativeHost;
   private syncPending?: Promise<void>;
   private syncState: SyncStatus = { status: "idle", stage: "idle", completedWorkspaces: 0, enabledWorkspaces: 0 };
@@ -91,10 +94,11 @@ export class SidebarSynchronizer {
   async workspaces(connection: AuthenticatedConnection): Promise<RemoteWorkspace[]> {
     return await remoteJson(connection, "/api/workspaces", z.array(workspaceSchema)) as RemoteWorkspace[];
   }
-  private async matchingIssues(connection: AuthenticatedConnection, workspace: RemoteWorkspace, rule: TaskRule) {
+  private async matchingIssues(connection: AuthenticatedConnection, workspace: RemoteWorkspace, rule: TaskRule, version?: number) {
     const issues: z.infer<typeof remoteIssueSchema>[] = [];
     let offset = 0;
     for (;;) {
+      if (version !== undefined && version !== this.ruleVersion) return issues;
       const query = issueQuery(rule, offset);
       const page = await remoteJson(connection, `/api/issues?${query}`, pageSchema, workspace) as z.infer<typeof pageSchema>;
       if (page.issues.some(issue => issue.workspace_id !== workspace.id)) throw new Error("Issue belongs to a different workspace");
@@ -123,30 +127,42 @@ export class SidebarSynchronizer {
     if (this.expectedServerId && this.expectedServerId !== serverId) throw new Error("Native host is not the owning daemon");
     this.expectedServerId = serverId;
   }
-  async bootstrap(paseo: PaseoApi, force = false): Promise<void> {
-    await this.assertOwningDaemon(paseo);
-    // A client connection starts daemon recovery even if the first remote read fails.
+  private startTimer() {
     if (!this.closed && !this.timer) {
       this.timer = setInterval(() => { void this.requestSync().catch(() => {}); }, this.options.intervalMs);
       this.timer.unref?.();
     }
-    if (!force && this.syncState.status === "ready") return;
-    return this.requestSync();
   }
-  private requestSync(): Promise<void> {
+  async bootstrap(paseo: PaseoApi, force = false): Promise<void> {
+    await this.assertOwningDaemon(paseo);
+    this.startTimer();
+    if (force || this.syncState.status !== "ready") void this.requestSync().catch(() => {});
+  }
+  private requestSync(): Promise<void> { return this.syncPending ?? this.triggerSync(); }
+  private triggerSync(): Promise<void> {
+    if (this.closed) return Promise.resolve();
+    this.syncDirty = true;
+    this.syncState = { ...this.syncState, status: "syncing", message: undefined };
     if (!this.syncPending) {
-      const operation = this.serialize(async () => {
-        this.syncState = { ...this.syncState, status: "syncing", stage: "connection", completedWorkspaces: 0, message: undefined };
+      this.syncState = { ...this.syncState, stage: "connection", completedWorkspaces: 0, completedArchives: 0, pendingArchives: 0 };
+      this.syncPending = this.serialize(async () => {
         try {
-          await this.sync();
-          this.syncState = { ...this.syncState, status: "ready", stage: "idle", lastSuccessAt: new Date().toISOString() };
-        } catch (error) {
-          this.syncState = { ...this.syncState, status: "unavailable", message: "同步未完成；保留已读缓存，daemon 将继续重试。" };
-          throw error;
-        }
+          while (!this.closed && this.syncDirty) {
+            this.syncDirty = false;
+            const version = this.ruleVersion;
+            this.syncState = { ...this.syncState, stage: "connection", completedWorkspaces: 0, completedArchives: 0, pendingArchives: 0 };
+            let failed = false;
+            try { await this.sync(version); }
+            catch { failed = true; }
+            // Check and finish in the same turn: a mutation must never get lost
+            // between the last pass and clearing syncPending.
+            if (this.syncDirty || this.ruleVersion !== version) { this.syncDirty = true; continue; }
+            this.syncState = failed
+              ? { ...this.syncState, status: "unavailable", message: "同步失败；已保存的规则与开关不受影响，daemon 将继续重试。" }
+              : { ...this.syncState, status: "ready", stage: "idle", pendingArchives: 0, lastSuccessAt: new Date().toISOString() };
+          }
+        } finally { this.syncPending = undefined; }
       });
-      this.syncPending = operation;
-      void operation.finally(() => { if (this.syncPending === operation) this.syncPending = undefined; }).catch(() => {});
     }
     return this.syncPending;
   }
@@ -159,29 +175,46 @@ export class SidebarSynchronizer {
     });
   }
   /** Reconcile a saved comment without changing the client's selected discussion. */
-  reconcile(): Promise<void> { return this.expectedServerId ? this.serialize(() => this.sync()) : Promise.resolve(); }
+  reconcile(): Promise<void> { return this.expectedServerId ? this.triggerSync() : Promise.resolve(); }
   enable(paseo: PaseoApi, workspaceId: string, enabled: boolean, expectedConnectionKey?: string): Promise<void> {
-    return this.serialize(async () => {
+    return this.mutate(async () => {
+      await this.assertOwningDaemon(paseo);
       const connection = await this.options.connection();
       if (expectedConnectionKey && connection.connectionKey !== expectedConnectionKey) throw new Error("Connection identity changed");
-      const workspace = (await this.workspaces(connection)).find(item => item.id === workspaceId);
-      if (!workspace) throw new Error("Multica workspace unavailable");
+      const local = (await this.options.store.read()).connections[connection.connectionKey];
+      const known = local && (local.rules[workspaceId] || local.projects[workspaceId]
+        || Object.values(local.issues).some(issue => issue.remoteWorkspaceId === workspaceId));
+      if ((enabled || !known) && !(await this.workspaces(connection)).some(item => item.id === workspaceId)) throw new Error("Multica workspace unavailable");
+      await connection.assertCurrent?.();
       await this.options.store.update(state => {
         const rules = connectionState(state, connection.connectionKey).rules;
         rules[workspaceId] = { ...taskRuleSchema.parse(rules[workspaceId] ?? {}), enabled };
       });
-    }).then(() => this.bootstrap(paseo, true));
+    });
   }
   rule(paseo: PaseoApi, workspaceId: string, rule: TaskRule, expectedConnectionKey?: string): Promise<void> {
-    return this.serialize(async () => {
+    return this.mutate(async () => {
+      await this.assertOwningDaemon(paseo);
       const connection = await this.options.connection();
       if (expectedConnectionKey && connection.connectionKey !== expectedConnectionKey) throw new Error("Connection identity changed");
       if (!(await this.workspaces(connection)).some(item => item.id === workspaceId)) throw new Error("Multica workspace unavailable");
+      await connection.assertCurrent?.();
       await this.options.store.update(state => {
         const rules = connectionState(state, connection.connectionKey).rules;
         rules[workspaceId] = { ...rule, enabled: rules[workspaceId]?.enabled ?? false };
       });
-    }).then(() => this.bootstrap(paseo, true));
+    });
+  }
+  private mutate(operation: () => Promise<void>) {
+    const result = this.mutationPending.then(async () => {
+      if (this.closed) throw new Error("Synchronizer closed");
+      await operation();
+      this.ruleVersion++;
+      this.startTimer();
+      void this.triggerSync().catch(() => {});
+    });
+    this.mutationPending = result.catch(() => {});
+    return result;
   }
   private async archive(connectionKey: string, issueId: string, reason: "rule_disabled" | "filter_exit") {
     const issue = (await this.options.store.read()).connections[connectionKey].issues[issueId];
@@ -226,13 +259,15 @@ export class SidebarSynchronizer {
     }
   }
 
-  private async removeDisabledProjects(connectionKey: string) {
+  private async removeDisabledProjects(connectionKey: string, version: number) {
     const local = (await this.options.store.read()).connections[connectionKey];
     for (const [workspaceId, cached] of Object.entries(local?.projects ?? {})) {
+      if (version !== this.ruleVersion) return;
       if (local.rules[workspaceId]?.enabled !== false || !cached.projectId) continue;
       const project = (await this.host!.listProjects()).projects.find(project => project.projectId === cached.projectId);
       if (project && (project.projectRootPath !== cached.cwd || project.projectKind !== "non_git")) continue;
       if (project && await projectHasActiveWorkspaces(this.host!, cached.projectId)) continue;
+      if (version !== this.ruleVersion) return;
       // Preserve the old parent on each task before replacing the Project cache.
       // Intent survives a lost remove acknowledgement and plugin restarts.
       await this.options.store.update(state => {
@@ -249,7 +284,7 @@ export class SidebarSynchronizer {
     this.pending = result.catch(() => {});
     return result;
   }
-  private async sync() {
+  private async sync(version: number) {
     if (!this.host) this.host = await this.options.connectHost();
     await this.assertOwningDaemon();
     this.syncState.stage = "history";
@@ -259,29 +294,46 @@ export class SidebarSynchronizer {
     this.syncState.connectionKey = connection.connectionKey;
     const state = await this.options.store.read();
     const local = state.connections[connection.connectionKey];
+    if (version !== this.ruleVersion) return;
     const enabled = Object.entries(local?.rules ?? {}).filter(([, rule]) => rule.enabled);
     this.syncState.enabledWorkspaces = enabled.length;
     this.syncState.stage = "workspaces";
     const disabledIssues = Object.entries(local?.issues ?? {}).filter(([, issue]) =>
       local?.rules[issue.remoteWorkspaceId]?.enabled === false);
-    const disabledProjects = Object.keys(local?.projects ?? {}).some(id => local?.rules[id]?.enabled === false);
-    if (!enabled.length && !disabledIssues.length && !disabledProjects) { this.events.reconcile(connection, []); return; }
+    const disabledProjects = Object.entries(local?.projects ?? {}).filter(([id, project]) => local?.rules[id]?.enabled === false && project.projectId && !project.removed);
+    const pendingIssues = disabledIssues.filter(([, issue]) => !issue.archiveReason && issue.workspaceCreated && !issue.manualHidden.workspace);
+    this.syncState.pendingArchives = pendingIssues.length;
+    if (!enabled.length && !disabledIssues.length && !disabledProjects.length) { this.events.reconcile(connection, []); return; }
     const workspaces = enabled.length ? await this.workspaces(connection) : [];
+    if (version !== this.ruleVersion) return;
     this.events.reconcile(connection, workspaces.filter(workspace => local?.rules[workspace.id]?.enabled));
     await this.assertOwningDaemon();
-    for (const [issueId] of disabledIssues) await this.archive(connection.connectionKey, issueId, "rule_disabled");
-    await this.removeDisabledProjects(connection.connectionKey);
+    if (pendingIssues.length) this.syncState.stage = "archiving";
+    for (const [issueId, issue] of disabledIssues) {
+      if (version !== this.ruleVersion) return;
+      await this.archive(connection.connectionKey, issueId, "rule_disabled");
+      if (!issue.archiveReason && issue.workspaceCreated && !issue.manualHidden.workspace) {
+        this.syncState.completedArchives = (this.syncState.completedArchives ?? 0) + 1;
+        this.syncState.pendingArchives = Math.max(0, (this.syncState.pendingArchives ?? 0) - 1);
+      }
+    }
+    if (version !== this.ruleVersion) return;
+    await this.removeDisabledProjects(connection.connectionKey, version);
     for (const [workspaceId, rule] of enabled) {
+      if (version !== this.ruleVersion) return;
       const workspace = workspaces.find(item => item.id === workspaceId);
       if (!workspace) throw new Error("Enabled workspace snapshot unavailable");
       this.syncState.stage = "issues";
-      const issues = await this.matchingIssues(connection, workspace, rule);
+      const issues = await this.matchingIssues(connection, workspace, rule, version);
+      if (version !== this.ruleVersion) return;
       // Only the complete successful snapshot is authoritative for rule exits.
       const matchingIds = new Set(issues.map(issue => issue.id));
       for (const [issueId, mapping] of Object.entries(local?.issues ?? {})) {
+        if (version !== this.ruleVersion) return;
         if (mapping.remoteWorkspaceId !== workspaceId || matchingIds.has(issueId)) continue;
         await this.archive(connection.connectionKey, issueId, "filter_exit");
       }
+      if (version !== this.ruleVersion) return;
       // AgentStorage flattens the entire cwd into one filename component.
       // Keep existing mappings bound to their original directories and history.
       const projectDirectory = local?.projects[workspaceId]?.cwd
@@ -295,6 +347,7 @@ export class SidebarSynchronizer {
         connectionState(state, connection.connectionKey).projects[workspaceId] = { cwd: projectDirectory, projectId, name: workspace.name, slug: workspace.slug };
       });
       for (const issue of issues) {
+        if (version !== this.ruleVersion) return;
         const previous = (await this.options.store.read()).connections[connection.connectionKey]?.issues[issue.id];
         const title = [issue.identifier, issue.title].filter(Boolean).join(" ");
         const oldProjectId = previous?.projectId ?? local?.projects[workspaceId]?.projectId;
@@ -352,6 +405,7 @@ export class SidebarSynchronizer {
           await this.options.store.update(state => { state.connections[connection.connectionKey].issues[issue.id].mainAgentId = mainAgentId; });
         }
         if (mainAgentId && !mapping.manualHidden.discussions.includes("main")) await this.host.updateAgent(mainAgentId, { name: "主讨论" });
+        if (version !== this.ruleVersion) return;
         this.syncState.stage = "history";
         await this.options.onIssue?.(connection, workspace, issue.id, this.host);
       }
@@ -363,6 +417,6 @@ export class SidebarSynchronizer {
     if (this.timer) clearInterval(this.timer);
     if (this.eventTimer) clearTimeout(this.eventTimer);
     this.events.close();
-    return this.pending.then(async () => { await this.host?.close(); });
+    return Promise.all([this.mutationPending, this.pending]).then(async () => { await this.host?.close(); });
   }
 }

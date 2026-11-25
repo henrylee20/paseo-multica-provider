@@ -122,7 +122,7 @@ async function fixture() {
   const paseo = { agents: { ref: () => ({}) }, hosts: { list: async () => ({ self: { serverId: "daemon" } }) } } as unknown as PaseoApi;
   const dispose = createServerContribution({ homeDirectory: home, stateDirectory: join(home, "state"), workingDirectory: home, environment: { PASEO_HOME: home }, connectHost: async () => host, syncIntervalMs: 60_000 })(server.context);
   cleanup.push(dispose); cleanup.push(async () => { await provider?.close(); });
-  await server.rpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, paseo);
+  await server.syncRpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, paseo);
   const address = (connectionKey = agents[0].labels["multica.connection"]) => ({ connectionKey, issueId: "issue", rootId: "root" });
   const send = async (clientMessageId: string) => {
     const agent = agents.find(agent => agent.labels["multica.connection"] === address().connectionKey && agent.labels["multica.discussion"] === "root")!;
@@ -156,7 +156,7 @@ it("logout retires the authenticated workspace socket and leaves no old-cache re
   expect(await f.server.rpc(connectionStatus, {}, f.paseo)).toMatchObject({ status: "not_logged_in" });
   await expect.poll(() => f.primary.ws.clients.size).toBe(0);
   const before = f.requests.length;
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await f.server.syncRpc(syncBootstrap, {}, f.paseo);
   await expect(f.server.rpc(deliveryMentions, { connectionKey: f.address().connectionKey, issueId: "issue" }, f.paseo)).rejects.toThrow();
   expect(f.requests.length).toBe(before);
 });
@@ -174,12 +174,12 @@ it("credential rotation reuses history while account and service switches isolat
 
   await f.login(1);
   expect(await f.server.rpc(connectionStatus, {}, f.paseo)).toMatchObject({ connectionKey: original.connectionKey });
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await f.server.syncRpc(syncBootstrap, {}, f.paseo);
   expect({ projects: f.projects.map(value => value.projectId), workspaces: f.workspaces.map(value => value.id), agents: f.agents.map(value => value.id) }).toEqual(originalIds);
   expect(await hiddenObjects(f.server, f.paseo)).toEqual(hidden);
   await f.login(1, f.primary.apiUrl, "same-account");
   f.server.setSettings(multicaSettings.id, { profile: "same-account" });
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await f.server.syncRpc(syncBootstrap, {}, f.paseo);
   expect((await f.server.rpc(connectionStatus, {}, f.paseo)).connectionKey).toBe(original.connectionKey);
   expect(f.agents.map(value => value.id)).toEqual(originalIds.agents);
 
@@ -188,7 +188,7 @@ it("credential rotation reuses history while account and service switches isolat
   const other = await f.server.rpc(connectionStatus, {}, f.paseo);
   expect(other.connectionKey).not.toBe(original.connectionKey);
   expect((await f.server.rpc(workspaceList, {}, f.paseo)).workspaces[0].enabled).toBe(false);
-  await f.server.rpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, f.paseo);
+  await f.server.syncRpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, f.paseo);
   const otherThread = f.agents.find(agent => agent.labels["multica.connection"] === other.connectionKey && agent.labels["multica.discussion"] === "root")!;
   expect(otherThread.workspaceId).not.toBe(originalThread.workspaceId);
   await f.server.rpc(threadOpen, f.address(other.connectionKey), f.paseo);
@@ -204,7 +204,7 @@ it("credential rotation reuses history while account and service switches isolat
   expect(otherService.connectionKey).not.toBe(original.connectionKey);
   expect(otherService.connectionKey).not.toBe(other.connectionKey);
   expect((await f.server.rpc(workspaceList, {}, f.paseo)).workspaces[0].enabled).toBe(false);
-  await f.server.rpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, f.paseo);
+  await f.server.syncRpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, f.paseo);
   expect(f.projects).toHaveLength(3);
   expect(f.workspaces).toHaveLength(3);
   expect(f.agents).toHaveLength(6);
@@ -217,7 +217,7 @@ it("credential rotation reuses history while account and service switches isolat
   expect(await hiddenObjects(f.server, f.paseo)).toEqual(hidden);
 
   await f.login(1);
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await f.server.syncRpc(syncBootstrap, {}, f.paseo);
   expect((await f.server.rpc(connectionStatus, {}, f.paseo)).connectionKey).toBe(original.connectionKey);
   expect(f.agents).toHaveLength(6);
   expect(originalThread.archivedAt).toBeTruthy();
@@ -240,6 +240,6 @@ it("a settings action opened under an old account cannot enable rules for a newl
   const original = f.address().connectionKey;
   await f.login(2);
   const enable = defineRpc({ name: "workspace.enable", input: workspaceEnable.input.extend({ connectionKey: z.string() }), output: workspaceEnable.output });
-  expect(await f.server.rpc(enable, { workspaceId: "workspace", enabled: true, connectionKey: original }, f.paseo)).toMatchObject({ status: "unavailable" });
+  expect(await f.server.syncRpc(enable, { workspaceId: "workspace", enabled: true, connectionKey: original }, f.paseo)).toMatchObject({ status: "unavailable" });
   expect((await f.server.rpc(workspaceList, {}, f.paseo)).workspaces[0].enabled).toBe(false);
 });

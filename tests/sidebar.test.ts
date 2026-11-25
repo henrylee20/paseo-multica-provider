@@ -10,10 +10,12 @@ import type { ProviderEvent } from "@getpaseo/plugin/server/provider";
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 import { createServerContribution } from "../server/contribute.js";
+import { SidebarSynchronizer } from "../server/sync.js";
+import { WorkspaceEvents } from "../server/workspace-events.js";
 import type { LocalState } from "../server/state.js";
-import { FakeServer, resync, hiddenObjects } from "./support/fake-server.js";
+import { FakeServer, resync, hiddenObjects, waitForSync } from "./support/fake-server.js";
 import { metadataHost } from "./support/metadata-host.js";
-import { connectionStatus, taskRuleSchema, workspaceList, workspacePreview } from "../shared/contracts.js";
+import { connectionStatus, taskRuleSchema, workspaceList, workspacePreview, workspaceRule, workspaceEnable } from "../shared/contracts.js";
 import { hiddenRestore } from "../shared/hiding.js";
 
 const bootstrap = defineRpc({ name: "sync.bootstrap", input: z.object({}), output: z.object({ status: z.string() }) });
@@ -44,7 +46,7 @@ async function fixture(syncIntervalMs = 15_000, homePrefix = "multica-sidebar-")
   const scopes: Array<{ path: string; slug?: string }> = [];
   const workspaces = [{ id: "remote-workspace", name: "产品开发", slug: "product" }];
   const heldIssueReads: Array<() => void> = [];
-  const remote = { holdIssueReads: false, disconnect: false, authStatus: 200, issueStatus: 200, invalidIssuePage: false, nextPageFails: false, emptyNextPage: false };
+  const remote = { acknowledgeEvents: true, workspacesStatus: 200, holdIssueReads: false, disconnect: false, authStatus: 200, issueStatus: 200, invalidIssuePage: false, nextPageFails: false, emptyNextPage: false };
   const http = createServer((request, response) => {
     requests.push(request.url!);
     scopes.push({ path: request.url!, slug: request.headers["x-workspace-slug"] as string | undefined });
@@ -63,6 +65,7 @@ async function fixture(syncIntervalMs = 15_000, homePrefix = "multica-sidebar-")
       if (remote.holdIssueReads) heldIssueReads.push(reply); else reply();
       return;
     }
+    if (url.pathname === "/api/workspaces") response.statusCode = remote.workspacesStatus;
     if (url.pathname === "/api/me") response.statusCode = remote.authStatus;
     response.end(JSON.stringify(url.pathname === "/api/me" ? { id: "user-42", name: "Lin" }
       : (url.pathname.endsWith("/comments") || url.pathname.endsWith("/task-runs")) ? []
@@ -86,7 +89,10 @@ async function fixture(syncIntervalMs = 15_000, homePrefix = "multica-sidebar-")
   websocket.on("connection", (socket, request) => {
     const entry = { url: request.url! } as { url: string; auth?: unknown };
     websocketRequests.push(entry);
-    socket.on("message", data => { entry.auth = JSON.parse(data.toString()); socket.send(JSON.stringify({ type: "auth_ack", payload: {} })); });
+    socket.on("message", data => {
+      entry.auth = JSON.parse(data.toString());
+      if (remote.acknowledgeEvents) socket.send(JSON.stringify({ type: "auth_ack", payload: {} }));
+    });
   });
   cleanup.push(() => { for (const socket of websocket.clients) socket.close(); websocket.close(); });
   const signal = (type: string, payload = {}) => { for (const socket of websocket.clients) socket.send(JSON.stringify({ type, payload })); };
@@ -177,7 +183,7 @@ async function fixture(syncIntervalMs = 15_000, homePrefix = "multica-sidebar-")
 
 it("client bootstrap leaves the native sidebar empty until a workspace rule is explicitly enabled", async () => {
   const f = await fixture();
-  expect(await f.server.rpc(bootstrap, {}, f.paseo)).toMatchObject({ status: "ready" });
+  expect(await f.server.syncRpc(bootstrap, {}, f.paseo)).toMatchObject({ status: "ready" });
   expect(await f.server.rpc(workspaces, {}, f.paseo)).toEqual({ workspaces: [{ id: "remote-workspace", name: "产品开发", enabled: false }] });
   expect(f.requests.some(path => path.startsWith("/api/issues"))).toBe(false);
   expect(f.websocketRequests).toEqual([]);
@@ -185,7 +191,7 @@ it("client bootstrap leaves the native sidebar empty until a workspace rule is e
 
 it("workspace preview counts all matched tasks against unarchived mappings without writing state or calling the native host", async () => {
   const f = await fixture(60_000);
-  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   await f.dispose();
   const statePath = join(f.home, "multica-provider", "state.json");
   const state = JSON.parse(await readFile(statePath, "utf8")) as LocalState;
@@ -241,7 +247,7 @@ it("workspace preview does not wait behind a blocked native sync", async () => {
   const gate = new Promise<void>(resolve => { release = resolve; });
   const rename = f.host.renameProject.bind(f.host);
   const held = vi.spyOn(f.host, "renameProject").mockImplementation(async (...args) => { await gate; return rename(...args); });
-  const syncing = f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const syncing = f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   try {
     await vi.waitFor(() => expect(held).toHaveBeenCalled());
     expect(await f.server.rpc(workspacePreview, { workspaceId: "remote-workspace", rule: taskRuleSchema.parse({}) }, f.paseo)).toEqual({ total: 2, imported: 0, entering: 2, leaving: [] });
@@ -251,15 +257,15 @@ it("workspace preview does not wait behind a blocked native sync", async () => {
 
 it("client bootstrap copies each discussion's task from agent labels into metadata for the composer's agent picker", async () => {
   const f = await fixture();
-  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   const host = metadataHost(f.native.agents);
   const [first, second] = f.native.agents;
   const task = (agent: typeof first) => ({ agentId: agent.id, patch: { "multica.connection": agent.labels["multica.connection"], "multica.issue": agent.labels["multica.issue"] } });
-  expect(await f.server.rpc(bootstrap, {}, host.paseo)).toEqual({ status: "ready" });
+  expect(await f.server.syncRpc(bootstrap, {}, host.paseo)).toEqual({ status: "ready" });
   await vi.waitFor(() => expect(host.writes).toEqual([task(first), task(second)]));
   // Only this connection's discussions are read, archived ones included; a matching copy is left alone.
   expect(host.listings).toEqual([{ labels: { "multica.connection": first.labels["multica.connection"] }, includeArchived: true }]);
-  expect(await f.server.rpc(bootstrap, {}, host.paseo)).toEqual({ status: "ready" });
+  expect(await f.server.syncRpc(bootstrap, {}, host.paseo)).toEqual({ status: "ready" });
   await new Promise(resolve => setTimeout(resolve, 20));
   expect(host.listings).toHaveLength(1);
   expect(host.writes).toEqual([task(first), task(second)]);
@@ -268,15 +274,15 @@ it("client bootstrap copies each discussion's task from agent labels into metada
 
 it("the metadata copy follows directory pages, and a cursor that repeats stops it without failing bootstrap", async () => {
   const f = await fixture();
-  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   const paged = metadataHost(f.native.agents, { pageSize: 1 });
-  expect(await f.server.rpc(bootstrap, {}, paged.paseo)).toEqual({ status: "ready" });
+  expect(await f.server.syncRpc(bootstrap, {}, paged.paseo)).toEqual({ status: "ready" });
   await vi.waitFor(() => expect(paged.writes).toHaveLength(2));
   expect(paged.listings).toHaveLength(2);
   await f.dispose();
   const restarted = f.start();
   const looping = metadataHost(f.native.agents, { pageSize: 1, repeatingCursor: true });
-  expect(await restarted.server.rpc(bootstrap, {}, looping.paseo)).toEqual({ status: "ready" });
+  expect(await restarted.server.syncRpc(bootstrap, {}, looping.paseo)).toEqual({ status: "ready" });
   await vi.waitFor(() => expect(looping.listings).toHaveLength(2));
   // The same cursor comes back, so the directory cannot be proven complete: nothing loops, and the
   // discussions after it wait for a readable directory.
@@ -287,12 +293,12 @@ it("the metadata copy follows directory pages, and a cursor that repeats stops i
 
 it("a host without agent metadata is read once, and bootstrap stays ready", async () => {
   const f = await fixture();
-  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   const host = metadataHost(f.native.agents, { legacy: true });
-  expect(await f.server.rpc(bootstrap, {}, host.paseo)).toEqual({ status: "ready" });
+  expect(await f.server.syncRpc(bootstrap, {}, host.paseo)).toEqual({ status: "ready" });
   await vi.waitFor(() => expect(host.attempts()).toBe(1));
   await new Promise(resolve => setTimeout(resolve, 20));
-  expect(await f.server.rpc(bootstrap, {}, host.paseo)).toEqual({ status: "ready" });
+  expect(await f.server.syncRpc(bootstrap, {}, host.paseo)).toEqual({ status: "ready" });
   await new Promise(resolve => setTimeout(resolve, 20));
   expect(host.attempts()).toBe(1);
   expect(host.writes).toEqual([]);
@@ -300,14 +306,14 @@ it("a host without agent metadata is read once, and bootstrap stays ready", asyn
 
 it("a failed backfill retries on the next bootstrap and disposal waits for an in-flight copy", async () => {
   const f = await fixture();
-  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   const host = metadataHost(f.native.agents);
   host.control.failNextListing = true;
-  expect(await f.server.rpc(bootstrap, {}, host.paseo)).toEqual({ status: "ready" });
+  expect(await f.server.syncRpc(bootstrap, {}, host.paseo)).toEqual({ status: "ready" });
   await vi.waitFor(() => expect(host.attempts()).toBe(1));
   await new Promise(resolve => setTimeout(resolve, 20));
   expect(host.writes).toEqual([]);
-  expect(await f.server.rpc(bootstrap, {}, host.paseo)).toEqual({ status: "ready" });
+  expect(await f.server.syncRpc(bootstrap, {}, host.paseo)).toEqual({ status: "ready" });
   await vi.waitFor(() => expect(host.writes).toHaveLength(2));
   expect(host.attempts()).toBe(2);
   await f.dispose();
@@ -316,7 +322,7 @@ it("a failed backfill retries on the next bootstrap and disposal waits for an in
   let release!: () => void;
   host.control.holdWrites = new Promise<void>(resolve => { release = resolve; });
   const restarted = f.start();
-  expect(await restarted.server.rpc(bootstrap, {}, host.paseo)).toEqual({ status: "ready" });
+  expect(await restarted.server.syncRpc(bootstrap, {}, host.paseo)).toEqual({ status: "ready" });
   await vi.waitFor(() => expect(host.attempts()).toBe(3));
   let disposed = false;
   const disposing = Promise.resolve(restarted.dispose()).then(() => { disposed = true; });
@@ -329,14 +335,14 @@ it("a failed backfill retries on the next bootstrap and disposal waits for an in
 
 it("disabling a rule removes its empty Project and reenabling preserves tasks, discussion IDs and directories", async () => {
   const f = await fixture();
-  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   const projectId = f.native.projects[0].projectId;
   const directories = f.native.workspaces.map(item => item.cwd);
   const agents = f.native.agents.map(item => item.id);
-  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: false }, f.paseo);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: false }, f.paseo);
   expect(f.native.workspaces.every(item => item.archived)).toBe(true);
   expect(f.native.projects).toEqual([]);
-  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   const active = f.native.workspaces.filter(item => !item.archived);
   expect(active.map(item => item.cwd)).toEqual(directories);
   expect(f.native.projects).toHaveLength(1);
@@ -349,27 +355,27 @@ it("disabling a rule removes its empty Project and reenabling preserves tasks, d
 
 it("a failed rule archive remains retryable and reenable does not refresh a previously hidden main tab", async () => {
   const f = await fixture();
-  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   f.native.agents[0].archivedAt = "already-hidden";
   const archive = f.host.archiveWorkspace.bind(f.host);
   f.host.archiveWorkspace = async () => { throw new Error("temporarily disconnected"); };
-  expect(await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: false }, f.paseo)).toMatchObject({ status: "unavailable" });
+  expect(await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: false }, f.paseo)).toMatchObject({ status: "unavailable" });
   f.host.archiveWorkspace = archive;
   await resync(f.server, f.paseo, "remote-workspace");
   expect(f.native.workspaces.every(item => item.archived)).toBe(true);
-  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   expect(f.native.agents[0].archivedAt).toBeTruthy();
   expect(f.native.agents[1].archivedAt).toBeNull();
 });
 
 it("rebuilt Projects retain manual hiding and restore the original discussion only when selected", async () => {
   const f = await fixture();
-  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   const main = f.native.agents[0];
   main.archivedAt = "manual-hidden";
   await f.server.hook("agent.archive.after", { agent: { id: main.id, workspaceId: main.workspaceId, provider: "multica", cwd: main.cwd, title: "主讨论", parentAgentId: null }, archivedAt: main.archivedAt }, f.paseo);
-  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: false }, f.paseo);
-  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: false }, f.paseo);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   expect(main.archivedAt).toBeTruthy();
   const hidden = await hiddenObjects(f.server, f.paseo);
   expect(hidden).toHaveLength(1);
@@ -382,14 +388,14 @@ it("rebuilt Projects retain manual hiding and restore the original discussion on
 
 it("rebuilding a disabled Project leaves manually hidden tasks archived until explicitly restored", async () => {
   const f = await fixture();
-  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   const workspace = f.native.workspaces[0], main = f.native.agents[0];
   await f.host.archiveWorkspace(workspace.id);
   await f.server.hook("agent.archive.after", { agent: { id: main.id, workspaceId: main.workspaceId, provider: "multica", cwd: main.cwd, title: "主讨论", parentAgentId: null }, archivedAt: main.archivedAt! }, f.paseo);
   await f.server.hook("workspace.archive.after", { workspace: { id: workspace.id, projectId: workspace.projectId, cwd: workspace.cwd, name: workspace.title, archivedAt: "manual-hidden" } }, f.paseo);
-  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: false }, f.paseo);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: false }, f.paseo);
   expect(f.native.projects).toEqual([]);
-  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   expect(f.native.workspaces.filter(item => !item.archived)).toHaveLength(1);
   const address = { connectionKey: main.labels["multica.connection"], issueId: "issue-one" };
   expect(await f.server.rpc(hiddenRestore, address, f.paseo)).toEqual({ status: "ready" });
@@ -401,18 +407,20 @@ it("rebuilding a disabled Project leaves manually hidden tasks archived until ex
 
 it("a lost Project removal acknowledgement survives restart and rebuilding retries lost discussion imports", async () => {
   const f = await fixture();
-  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  // Inspect the failed pass before any handshake-triggered automatic retry.
+  f.remote.acknowledgeEvents = false;
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   const original = f.native.agents.map(({ id, cwd, handle }) => ({ id, cwd, handle }));
   const remove = f.host.removeProject.bind(f.host);
   f.host.removeProject = async id => { await remove(id); throw new Error("Removal acknowledgement lost"); };
-  expect(await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: false }, f.paseo)).toEqual({ status: "unavailable" });
+  expect(await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: false }, f.paseo)).toEqual({ status: "unavailable" });
   expect(f.native.projects).toEqual([]);
   await f.dispose();
   const restarted = f.start();
   expect(await resync(restarted.server, f.paseo, "remote-workspace")).toEqual({ status: "ready" });
   const importAgent = f.host.importAgent.bind(f.host);
   f.host.importAgent = async input => { await importAgent(input); throw new Error("Import acknowledgement lost"); };
-  expect(await restarted.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo)).toEqual({ status: "unavailable" });
+  expect(await restarted.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo)).toEqual({ status: "unavailable" });
   f.host.importAgent = importAgent;
   expect(await resync(restarted.server, f.paseo, "remote-workspace")).toEqual({ status: "ready" });
   expect(f.native.agents.map(({ id, cwd, handle }) => ({ id, cwd, handle }))).toEqual(original);
@@ -423,27 +431,35 @@ it("a lost Project removal acknowledgement survives restart and rebuilding retri
 it("disabling an empty rule removes its Project, but retains Projects containing user workspaces on later pages", async () => {
   const f = await fixture();
   f.issues.length = 0;
-  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   expect(f.native.projects).toHaveLength(1);
-  expect(await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: false }, f.paseo)).toEqual({ status: "ready" });
+  expect(await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: false }, f.paseo)).toEqual({ status: "ready" });
   expect(f.native.projects).toEqual([]);
-  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   const projectId = f.native.projects[0].projectId;
   f.native.workspacePageSize = 1;
   f.native.workspaces.push({ id: "unrelated", projectId: "unrelated-project", cwd: f.home, title: "Unrelated" },
     { id: "user-workspace", projectId, cwd: f.home, title: "User workspace" });
-  expect(await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: false }, f.paseo)).toEqual({ status: "ready" });
+  expect(await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: false }, f.paseo)).toEqual({ status: "ready" });
   expect(f.native.projects[0].projectId).toBe(projectId);
   expect(f.native.workspaces.every(workspace => !workspace.archived)).toBe(true);
+  expect((await f.server.rpc(connectionStatus, {}, f.paseo)).sync).toMatchObject({ status: "ready", completedArchives: 0, pendingArchives: 0 });
+  const stages: string[] = [];
+  const listing = f.host.listProjects.bind(f.host);
+  f.host.listProjects = async () => { stages.push((await f.server.rpc(connectionStatus, {}, f.paseo)).sync.stage); return listing(); };
+  expect(await resync(f.server, f.paseo, "remote-workspace")).toEqual({ status: "ready" });
+  expect(stages.length).toBeGreaterThan(0);
+  expect(stages).not.toContain("archiving");
+  expect((await f.server.rpc(connectionStatus, {}, f.paseo)).sync.pendingArchives).toBe(0);
 });
 
 it("an incomplete native workspace directory cannot authorize removing a disabled Project", async () => {
   const f = await fixture();
   f.issues.length = 0;
-  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   const fetch = f.host.fetchWorkspaces.bind(f.host);
   f.host.fetchWorkspaces = (async () => ({ entries: [], pageInfo: { hasMore: true, nextCursor: null } })) as unknown as DaemonClient["fetchWorkspaces"];
-  expect(await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: false }, f.paseo)).toEqual({ status: "unavailable" });
+  expect(await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: false }, f.paseo)).toEqual({ status: "unavailable" });
   expect(f.native.projects).toHaveLength(1);
   f.host.fetchWorkspaces = fetch;
   expect(await resync(f.server, f.paseo, "remote-workspace")).toEqual({ status: "ready" });
@@ -452,7 +468,7 @@ it("an incomplete native workspace directory cannot authorize removing a disable
 
 it("repeated bootstrap, title edits, token rotation and normal restart preserve native issue and tab identities", async () => {
   const f = await fixture();
-  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   const workspaceIds = f.native.workspaces.map(item => item.id);
   const agentIds = f.native.agents.map(item => item.id);
   f.issues[0].title = "登录标题已修改";
@@ -482,7 +498,7 @@ it("new placeholder directories fit the host's flattened agent storage path and 
     await mkdir(join(f.home, "agents", storageComponent), { recursive: true });
     return importAgent(input);
   };
-  expect(await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo)).toMatchObject({ status: "ready" });
+  expect(await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo)).toMatchObject({ status: "ready" });
   expect(f.native.agents).toHaveLength(2);
   const projects = structuredClone(f.native.projects);
   const workspaces = structuredClone(f.native.workspaces);
@@ -497,7 +513,7 @@ it("new placeholder directories fit the host's flattened agent storage path and 
 
 it("restart preserves existing placeholder directories and the imported history bound to them", async () => {
   const f = await fixture();
-  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   await f.dispose();
   const statePath = join(f.home, "multica-provider", "state.json");
   const persisted = JSON.parse(await readFile(statePath, "utf8")) as LocalState;
@@ -535,9 +551,11 @@ it("restart preserves existing placeholder directories and the imported history 
 
 it("a lost native workspace creation response is reconciled on a later directory page after restart", async () => {
   const f = await fixture();
+  // Inspect the failed pass before any handshake-triggered automatic retry.
+  f.remote.acknowledgeEvents = false;
   const create = f.host.createWorkspace.bind(f.host);
   f.host.createWorkspace = async (...args) => { await create(...args); throw new Error("response lost"); };
-  expect(await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo)).toMatchObject({ status: "unavailable" });
+  expect(await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo)).toMatchObject({ status: "unavailable" });
   expect(f.native.workspaces).toHaveLength(1);
   const original = { ...f.native.workspaces[0] };
   f.native.workspaces.unshift({ ...original, id: `${original.id}-similar` });
@@ -555,9 +573,11 @@ it("a lost native workspace creation response is reconciled on a later directory
 
 it("a lost native import response is reconciled through stable labels without importing the active handle again", async () => {
   const f = await fixture();
+  // Inspect the failed pass before any handshake-triggered automatic retry.
+  f.remote.acknowledgeEvents = false;
   const importAgent = f.host.importAgent.bind(f.host);
   f.host.importAgent = async input => { await importAgent(input); throw new Error("response lost"); };
-  expect(await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo)).toMatchObject({ status: "unavailable" });
+  expect(await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo)).toMatchObject({ status: "unavailable" });
   expect(f.native.agents).toHaveLength(1);
   f.host.importAgent = importAgent;
   const existing = f.native.agents[0];
@@ -574,6 +594,8 @@ it("a lost native import response is reconciled through stable labels without im
 
 it("an incomplete native discussion directory with a cursor cycle never imports another handle", async () => {
   const f = await fixture();
+  // Inspect the failed pass before any handshake-triggered automatic retry.
+  f.remote.acknowledgeEvents = false;
   const seen: Array<string | undefined> = [];
   f.host.fetchAgents = (async (input?: { page?: { cursor?: string } }) => {
     const cursor = input?.page?.cursor;
@@ -581,7 +603,7 @@ it("an incomplete native discussion directory with a cursor cycle never imports 
     if (seen.length > 3) throw new Error("Fixture rejected repeated cursor");
     return { entries: [], pageInfo: { hasMore: true, nextCursor: cursor === "first" ? "second" : "first" } };
   }) as unknown as DaemonClient["fetchAgents"];
-  expect(await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo)).toMatchObject({ status: "unavailable" });
+  expect(await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo)).toMatchObject({ status: "unavailable" });
   expect(f.native.agents).toEqual([]);
   expect(seen).toEqual([undefined, "first", "second"]);
 });
@@ -589,7 +611,7 @@ it("an incomplete native discussion directory with a cursor cycle never imports 
 it("bootstrap rejects a different native daemon before creating sidebar records", async () => {
   const f = await fixture();
   f.host.listHosts = async () => ({ self: { serverId: "other-daemon" } }) as Awaited<ReturnType<DaemonClient["listHosts"]>>;
-  expect(await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo)).toMatchObject({ status: "unavailable" });
+  expect(await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo)).toMatchObject({ status: "unavailable" });
   expect(f.native.projects).toEqual([]);
   expect(f.native.workspaces).toEqual([]);
   expect(f.native.agents).toEqual([]);
@@ -597,14 +619,14 @@ it("bootstrap rejects a different native daemon before creating sidebar records"
 
 it("the daemon worker continues updating native task names without further client RPCs", async () => {
   const f = await fixture(30);
-  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   f.issues[0].title = "后台已同步";
   await expect.poll(() => f.native.workspaces[0].title, { timeout: 2_000, interval: 20 }).toBe("PRD-1 后台已同步");
 });
 
 it("enabling the default rule pages custom-category issues into a native project, separate workspaces and main discussion tabs", async () => {
   const f = await fixture();
-  expect(await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo)).toMatchObject({ status: "ready" });
+  expect(await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo)).toMatchObject({ status: "ready" });
   expect(f.native.projects).toMatchObject([{ name: "产品开发" }]);
   expect(f.native.workspaces.map(item => ({ projectId: item.projectId, title: item.title }))).toEqual([
     { projectId: "native-project", title: "PRD-1 实现登录" }, { projectId: "native-project", title: "PRD-2 修复同步" },
@@ -622,7 +644,7 @@ it("enabling the default rule pages custom-category issues into a native project
 
 it("the main discussion replays a stable task description row without participant messages or remote comments", async () => {
   const f = await fixture();
-  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   const registration = f.server.providers.get("multica");
   expect(registration).toBeDefined();
   const connection = await registration!.connect({ versions: [1], capabilities: ["session.persistence", "session.list", "timeline.plugin"] });
@@ -663,7 +685,7 @@ it("a large task description stays within the row limit and its cached full text
   const f = await fixture();
   const description = `${"中文😀\n\\\"".repeat(15_000)}最终段落，不能截断。`;
   f.issues[0].description = description;
-  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   const provider = await f.server.providers.get("multica")!.connect({ versions: [1], capabilities: ["session.persistence", "timeline.plugin"] });
   const events: ProviderEvent[] = [];
   provider.onEvent(event => events.push(event));
@@ -716,15 +738,15 @@ it("typed multi-value filters intersect fields and keep directly assigned member
   const catalogPaths = ["/api/workspaces/remote-workspace/members", "/api/agents?workspace_id=remote-workspace&include_archived=true", "/api/squads", "/api/projects?include_archived=true", "/api/labels?resource_type=issue", "/api/issue-statuses?include_archived=true"];
   expect(f.scopes.filter(item => catalogPaths.includes(item.path))).toHaveLength(6);
   expect(f.scopes.filter(item => catalogPaths.includes(item.path)).every(item => item.slug === "product")).toBe(true);
-  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   const rule: z.input<typeof ruleRpc.input>["rule"] = { statusCategories: ["unstarted", "started"], statuses: ["custom-ready", "custom-review"],
     assignees: [{ type: "member" as const, id: "user-42" }, { type: "squad" as const, id: "squad-owned" }], projectIds: ["project-a"], labelIds: ["red", "blue"] };
-  expect(await f.server.rpc(ruleRpc, { workspaceId: "remote-workspace", rule }, f.paseo)).toEqual({ status: "ready" });
+  expect(await f.server.syncRpc(ruleRpc, { workspaceId: "remote-workspace", rule }, f.paseo)).toEqual({ status: "ready" });
   expect(f.native.workspaces.map(item => !!item.archived)).toEqual([false, true]);
   const query = new URL(f.requests.filter(path => path.startsWith("/api/issues?")).at(-1)!, "http://localhost").searchParams;
   expect(Object.fromEntries(query)).toEqual({ limit: "100", offset: "0", status_categories: "unstarted,started", statuses: "custom-ready,custom-review", assignee_filters: "member:user-42,squad:squad-owned", project_ids: "project-a", label_ids: "red,blue" });
   rule.assignees = [{ type: "agent", id: "agent-owned" }];
-  await f.server.rpc(ruleRpc, { workspaceId: "remote-workspace", rule }, f.paseo);
+  await f.server.syncRpc(ruleRpc, { workspaceId: "remote-workspace", rule }, f.paseo);
   expect(f.native.workspaces.map(item => !!item.archived)).toEqual([true, false]);
   const workspaceRules = defineRpc({ name: "workspace.list", input: z.object({}), output: z.object({ workspaces: z.array(z.object({ id: z.string(), rule: ruleRpc.input.shape.rule })) }) });
   expect((await f.server.rpc(workspaceRules, {}, f.paseo)).workspaces[0].rule).toEqual(rule);
@@ -738,7 +760,7 @@ it("typed multi-value filters intersect fields and keep directly assigned member
 
 it("workspace events discover new matching issues and restore every automatically archived tab on reentry", async () => {
   const f = await fixture(60_000);
-  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   await expect.poll(() => f.websocketRequests[0], { timeout: 2_000 }).toEqual({ url: "/ws?workspace_slug=product", auth: { type: "auth", payload: { token: "private-token" } } });
   const first = f.native.workspaces[0];
   const main = f.native.agents[0];
@@ -761,14 +783,14 @@ it("workspace events discover new matching issues and restore every automaticall
   expect(f.native.agents.find(item => item.id === "previously-hidden")?.archivedAt).toBeTruthy();
   expect(f.native.workspaces.filter(item => item.id === first.id)).toHaveLength(1);
   expect(f.native.agents.filter(item => item.id === main.id)).toHaveLength(1);
-  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: false }, f.paseo);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: false }, f.paseo);
   await expect.poll(() => f.websocket.clients.size, { timeout: 2_000 }).toBe(0);
 });
 
 
 it("failed or incomplete snapshots retain cached native workspaces and only an authoritative empty result archives them", async () => {
   const f = await fixture(60_000);
-  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   const identities = f.native.workspaces.map(item => item.id);
   for (const failure of ["authentication", "network", "transport", "schema", "pagination"]) {
     f.remote.issueStatus = failure === "authentication" ? 401 : failure === "network" ? 503 : 200;
@@ -790,7 +812,7 @@ it("failed or incomplete snapshots retain cached native workspaces and only an a
 it("reconnecting an enabled workspace resnapshots missed changes without subscribing to disabled workspaces", async () => {
   const f = await fixture(60_000);
   f.workspaces.push({ id: "disabled-workspace", name: "未启用", slug: "disabled" });
-  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   await expect.poll(() => f.websocketRequests.length, { timeout: 2_000 }).toBe(1);
   for (const socket of f.websocket.clients) socket.close();
   f.issues[0].status_category = "done";
@@ -804,9 +826,9 @@ it("explicit exact terminal and custom statuses are selectable without default c
   const f = await fixture(60_000);
   f.issues[1].status = "custom-complete";
   f.issues[1].status_category = "done";
-  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   expect(f.native.workspaces.map(item => item.title)).toEqual(["PRD-1 实现登录"]);
-  await f.server.rpc(ruleRpc, { workspaceId: "remote-workspace", rule: { statusCategories: [], statuses: ["done", "custom-complete"], assignees: [], projectIds: [], labelIds: [] } }, f.paseo);
+  await f.server.syncRpc(ruleRpc, { workspaceId: "remote-workspace", rule: { statusCategories: [], statuses: ["done", "custom-complete"], assignees: [], projectIds: [], labelIds: [] } }, f.paseo);
   expect(f.native.workspaces.map(item => [item.title, !!item.archived])).toEqual([["PRD-1 实现登录", true], ["PRD-2 修复同步", false]]);
   const query = new URL(f.requests.filter(path => path.startsWith("/api/issues?")).at(-1)!, "http://localhost").searchParams;
   expect(query.has("status_categories")).toBe(false);
@@ -816,30 +838,32 @@ it("explicit exact terminal and custom statuses are selectable without default c
 
 it("a lost automatic archive response survives restart and restores the tabs captured before archive", async () => {
   const f = await fixture(60_000);
-  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   const archive = f.host.archiveWorkspace.bind(f.host);
   f.host.archiveWorkspace = async (...args) => { await archive(...args); throw new Error("archive acknowledgement lost"); };
-  expect(await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: false }, f.paseo)).toEqual({ status: "unavailable" });
+  expect(await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: false }, f.paseo)).toEqual({ status: "unavailable" });
   expect(f.native.workspaces[0].archived).toBe(true);
   await f.dispose();
   f.host.archiveWorkspace = archive;
   const restarted = f.start();
   expect(await resync(restarted.server, f.paseo, "remote-workspace")).toEqual({ status: "ready" });
-  await restarted.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await restarted.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   expect(f.native.workspaces.filter(item => !item.archived)).toHaveLength(2);
   expect(f.native.agents.every(item => !item.archivedAt)).toBe(true);
 });
 
 it("retries a lost automatic workspace restore acknowledgement after restart without refreshing active tabs", async () => {
   const f = await fixture(60_000);
-  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  // Inspect the failed pass before any handshake-triggered automatic retry.
+  f.remote.acknowledgeEvents = false;
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   const original = f.native.agents.map(agent => ({ id: agent.id, cwd: agent.cwd, handle: agent.handle }));
   // A user-created workspace retains this Project, so recovery uses restore.
   f.native.workspaces.push({ id: "user-workspace", projectId: f.native.projects[0].projectId, cwd: f.home, title: "User workspace" });
-  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: false }, f.paseo);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: false }, f.paseo);
   const restore = f.host.restoreWorkspace.bind(f.host);
   f.host.restoreWorkspace = async id => { await restore(id); throw new Error("workspace restore acknowledgement lost"); };
-  expect(await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo)).toEqual({ status: "unavailable" });
+  expect(await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo)).toEqual({ status: "unavailable" });
   expect(f.native.workspaces[0].archived).toBe(false);
   expect(f.native.agents[0].archivedAt).toBeTruthy();
   await f.dispose();
@@ -855,14 +879,14 @@ it("retries a lost automatic workspace restore acknowledgement after restart wit
 
 it("a restarted daemon keeps one retry worker after the connecting client leaves during an offline bootstrap", async () => {
   const f = await fixture(1000);
-  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   const originalIds = f.native.agents.map(agent => agent.id);
   await f.dispose();
   f.remote.authStatus = 503;
   vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
   try {
     const restarted = f.start();
-    expect(await restarted.server.rpc(bootstrap, {}, f.paseo)).toMatchObject({ status: "unavailable" });
+    expect(await restarted.server.syncRpc(bootstrap, {}, f.paseo)).toMatchObject({ status: "unavailable" });
     // No further client RPC or settings page is needed after this connection.
     f.remote.authStatus = 200;
     f.issues.push({ ...f.issues[0], id: "issue-after-client-close", title: "Recovered in background" });
@@ -875,7 +899,7 @@ it("a restarted daemon keeps one retry worker after the connecting client leaves
 
 it("shares truthful sync progress and retains cached task identity through failed reads and recovery", async () => {
   const f = await fixture();
-  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   const ready = (await f.server.rpc(connectionStatus, {}, f.paseo)).sync;
   expect(ready).toMatchObject({ status: "ready", stage: "idle", completedWorkspaces: 1, enabledWorkspaces: 1, lastSuccessAt: expect.any(String) });
   const ids = f.native.agents.map(agent => agent.id);
@@ -891,7 +915,7 @@ it("shares truthful sync progress and retains cached task identity through faile
 
 it("updates the opened main discussion's stable description from cached observation without losing version guards offline", async () => {
   const f = await fixture();
-  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   const agent = f.native.agents[0];
   const address = JSON.parse(agent.handle.slice(7)).data;
   const provider = await f.server.providers.get("multica")!.connect({ versions: [1], capabilities: [] });
@@ -914,7 +938,7 @@ it("updates the opened main discussion's stable description from cached observat
 
 it("coalesces multiple reconnecting clients and periodic opportunities into one effective sync pass with visible progress", async () => {
   const f = await fixture(1000);
-  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   await new Promise(resolve => setTimeout(resolve, 70));
   vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
   try {
@@ -923,7 +947,7 @@ it("coalesces multiple reconnecting clients and periodic opportunities into one 
     const restarted = f.start();
     const before = f.requests.length;
     f.remote.holdIssueReads = true;
-    const clients = Promise.all([restarted.server.rpc(bootstrap, {}, f.paseo), restarted.server.rpc(bootstrap, {}, { ...f.paseo } as PaseoApi), restarted.server.rpc(bootstrap, {}, f.paseo)]);
+    const clients = Promise.all([restarted.server.syncRpc(bootstrap, {}, f.paseo), restarted.server.syncRpc(bootstrap, {}, { ...f.paseo } as PaseoApi), restarted.server.syncRpc(bootstrap, {}, f.paseo)]);
     await expect.poll(() => f.heldIssueReads.length).toBe(1);
     expect((await restarted.server.rpc(connectionStatus, {}, f.paseo)).sync).toMatchObject({ status: "syncing", stage: "issues", enabledWorkspaces: 1 });
     await vi.advanceTimersByTimeAsync(30_000);
@@ -938,7 +962,7 @@ it("coalesces multiple reconnecting clients and periodic opportunities into one 
 
 it("keeps cached tasks and reports incomplete recovery when an enabled workspace is absent from the accessible snapshot", async () => {
   const f = await fixture();
-  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   const ids = f.native.agents.map(agent => agent.id);
   f.workspaces.splice(0);
   expect(await resync(f.server, f.paseo, "remote-workspace")).toMatchObject({ status: "unavailable" });
@@ -948,22 +972,192 @@ it("keeps cached tasks and reports incomplete recovery when an enabled workspace
 
 it("repeated successful bootstrap checks the daemon without requesting another remote snapshot", async () => {
   const f = await fixture(60_000);
-  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   await new Promise(resolve => setTimeout(resolve, 70));
   const before = f.requests.length;
-  await Promise.all([f.server.rpc(bootstrap, {}, f.paseo), f.server.rpc(bootstrap, {}, f.paseo)]);
+  await Promise.all([f.server.syncRpc(bootstrap, {}, f.paseo), f.server.syncRpc(bootstrap, {}, f.paseo)]);
   expect(f.requests).toHaveLength(before);
 });
 
 it("writes imported discussion metadata without scanning the directory again", async () => {
   const f = await fixture();
-  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   const host = metadataHost(f.native.agents);
-  await f.server.rpc(bootstrap, {}, host.paseo);
+  await f.server.syncRpc(bootstrap, {}, host.paseo);
   await vi.waitFor(() => expect(host.writes).toHaveLength(2));
   f.issues.push({ ...f.issues[0], id: "new-issue", identifier: "PRD-3" });
   await resync(f.server, f.paseo, "remote-workspace");
   const agent = f.native.agents.find(agent => agent.labels["multica.issue"] === "new-issue")!;
   expect(host.writes).toContainEqual({ agentId: agent.id, patch: { "multica.connection": agent.labels["multica.connection"], "multica.issue": "new-issue" } });
   expect(host.listings).toHaveLength(1);
+});
+
+async function promptly<T>(operation: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([operation, new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("RPC waited for background sync")), 1_000);
+    })]);
+  } finally { clearTimeout(timer); }
+}
+
+it.each([{ labels: [] }, { labels: ["blue"] }])("saves rules and switches promptly while an old snapshot is blocked: %j", async ({ labels }) => {
+  const f = await fixture(60_000);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const archive = vi.spyOn(f.host, "archiveWorkspace");
+  const rule = taskRuleSchema.parse({ labelIds: labels });
+  f.remote.holdIssueReads = true;
+  try {
+    expect(await promptly(f.server.rpc(workspaceRule, { workspaceId: "remote-workspace", rule }, f.paseo))).toMatchObject({ status: "saved", sync: { status: "syncing" } });
+    await expect.poll(() => f.heldIssueReads.length).toBe(1);
+    // All requests arrive before any of them finishes validation. The last rule wins.
+    const updates = ["blue", "blue", "red"].map(label => promptly(f.server.rpc(workspaceRule,
+      { workspaceId: "remote-workspace", rule: { ...rule, labelIds: [label] } }, f.paseo)));
+    expect((await Promise.all(updates)).map(result => result.status)).toEqual(["saved", "saved", "saved"]);
+    for (const enabled of [false, true]) {
+      expect(await promptly(f.server.rpc(workspaceEnable, { workspaceId: "remote-workspace", enabled }, f.paseo))).toMatchObject({ status: "saved", sync: { status: "syncing" } });
+    }
+    expect(await promptly(f.server.rpc(bootstrap, {}, f.paseo))).toEqual({ status: "ready" });
+    expect((await f.server.rpc(workspaceList, {}, f.paseo)).workspaces[0]).toMatchObject({ enabled: true, rule: { labelIds: ["red"] } });
+    const disk = JSON.parse(await readFile(join(f.home, "multica-provider", "state.json"), "utf8")) as LocalState;
+    expect(Object.values(disk.connections)[0].rules["remote-workspace"]).toMatchObject({ enabled: true, labelIds: ["red"] });
+    expect((await f.server.rpc(connectionStatus, {}, f.paseo)).sync).toMatchObject({ status: "syncing", stage: "issues" });
+    expect(archive).not.toHaveBeenCalled();
+  } finally {
+    f.remote.holdIssueReads = false;
+    for (const reply of f.heldIssueReads.splice(0)) reply();
+  }
+  expect(await waitForSync(f.server, f.paseo)).toMatchObject({ status: "ready" });
+  // A superseded snapshot must never archive the task now matched by red.
+  expect(archive.mock.calls.map(([id]) => id)).toEqual([f.native.workspaces[1].id]);
+  expect(f.native.workspaces.map(item => !!item.archived)).toEqual([false, true]);
+});
+
+it("keeps a saved rule readable after background failure and reloads it on restart", async () => {
+  const f = await fixture(60_000);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  f.remote.invalidIssuePage = true;
+  const rule = taskRuleSchema.parse({ labelIds: ["red"] });
+  expect(await f.server.rpc(workspaceRule, { workspaceId: "remote-workspace", rule }, f.paseo)).toMatchObject({ status: "saved", sync: { status: "syncing" } });
+  expect(await waitForSync(f.server, f.paseo)).toMatchObject({ status: "unavailable", stage: "issues", message: expect.stringContaining("已保存的规则与开关不受影响") });
+  expect((await f.server.rpc(workspaceList, {}, f.paseo)).workspaces[0]).toMatchObject({ enabled: true, rule });
+  expect(f.native.workspaces.every(item => !item.archived)).toBe(true);
+  await f.dispose();
+  const restarted = f.start();
+  expect((await restarted.server.rpc(workspaceList, {}, f.paseo)).workspaces[0]).toMatchObject({ enabled: true, rule });
+});
+
+it.each([true, false])("saves rapid disable/enable switches while archive is blocked (final enabled=%s)", async finalEnabled => {
+  const f = await fixture(60_000);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const archive = f.host.archiveWorkspace.bind(f.host);
+  const held = vi.spyOn(f.host, "archiveWorkspace").mockImplementation(async (...args) => { await gate; return archive(...args); });
+  const remove = vi.spyOn(f.host, "removeProject");
+  try {
+    expect(await promptly(f.server.rpc(workspaceEnable, { workspaceId: "remote-workspace", enabled: false }, f.paseo))).toMatchObject({ status: "saved" });
+    await expect.poll(() => held.mock.calls.length).toBe(1);
+    expect((await f.server.rpc(connectionStatus, {}, f.paseo)).sync).toMatchObject({ status: "syncing", stage: "archiving", completedArchives: 0, pendingArchives: 2 });
+    expect((await f.server.rpc(workspaceList, {}, f.paseo)).workspaces[0].enabled).toBe(false);
+    expect(await promptly(f.server.rpc(workspaceEnable, { workspaceId: "remote-workspace", enabled: true }, f.paseo))).toMatchObject({ status: "saved" });
+    if (!finalEnabled) expect(await promptly(f.server.rpc(workspaceEnable, { workspaceId: "remote-workspace", enabled: false }, f.paseo))).toMatchObject({ status: "saved" });
+    expect(remove).not.toHaveBeenCalled();
+  } finally { release(); }
+  expect(await waitForSync(f.server, f.paseo)).toMatchObject({ status: "ready", pendingArchives: 0 });
+  expect((await f.server.rpc(workspaceList, {}, f.paseo)).workspaces[0].enabled).toBe(finalEnabled);
+  expect(f.native.workspaces.filter(item => !item.archived)).toHaveLength(finalEnabled ? 2 : 0);
+  if (finalEnabled) { expect(held).toHaveBeenCalledTimes(1); expect(remove).not.toHaveBeenCalled(); }
+  // Subsequent idle passes do not claim that completed archives are in progress.
+  const stages: string[] = [];
+  const listing = f.host.listProjects.bind(f.host);
+  f.host.listProjects = async () => { stages.push((await f.server.rpc(connectionStatus, {}, f.paseo)).sync.stage); return listing(); };
+  await resync(f.server, f.paseo, "remote-workspace");
+  expect(stages).not.toContain("archiving");
+});
+
+it.each([true, false])("saves enable immediately during native import and honors the latest switch (final enabled=%s)", async finalEnabled => {
+  const f = await fixture(60_000);
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const importing = f.host.importAgent.bind(f.host);
+  const held = vi.spyOn(f.host, "importAgent").mockImplementation(async (...args) => { await gate; return importing(...args); });
+  try {
+    expect(await promptly(f.server.rpc(workspaceEnable, { workspaceId: "remote-workspace", enabled: true }, f.paseo))).toMatchObject({ status: "saved", sync: { status: "syncing" } });
+    await expect.poll(() => held.mock.calls.length).toBe(1);
+    expect(await promptly(f.server.rpc(workspaceEnable, { workspaceId: "remote-workspace", enabled: false }, f.paseo))).toMatchObject({ status: "saved" });
+    if (finalEnabled) expect(await promptly(f.server.rpc(workspaceEnable, { workspaceId: "remote-workspace", enabled: true }, f.paseo))).toMatchObject({ status: "saved" });
+  } finally { release(); }
+  expect(await waitForSync(f.server, f.paseo)).toMatchObject({ status: "ready" });
+  expect((await f.server.rpc(workspaceList, {}, f.paseo)).workspaces[0].enabled).toBe(finalEnabled);
+  expect(f.native.workspaces.filter(item => !item.archived)).toHaveLength(finalEnabled ? 2 : 0);
+  expect(f.native.agents.filter(item => !item.archivedAt)).toHaveLength(finalEnabled ? 2 : 0);
+});
+
+it("can save disable for a locally known workspace while the remote workspace list is unavailable", async () => {
+  const f = await fixture(60_000);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  f.remote.workspacesStatus = 503;
+  const before = f.requests.length;
+  expect(await promptly(f.server.rpc(workspaceEnable, { workspaceId: "remote-workspace", enabled: false }, f.paseo))).toMatchObject({ status: "saved" });
+  expect(await waitForSync(f.server, f.paseo)).toMatchObject({ status: "ready" });
+  expect(f.requests.slice(before)).not.toContain("/api/workspaces");
+  expect(f.native.workspaces.every(item => item.archived)).toBe(true);
+  expect(await f.server.rpc(workspaceEnable, { workspaceId: "unknown", enabled: false }, f.paseo)).toMatchObject({ status: "unavailable", message: expect.stringContaining("保存失败") });
+  expect(await f.server.rpc(workspaceEnable, { workspaceId: "remote-workspace", enabled: true }, f.paseo)).toMatchObject({ status: "unavailable" });
+});
+
+it("reports archive failure separately from the saved disabled switch and recovers on retry", async () => {
+  const f = await fixture(60_000);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  vi.spyOn(f.host, "archiveWorkspace").mockRejectedValueOnce(new Error("native archive unavailable"));
+  expect(await f.server.rpc(workspaceEnable, { workspaceId: "remote-workspace", enabled: false }, f.paseo)).toMatchObject({ status: "saved" });
+  expect(await waitForSync(f.server, f.paseo)).toMatchObject({ status: "unavailable", stage: "archiving", pendingArchives: 2 });
+  expect((await f.server.rpc(workspaceList, {}, f.paseo)).workspaces[0]).toMatchObject({ enabled: false });
+  expect(await resync(f.server, f.paseo, "remote-workspace")).toEqual({ status: "ready" });
+  expect(f.native.workspaces.every(item => item.archived)).toBe(true);
+});
+
+it("resets the returned sync progress before waiting behind a native operation", async () => {
+  const f = await fixture(60_000);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  expect((await f.server.rpc(connectionStatus, {}, f.paseo)).sync).toMatchObject({ stage: "idle", completedWorkspaces: 1 });
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const fetch = f.host.fetchWorkspaces.bind(f.host);
+  const held = vi.spyOn(f.host, "fetchWorkspaces").mockImplementation(async (...args) => { await gate; return fetch(...args); });
+  const restoring = f.server.rpc(hiddenRestore, { connectionKey: f.native.agents[0].labels["multica.connection"], issueId: "issue-one" }, f.paseo);
+  try {
+    await expect.poll(() => held.mock.calls.length).toBe(1);
+    const rule = await promptly(f.server.rpc(workspaceRule, { workspaceId: "remote-workspace", rule: taskRuleSchema.parse({}) }, f.paseo));
+    expect(rule).toMatchObject({ status: "saved", sync: { status: "syncing", stage: "connection", completedWorkspaces: 0, completedArchives: 0, pendingArchives: 0 } });
+    const disabled = await promptly(f.server.rpc(workspaceEnable, { workspaceId: "remote-workspace", enabled: false }, f.paseo));
+    expect(disabled).toMatchObject({ status: "saved", sync: { status: "syncing", stage: "connection", completedWorkspaces: 0, completedArchives: 0, pendingArchives: 0 } });
+  } finally { release(); await restoring; held.mockRestore(); }
+  expect(await waitForSync(f.server, f.paseo)).toMatchObject({ status: "ready", pendingArchives: 0 });
+});
+
+it("does not subscribe a workspace disabled while its old workspace snapshot is in flight", async () => {
+  const f = await fixture(60_000);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await f.dispose();
+  const restarted = f.start();
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const workspaces = SidebarSynchronizer.prototype.workspaces;
+  const held = vi.spyOn(SidebarSynchronizer.prototype, "workspaces").mockImplementation(async function (this: SidebarSynchronizer, connection) {
+    const result = await workspaces.call(this, connection);
+    await gate;
+    return result;
+  });
+  const reconcile = vi.spyOn(WorkspaceEvents.prototype, "reconcile");
+  try {
+    await restarted.server.rpc(bootstrap, {}, f.paseo);
+    await expect.poll(() => held.mock.calls.length).toBe(1);
+    expect(await promptly(restarted.server.rpc(workspaceEnable, { workspaceId: "remote-workspace", enabled: false }, f.paseo))).toMatchObject({ status: "saved" });
+    release();
+    expect(await waitForSync(restarted.server, f.paseo)).toMatchObject({ status: "ready" });
+    expect(reconcile.mock.calls.length).toBeGreaterThan(0);
+    expect(reconcile.mock.calls.every(([, workspaces]) => workspaces.length === 0)).toBe(true);
+  } finally { release(); held.mockRestore(); reconcile.mockRestore(); }
 });

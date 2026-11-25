@@ -163,8 +163,8 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     });
     server.handle(workspacePreview, input => synchronizer.preview(input.workspaceId, input.rule, input.connectionKey));
     server.handle(workspaceEnable, async (input, context) => {
-      try { await synchronizer.enable(context.paseo, input.workspaceId, input.enabled, input.connectionKey); return { status: "ready" as const }; }
-      catch { return { status: "unavailable" as const, message: "Multica 工作区规则保存或同步失败，请检查连接后重试。" }; }
+      try { await synchronizer.enable(context.paseo, input.workspaceId, input.enabled, input.connectionKey); return { status: "saved" as const, sync: synchronizer.status() }; }
+      catch { return { status: "unavailable" as const, message: "Multica 工作区规则保存失败，请检查连接后重试。" }; }
     });
     server.handle(workspaceCatalog, async input => {
       const authenticated = await connection();
@@ -174,8 +174,8 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       return workspaceCatalogs(authenticated, workspace);
     });
     server.handle(workspaceRule, async (input, context) => {
-      try { await synchronizer.rule(context.paseo, input.workspaceId, input.rule, input.connectionKey); return { status: "ready" as const }; }
-      catch { return { status: "unavailable" as const, message: "筛选规则保存或同步失败，请检查连接后重试。" }; }
+      try { await synchronizer.rule(context.paseo, input.workspaceId, input.rule, input.connectionKey); return { status: "saved" as const, sync: synchronizer.status() }; }
+      catch { return { status: "unavailable" as const, message: "筛选规则保存失败，请检查连接后重试。" }; }
     });
     return async () => {
       shuttingDown = true;

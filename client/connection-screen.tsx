@@ -46,8 +46,10 @@ export function ConnectionScreen({ host, theme }: PluginSurfaceProps) {
     let active = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
     async function update() {
+      let syncing = false;
       try {
         const next = await readStatus({});
+        syncing = next.sync.status === "syncing";
         if (active) { setStatus(next); setSyncStatus(next.sync); setHidden(next.hidden); setFailure(null); }
         if (next.status === "ready") {
           try {
@@ -63,7 +65,7 @@ export function ConnectionScreen({ host, theme }: PluginSurfaceProps) {
       } catch {
         if (active) { setStatus(null); setFailure("无法读取此主机的连接状态，请检查 Paseo daemon 连接后重试。"); }
       }
-      if (active) timer = setTimeout(() => { void update(); }, 10_000);
+      if (active) timer = setTimeout(() => { void update(); }, syncing ? 2_000 : 10_000);
     }
     void update();
     return () => { active = false; if (timer) clearTimeout(timer); };
@@ -87,7 +89,7 @@ export function ConnectionScreen({ host, theme }: PluginSurfaceProps) {
     : value === "offline" || value === "isolated_context" ? theme.colors.statusWarning : theme.colors.statusDanger;
   const sync = describeSync(syncStatus, failure !== null);
   const syncColor = sync.tone === "danger" ? theme.colors.statusDanger : sync.tone === "warning" ? theme.colors.statusWarning : theme.colors.foreground;
-  const syncHint = sync.tone !== "muted" ? sync.message || sync.label : undefined;
+  const syncHint = sync.tone !== "muted" ? sync.message || sync.label : syncStatus?.status === "syncing" ? sync.progress : undefined;
   const scopeKey = JSON.stringify([host.id, configuredProfile, status?.connectionKey]);
   const workspacesRead = workspaceScope === scopeKey;
   const current = workspacesRead ? workspaces.filter(workspace => workspace.connectionKey === status?.connectionKey) : [];
@@ -123,7 +125,8 @@ export function ConnectionScreen({ host, theme }: PluginSurfaceProps) {
     </SettingsCard>
   </SettingsSection>;
 
-  const rules = <WorkspaceList key={scopeKey} workspaces={current} read={workspacesRead} failure={workspaceFailure} status={status} theme={theme}
+  const rules = <WorkspaceList key={scopeKey} workspaces={current} read={workspacesRead} failure={workspaceFailure} status={status} syncStatus={syncStatus} theme={theme}
+    onSync={sync => { if (sync) setSyncStatus(sync); setAttempt(value => value + 1); }}
     onRuleSaved={(workspace, rule) => {
       setWorkspaces(list => list.map(item => item.connectionKey === workspace.connectionKey && item.id === workspace.id ? { ...item, rule } : item));
       setAttempt(value => value + 1);
