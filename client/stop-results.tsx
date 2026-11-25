@@ -1,12 +1,14 @@
 import { useEffect, useState } from "react";
-import { Text } from "react-native";
 import { useRpc, type PluginSurfaceProps } from "@getpaseo/plugin/client";
-import { SettingsAction, SettingsCard, SettingsSection } from "@getpaseo/plugin/client/ui";
+import { SettingsAction, SettingsCard, SettingsRow, SettingsSection } from "@getpaseo/plugin/client/ui";
 import type { z } from "zod";
 import { stopList, stopRetry } from "../shared/stops.js";
+import { runStatusLabel } from "./format.js";
+import { HeaderAction, Notice } from "./ui-kit.js";
 
 type StopRecord = z.output<typeof stopList.output>["records"][number];
 const cleanupLabels = { unknown: "未提供进程清理确认", pending: "进程清理尚待确认", confirmed: "进程清理已确认", unconfirmed: "进程清理未获确认" };
+/** Shown only while stop records exist or cannot be read; unconfirmed stops come first. */
 export function StopResults({ theme, refreshKey }: { theme: PluginSurfaceProps["theme"]; refreshKey: string }) {
   const list = useRpc(stopList);
   const retry = useRpc(stopRetry);
@@ -34,16 +36,20 @@ export function StopResults({ theme, refreshKey }: { theme: PluginSurfaceProps["
     } catch { setFailure("停止结果尚未确认，请重试。"); }
     finally { setSaving(false); }
   }
-  return <SettingsSection title="原生停止结果">
-    <Text style={{ color: theme.colors.foregroundMuted }}>原生停止与关闭运行中 tab 会停止该讨论当时归属的未结束 Run。任务终态和远端进程清理分别显示；重试单个未停止项不会恢复隐藏讨论。</Text>
-    {failure ? <Text accessibilityRole="alert" style={{ color: theme.colors.statusDanger }}>{failure}</Text> : null}
-    {records.map(record => <SettingsCard key={JSON.stringify([record.connectionKey, record.issueId, record.runId])}>
-      <Text style={{ color: theme.colors.foreground }}>{record.title} · {record.runId}</Text>
-      <Text style={{ color: theme.colors.foregroundMuted }}>最后已知任务状态：{record.status ?? "未知"} · {cleanupLabels[record.cleanup]}</Text>
-      {record.message ? <Text accessibilityRole={record.retryable ? "alert" : undefined} style={{ color: record.retryable ? theme.colors.statusDanger : theme.colors.foregroundMuted }}>{record.message}</Text> : null}
-      {record.retryable ? <SettingsAction label="此 Run 尚未确认停止" actionLabel="重试此 Run" disabled={saving} onPress={() => { void retryRun(record); }} /> : null}
-    </SettingsCard>)}
-    {!records.length && !failure ? <Text style={{ color: theme.colors.foregroundMuted }}>没有原生停止记录。</Text> : null}
-    <SettingsAction label="读取所有连接的本地停止结果" actionLabel="刷新停止结果" onPress={() => setAttempt(value => value + 1)} />
+  if (!records.length && !failure) return null;
+  const sorted = [...records.filter(record => record.retryable), ...records.filter(record => !record.retryable)];
+  return <SettingsSection title="停止结果" trailing={<HeaderAction theme={theme} label="刷新" onPress={() => setAttempt(value => value + 1)} />}
+    info="原生 Stop 与关闭运行中 tab 会停止该讨论当时归属的未结束 Run。任务终态和远端进程清理分别显示；重试单个未停止项不会恢复隐藏讨论。">
+    {failure ? <Notice theme={theme}>{failure}</Notice> : null}
+    {sorted.length ? <SettingsCard>
+      {sorted.map(record => {
+        const key = JSON.stringify([record.connectionKey, record.issueId, record.runId]);
+        const hint = `Run ${record.runId} · 最后已知任务状态：${runStatusLabel(record.status)} · ${cleanupLabels[record.cleanup]}`;
+        return record.retryable
+          ? <SettingsAction key={key} label={record.title} hint={hint} error={record.message ?? "此 Run 尚未确认停止。"} actionLabel="重试此 Run" disabled={saving}
+            onPress={() => { void retryRun(record); }} />
+          : <SettingsRow key={key} label={record.title} hint={record.message ? `${hint}\n${record.message}` : hint} />;
+      })}
+    </SettingsCard> : null}
   </SettingsSection>;
 }

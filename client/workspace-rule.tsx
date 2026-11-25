@@ -1,57 +1,115 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Text, View } from "react-native";
 import { useRpc, type PluginSurfaceProps } from "@getpaseo/plugin/client";
-import { SettingsAction, SettingsSection, SettingsSwitch } from "@getpaseo/plugin/client/ui";
+import { SettingsAction, SettingsCard, SettingsRow, SettingsSelect, SettingsSwitch } from "@getpaseo/plugin/client/ui";
 import { workspaceCatalog, workspaceRule, type TaskRule } from "../shared/contracts.js";
+import { SubHeading } from "./ui-kit.js";
 import type { z } from "zod";
 
 type Catalog = z.output<typeof workspaceCatalog.output>;
-const categories = [{ id: "unstarted", name: "未开始" }, { id: "started", name: "进行中" }, { id: "done", name: "已完成" }, { id: "closed", name: "已关闭" }];
-const actorName = { member: "成员", agent: "Agent", squad: "Squad" };
+type Theme = PluginSurfaceProps["theme"];
+type Choice = { id: string; name: string };
+type StatusMode = "category" | "status";
 
-function Choices({ title, values, choices, onChange, disabled }: { title: string; values: string[]; choices: Array<{ id: string; name: string }>; onChange(values: string[]): void; disabled: boolean }) {
-  const all = [...choices, ...values.filter(id => !choices.some(item => item.id === id)).map(id => ({ id, name: `${id}（当前目录不可用）` }))];
-  return <SettingsSection title={title}>
-    {all.map(item => <SettingsSwitch key={item.id} label={item.name} value={values.includes(item.id)} disabled={disabled}
-      onValueChange={checked => onChange(checked ? [...values, item.id] : values.filter(value => value !== item.id))} />)}
-    {!all.length ? <Text>当前没有可选项；不限制此字段。</Text> : null}
-  </SettingsSection>;
+const categories: Array<{ id: TaskRule["statusCategories"][number]; name: string }> = [
+  { id: "unstarted", name: "未开始" }, { id: "started", name: "进行中" }, { id: "done", name: "已完成" }, { id: "closed", name: "已关闭" }];
+const defaultCategories: TaskRule["statusCategories"] = ["unstarted", "started"];
+const actorName = { member: "成员", agent: "Agent", squad: "Squad" };
+/** Long catalogs (labels, members) stay readable: the rest is one press away, selected items always show. */
+const collapsedLimit = 8;
+
+const categoryNames = (ids: string[]) => ids.map(id => categories.find(item => item.id === id)?.name ?? id).join("、");
+
+/** A one-line reading of a saved rule that needs no catalog request. */
+export function describeRule(rule: TaskRule) {
+  const parts = [rule.statuses.length ? `具体状态 ${rule.statuses.length} 项` : rule.statusCategories.length ? categoryNames(rule.statusCategories) : "状态不限"];
+  if (rule.statuses.length && rule.statusCategories.length) parts.push(`类别 ${categoryNames(rule.statusCategories)}`);
+  const limited = ([["负责人", rule.assignees.length], ["Multica 项目", rule.projectIds.length], ["标签", rule.labelIds.length]] as const).filter(([, count]) => count > 0);
+  parts.push(...limited.map(([name, count]) => `${name} ${count} 项`));
+  if (!limited.length) parts.push("其他条件不限");
+  return parts.join(" · ");
 }
 
-export function WorkspaceRuleEditor({ workspaceId, connectionKey, initialRule, theme, onSaved }: { workspaceId: string; connectionKey?: string; initialRule: TaskRule; theme: PluginSurfaceProps["theme"]; onSaved(): void }) {
+function Choices({ title, values, choices, onChange, disabled, theme, leading }: { title: string; values: string[]; choices: Choice[]; onChange(values: string[]): void; disabled: boolean; theme: Theme; leading?: ReactNode }) {
+  const [expanded, setExpanded] = useState(false);
+  const all = [...choices, ...values.filter(id => !choices.some(item => item.id === id)).map(id => ({ id, name: `${id}（当前目录不可用）` }))];
+  const visible = expanded ? all : all.filter((item, index) => index < collapsedLimit || values.includes(item.id));
+  return <View style={{ gap: 8 }}>
+    <SubHeading theme={theme}>{title} · {values.length ? `已选 ${values.length} 项` : "不限"}</SubHeading>
+    <SettingsCard>
+      {leading}
+      {visible.map(item => <SettingsSwitch key={item.id} label={item.name} value={values.includes(item.id)} disabled={disabled}
+        onValueChange={checked => onChange(checked ? [...values, item.id] : values.filter(value => value !== item.id))} />)}
+      {!all.length ? <SettingsRow key="empty" label="当前没有可选项" hint="不限制此字段。" /> : null}
+      {all.length > collapsedLimit ? <SettingsAction key="more" label={expanded ? `共 ${all.length} 项` : `另有 ${all.length - visible.length} 项未显示`}
+        actionLabel={expanded ? "收起" : "显示全部"} onPress={() => setExpanded(value => !value)} /> : null}
+    </SettingsCard>
+  </View>;
+}
+
+export function WorkspaceRuleEditor({ workspaceId, connectionKey, initialRule, theme, onSaved, onCancel, onDirtyChange }: {
+  workspaceId: string; connectionKey?: string; initialRule: TaskRule; theme: Theme; onSaved(rule: TaskRule): void; onCancel(): void; onDirtyChange?(dirty: boolean): void;
+}) {
   const load = useRpc(workspaceCatalog);
   const save = useRpc(workspaceRule);
   const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [rule, setRule] = useState(initialRule);
-  const [failure, setFailure] = useState<string | null>(null);
+  const [mode, setMode] = useState<StatusMode>(initialRule.statuses.length ? "status" : "category");
+  const [catalogFailed, setCatalogFailed] = useState(false);
+  const [saveFailure, setSaveFailure] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     let active = true;
-    void load({ workspaceId, connectionKey }).then(result => { if (active) { setCatalog(result); setFailure(null); } }, () => { if (active) setFailure("无法读取筛选目录，请检查连接后重试。"); });
+    void load({ workspaceId, connectionKey }).then(result => { if (active) { setCatalog(result); setCatalogFailed(false); } }, () => { if (active) setCatalogFailed(true); });
     return () => { active = false; };
   }, [load, workspaceId, connectionKey, attempt]);
+  function update(next: TaskRule) {
+    setRule(next);
+    onDirtyChange?.(JSON.stringify(next) !== JSON.stringify(initialRule));
+  }
+  function changeMode(next: StatusMode) {
+    if (next === mode) return;
+    setMode(next);
+    // Categories and specific statuses combine with AND, so one mode at a time keeps the rule readable.
+    update(next === "status" ? { ...rule, statusCategories: [] } : { ...rule, statuses: [], statusCategories: rule.statusCategories.length ? rule.statusCategories : defaultCategories });
+  }
   async function persist() {
     setSaving(true);
     try {
       const result = await save({ workspaceId, connectionKey, rule });
-      if (result.status === "ready") onSaved();
-      else setFailure(result.message ?? "规则同步失败，已保存的规则会在连接恢复后重新核对。");
-    } catch { setFailure("规则保存失败，请重试。"); }
+      if (result.status === "ready") { onDirtyChange?.(false); onSaved(rule); }
+      else setSaveFailure(result.message ?? "规则同步失败，已保存的规则会在连接恢复后重新核对。");
+    } catch { setSaveFailure("规则保存失败，请重试。"); }
     finally { setSaving(false); }
   }
+  const muted = { color: theme.colors.foregroundMuted, marginHorizontal: 4 };
+  if (!catalog) return <SettingsCard>
+    {catalogFailed ? <SettingsAction label="无法读取筛选目录" hint="请检查连接后重试。" actionLabel="重试" onPress={() => setAttempt(value => value + 1)} />
+      : <SettingsRow label="正在读取筛选目录…" />}
+  </SettingsCard>;
+  const statusMode = <SettingsSelect key="mode" label="筛选方式" value={mode} disabled={saving} onValueChange={changeMode}
+    hint={mode === "category" ? "按状态类别；默认只导入未开始和进行中。" : "按具体状态；不选表示不限状态。"}
+    options={[{ label: "按状态类别", value: "category" }, { label: "按具体状态", value: "status" }]} />;
+  const legacyCategories = mode === "status" && rule.statusCategories.length
+    ? <SettingsRow key="legacy" label="另有状态类别限制" hint={`${categoryNames(rule.statusCategories)}；修改具体状态时清除。`} /> : null;
   return <View style={{ gap: 16 }}>
-    <Text style={{ color: theme.colors.foregroundMuted }}>字段之间同时满足；同字段可选多项，命中任一即可。标签也是任一命中；不选表示不限。选择具体状态会先清除类别限制；之后仍可组合类别。</Text>
-    <Text style={{ color: theme.colors.foregroundMuted }}>直接分配给成员与分配给 Agent / Squad 分别选择。Multica 项目只限制任务范围，任务仍归入此 Multica 工作区对应的 Paseo 项目。</Text>
-    {failure ? <Text accessibilityRole="alert" style={{ color: theme.colors.statusDanger }}>{failure}</Text> : null}
-    {!catalog ? <SettingsAction label="读取 Multica 工作区筛选目录" actionLabel="重试" onPress={() => setAttempt(value => value + 1)} /> : <>
-      <Choices title="状态类别" choices={categories} values={rule.statusCategories} disabled={saving} onChange={statusCategories => setRule({ ...rule, statusCategories: statusCategories as TaskRule["statusCategories"] })} />
-      <Choices title="具体状态" choices={catalog.statuses.map(item => ({ id: item.key, name: `${item.name} · ${item.category}` }))} values={rule.statuses} disabled={saving} onChange={statuses => setRule({ ...rule, statuses, statusCategories: [] })} />
-      <Choices title="负责人" choices={catalog.assignees.map(item => ({ id: `${item.type}:${item.id}`, name: `${actorName[item.type]} · ${item.name}` }))} values={rule.assignees.map(item => `${item.type}:${item.id}`)} disabled={saving}
-        onChange={values => setRule({ ...rule, assignees: values.map(value => { const index = value.indexOf(":"); return { type: value.slice(0, index) as TaskRule["assignees"][number]["type"], id: value.slice(index + 1) }; }) })} />
-      <Choices title="Multica 项目" choices={catalog.projects} values={rule.projectIds} disabled={saving} onChange={projectIds => setRule({ ...rule, projectIds })} />
-      <Choices title="标签" choices={catalog.labels} values={rule.labelIds} disabled={saving} onChange={labelIds => setRule({ ...rule, labelIds })} />
-      <SettingsAction label="重新核对任务范围" actionLabel={saving ? "正在保存…" : "保存筛选规则"} disabled={saving} onPress={() => { void persist(); }} />
-    </>}
+    <Text style={muted}>字段之间同时满足；同一字段多选时任一命中；不选表示不限。</Text>
+    {mode === "category"
+      ? <Choices title="状态" theme={theme} leading={statusMode} choices={categories} values={rule.statusCategories} disabled={saving}
+        onChange={statusCategories => update({ ...rule, statusCategories: statusCategories as TaskRule["statusCategories"] })} />
+      : <Choices title="状态" theme={theme} leading={[statusMode, legacyCategories]} values={rule.statuses} disabled={saving}
+        choices={catalog.statuses.map(item => ({ id: item.key, name: `${item.name} · ${categories.find(category => category.id === item.category)?.name ?? item.category}` }))}
+        onChange={statuses => update({ ...rule, statuses, statusCategories: [] })} />}
+    <Choices title="负责人" theme={theme} disabled={saving} values={rule.assignees.map(item => `${item.type}:${item.id}`)}
+      choices={catalog.assignees.map(item => ({ id: `${item.type}:${item.id}`, name: `${actorName[item.type]} · ${item.name}` }))}
+      onChange={values => update({ ...rule, assignees: values.map(value => { const index = value.indexOf(":"); return { type: value.slice(0, index) as TaskRule["assignees"][number]["type"], id: value.slice(index + 1) }; }) })} />
+    <Choices title="Multica 项目" theme={theme} choices={catalog.projects} values={rule.projectIds} disabled={saving} onChange={projectIds => update({ ...rule, projectIds })} />
+    <Choices title="标签" theme={theme} choices={catalog.labels} values={rule.labelIds} disabled={saving} onChange={labelIds => update({ ...rule, labelIds })} />
+    <SettingsCard>
+      <SettingsAction label="保存并重新核对" hint="按新条件核对此 Multica 工作区的任务范围；退出范围的任务自动归档。" error={saveFailure}
+        actionLabel={saving ? "正在保存…" : "保存筛选规则"} disabled={saving} onPress={() => { void persist(); }} />
+      <SettingsAction label="放弃修改" hint="恢复为已保存的条件。" actionLabel="取消" disabled={saving} onPress={() => { onDirtyChange?.(false); onCancel(); }} />
+    </SettingsCard>
   </View>;
 }
