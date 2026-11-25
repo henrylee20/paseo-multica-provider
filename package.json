@@ -1,0 +1,27 @@
+{
+  "name": "paseo-multica-provider",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm test"
+  },
+  "dependencies": {
+    "@getpaseo/client": "0.15.4",
+    "@getpaseo/plugin": "0.15.4",
+    "@getpaseo/protocol": "0.15.4",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/react": "~19.2.0",
+    "paseo-esbuild": "npm:esbuild@0.25.12",
+    "react": "19.2.3",
+    "react-native": "0.86.3",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.6"
+  }
+}
