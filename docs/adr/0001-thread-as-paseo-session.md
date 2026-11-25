@@ -6,4 +6,4 @@
 
 ## 修订：Run 呈现为 provider subagent
 
-Thread 仍是 agent tab 的边界；每个 Run 改为所属讨论下的只读 provider subagent，不成为独立 tab，见 [ADR 0010](./0010-run-as-provider-subagent.md)。
+Thread 仍是 agent tab 的边界；每个 Run 改为所属讨论下的只读 provider subagent，不成为独立 tab，见 [ADR 0011](./0011-run-as-provider-subagent.md)。

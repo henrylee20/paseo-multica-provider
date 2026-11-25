@@ -80,11 +80,11 @@ Dismiss 只本地收起，显式重展恢复；全选填文本增加提交确认
 
 Run 首次展示归属依次采用明确触发评论、最早关联评论、确实零关联时的 main。触发、合并、已交付、补充与生成评论 provenance 均参与判断；缺父链或跨 Thread 缺可靠时间时等待，来源时间按 RFC3339Nano 比较。owner 首次确定后持久固定，后补关联或重连不迁移、不复制。
 
-每个 Run ID 以 provider 子会话呈现，父讨论协商 `session.subsession`，子会话使用 `session.opened{parentSessionId, toolCallId, restoration: "parent"}`，不接受输入或独立 Stop／权限。标题为执行 agent 名称，描述为评论触发来源及创建时间，无评论关联时为“任务级执行”；重跑的新 ID 是新子代理。父时间线首次展示时保留一个静态 `sub_agent` 位置标记，状态始终 completed，子会话 toolCallId 指向它。恢复父会话重新发出子会话，history:skip 不重复已持久化的父标记。
+每个 Run ID 以 provider 子会话呈现，父讨论协商 `session.subsession`，子会话使用 `session.opened{parentSessionId, toolCallId, restoration: "parent"}`，不接受输入或独立 Stop／权限。标题为执行 agent 名称，描述为评论触发来源及创建时间，无评论关联时为“任务级执行”；重跑的新 ID 是新子代理。父时间线首次展示时保留一个静态 `sub_agent` 位置标记，状态始终 completed，子会话 toolCallId 指向它。恢复父会话重新发出子会话，通过 markerProjected 记录已发出的标记，history:skip 只补发尚未发出的父标记，包括关闭期间新发现的 Run。
 
 一个 tab 的 queued、dispatched、running、waiting_local_directory、deferred Run 共同维持一个原生活动 turn，每次新周期生成新 UUID；子会话将这五类状态映射为 running，细分状态变化追加简短说明。completed／failed／cancelled 对应 completed／failed／canceled。子时间线仅承载该 Run 的运行文本、思考、工具调用与结果（保持来源顺序）、任务 error／failure_reason 及远端目录；触发评论、Run 生成评论和 AskUser 卡片仍在所属讨论。缺字段不补造，源端明确截断才提示。
 
-讨论在宿主打开（含导入）时立即发出全部归属子会话和缓存，仅本进程实际打开过的讨论补读远端执行明细；活跃 Run 每两秒刷新，终态成功补齐一次后停止。父讨论 Stop 成功后相应子会话按实际终态结束，取消对应 canceled。纯关闭父资源只释放本地子会话，下次打开按缓存及真实状态重建。旧执行段行、renderer 与 `run.open`／`run.read`／`run.observe` 等 RPC 完全移除，不保留历史渲染兼容。
+讨论在宿主打开（含导入）时立即发出全部归属子会话和缓存，仅本进程实际打开过的讨论补读远端执行明细；活跃 Run 每两秒刷新，终态成功补齐一次后停止。父讨论 Stop 成功后相应子会话按实际终态结束，取消对应 canceled。纯关闭父资源只清理本地子会话 map，交由宿主将运行中子代理标为 canceled，不主动发送子会话 session.closed；下次打开按缓存及真实状态重建。旧执行段行、renderer 与 `run.open`／`run.read`／`run.observe` 等 RPC 完全移除，不保留历史渲染兼容。
 
 原生 Stop 和关闭运行中 tab 固定操作开始时归属该 root 的活跃 Run，逐项取消；不扩大到后来 Run、其他 tab 或已终结记录。跨 Thread Run 只能整体取消，完成竞态保留实际终态。全部成功后结束捕获的宿主 turn，仍活动的新 Run 使用新周期；部分失败返回 request.failed，用户再次点击 Stop。
 
@@ -100,15 +100,15 @@ Run 首次展示归属依次采用明确触发评论、最早关联评论、确�
 
 history:skip 恢复仍完整分页核对原生原文的来源 ID、角色和全文，再补缺失内容；宿主的普通消息 item ID 去重不跨 provider 会话保留，不能以缓存行代替宿主落盘回执。gap、epoch 变化、分页失败或冲突时保留缓存并报告失败。
 
-描述采用有界 revision／offset 切片，版本变化拒绝拼接；Run 内容直接推送为有界原生子时间线条目，消息按任务与序号去重，增量游标不越过缺口。活跃时等待序号缺口补齐后再发后续消息；终态按可得源顺序呈现。评论事件仍由 thread.event 单次读取。缓存重放使用宿主鉴权，不借此授权远端写入。
+描述采用有界 revision／offset 切片，版本变化拒绝拼接；Run 内容直接推送为有界原生子时间线条目，消息按任务与序号去重，增量游标不越过缺口。活跃时及终态补读完成前等待序号缺口补齐，成功终态拉取持久化 finalized 后再按可得源顺序呈现并结束子会话；空字符串与 null 元数据不生成条目。评论事件仍由 thread.event 单次读取。缓存重放使用宿主鉴权，不借此授权远端写入。
 
 ## 设置页数据重建
 
-仅当前连接 ready 时允许重建，非 ready 禁用按钮并解释原因；无启用规则仍可只清理并以 0 个任务完成导入。预检使用本地缓存检查 queued、dispatched、running、waiting_local_directory、deferred Run，返回阻塞的任务／讨论和 Run 列表，提示等待或先手动 Stop。无阻塞时用 `@getpaseo/plugin/client/ui` 的 Modal 二次确认，列出待删除项目数（排除含用户自建活跃工作区的项目）、插件工作区数与插件讨论数，明示保留筛选规则与启用状态、清除人工隐藏。
+仅当前连接 ready 且 profile 清理已完成（purgePending 为 false）时允许重建，非 ready 禁用按钮并解释原因；无启用规则仍可只清理并以 0 个任务完成导入。预检使用本地缓存检查 queued、dispatched、running、waiting_local_directory、deferred Run，返回阻塞的任务／讨论和 Run 列表，提示等待或先手动 Stop。无阻塞时用 `@getpaseo/plugin/client/ui` 的 Modal 二次确认，列出待删除项目数（排除含用户自建活跃工作区的项目）、插件工作区数与插件讨论数，明示保留筛选规则与启用状态、清除人工隐藏。
 
-确认后 daemon 串行运行，等待在途同步让出并暂停后台同步与规则修改，按公开 SDK 严格执行：发现并 deleteAgent 当前连接全部插件讨论（含归档）→ archiveWorkspace 全部插件工作区 → removeProject 不含用户自建活跃工作区的插件项目（删除前重新完整分页核对）→ 清空该连接除 rules 外的全部状态 → 按保留规则重导。绝不调用 archiveAgent 或主动发送 session.interrupt，不取消远端 Run；其他连接不变。每项重导任务分配全新 workspaceId 和包含新 ID 的 idempotencyKey，讨论重新分配 agentId，防止旧归档工作区及创建凭据冲突。
+确认后 daemon 串行运行，等待在途同步让出并暂停后台同步与规则修改，按公开 SDK 严格执行：发现并 deleteAgent 当前连接全部插件讨论（含归档）→ archiveWorkspace 活跃的插件工作区（按已知 ID 或当前连接占位目录识别，包括无讨论的工作区；已归档工作区不计数、不重复归档） → removeProject 不含用户自建活跃工作区的插件项目（删除前重新完整分页核对）→ 保留顶层 state.owner 与该连接 rules、递增 rebuildGeneration，清空该连接其余状态 → 按保留规则重导。绝不调用 archiveAgent 或主动发送 session.interrupt，不取消远端 Run；其他连接不变。新任务映射使用混入持久化 rebuildGeneration（缺省 0）的 workspaceId 与 idempotencyKey，立即重导或以后普通同步导入均不会回退到旧 ID；讨论重新分配 agentId，防止旧归档工作区及创建凭据冲突。
 
-进度只保存在 daemon 内存，通过独立 RPC 查询，包括删除／导入阶段、当前步骤、x/N 与成功或错误信息；逐任务更新导入进度。页面提供进度框，运行中无取消按钮，离开后继续，返回可查看进度或结果，完成后刷新设置状态并恢复后台同步。失败或进程重启后再次发起从头开始。旧空工作区留作宿主归档记录；Run 展示归属重新按远端快照判定。详见 ADR 0011。
+进度只保存在 daemon 内存，通过独立 RPC 查询，包括删除／导入阶段、当前步骤、x/N 与成功或错误信息；逐任务更新导入进度。页面提供进度框，运行中无取消按钮，离开后继续，返回可查看进度或结果，完成后刷新设置状态并恢复后台同步。失败或进程重启后再次发起从头开始。旧空工作区留作宿主归档记录；Run 展示归属重新按远端快照判定。详见 ADR 0012。
 
 ## 设置与工程验证
 

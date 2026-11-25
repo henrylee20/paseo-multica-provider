@@ -65,9 +65,9 @@ multica setup self-host --server-url https://api.example.com --app-url https://a
 
 在主讨论发送创建新 Thread，在真实 Thread 发送回复根评论。Paseo 0.16.0 及以上的讨论输入框提供 **提及 Agent** 选择器：搜索当前 Multica 工作区的 agent，选择后把带 ID 的完整引用插入光标处，随评论一起发送。Paseo 0.15 宿主没有该选择器。引用不能用同名裸 `@名字` 代替身份；宿主输入框的 `@` 候选是 Paseo 内置的工作区文件引用。输入通过本地校验后立即显示原生用户消息，远端发送在后台完成；失败时保留输入并追加一条错误。主讨论保存成功后提示“新 Thread 已建立，可在侧边栏打开。”；Thread 内保存成功不追加提示。评论保存不保证启动 Run。
 
-每个 Multica Run ID 对应所属讨论下唯一的只读 **provider subagent**，标题为执行 agent 名称，描述为触发来源与创建时间；重跑的新 Run ID 会创建新子代理。首次固定的展示归属不因后补关联或重连迁移。父讨论时间线中的 `sub_agent` 位置徽章固定为 completed，只标记出现位置；真实状态与执行内容显示在子代理中。queued、dispatched、running、waiting_local_directory、deferred 均显示运行中，细分状态变化追加简短说明。
+每个 Multica Run ID 对应所属讨论下唯一的只读 **provider subagent**，标题为执行 agent 名称，描述为输入评论触发来源与创建时间；无输入关联时显示带创建时间的“任务级执行”，自身生成的评论不当作触发评论；重跑的新 Run ID 会创建新子代理。首次固定的展示归属不因后补关联或重连迁移。父讨论时间线中的 `sub_agent` 位置徽章固定为 completed，只标记出现位置；真实状态与执行内容显示在子代理中。queued、dispatched、running、waiting_local_directory、deferred 均显示运行中，细分状态变化追加简短说明。
 
-讨论在宿主打开（含导入）时，立即重建全部归属 Run 子会话并推送已读缓存；只有本进程实际打开过的讨论才补读远端明细，活跃 Run 每两秒刷新，终态成功补齐一次后停止。子时间线按来源顺序显示运行文本、思考、工具调用及结果、任务错误／失败原因和远端目录；长内容拆为有界原生条目，源端明确截断时说明。触发评论、最终 agent 评论及 AskUser 卡片仍在所属讨论。旧执行段 renderer 和 `run.read` 等 RPC 已移除，旧数据可通过设置页重建清理。
+讨论在宿主打开（含导入）时，立即重建全部归属 Run 子会话并推送已读缓存；只有本进程实际打开过的讨论才补读远端明细，活跃 Run 每两秒刷新，终态成功补齐一次后停止；补齐前保持消息序号缺口，补齐后按可得源顺序展示并结束子代理。子时间线按来源顺序显示运行文本、思考、工具调用及结果、任务错误／失败原因和远端目录；长内容拆为有界原生条目，源端明确截断时说明。触发评论、最终 agent 评论及 AskUser 卡片仍在所属讨论。旧执行段 renderer 和 `run.read` 等 RPC 已移除，旧数据可通过设置页重建清理。
 
 普通运行中发送仅发表普通评论，由 Multica 排队或合并，不强制远端 steering。显式 **interrupt** 先由宿主停止，再接收新输入；停止未确认时不会继续替换。显式 **queue** 的输入先由 Paseo 客户端保留，全部归属 Run 结束后才释放给插件；它与远端 queued Run 不同。队列“立即发送”遵循当前 composer 模式，可能先中断。实际原生 queue 控件及视觉体验尚未验收。
 
@@ -75,9 +75,9 @@ multica setup self-host --server-url https://api.example.com --app-url https://a
 
 ## 设置页数据重建
 
-在 Multica 设置页点击 **重建数据**，仅连接 ready 时可用。预检按当前连接的本地缓存检查活跃 Run，并列出阻塞的讨论和 Run；请等其结束或先手动 Stop。无阻塞时，二次确认框展示将删除的 Paseo 项目、归档的插件工作区和彻底删除的插件讨论数量，明确保留筛选规则与启用状态、清除人工隐藏及其余缓存。含用户自建活跃工作区的项目保留。
+在 Multica 设置页点击 **重建数据**，仅连接 ready 且 profile 清理完成时可用；重建保留当前 profile 的数据归属。预检按当前连接的本地缓存检查活跃 Run，并列出阻塞的讨论和 Run；请等其结束或先手动 Stop。无阻塞时，二次确认框展示将删除的 Paseo 项目、归档的插件工作区和彻底删除的插件讨论数量，明确保留筛选规则与启用状态、清除人工隐藏及其余缓存。含用户自建活跃工作区的项目保留。
 
-确认后 daemon 暂停后台同步，依次通过公开 SDK 执行 `deleteAgent`、`archiveWorkspace`、`removeProject`，清空当前连接除规则外的状态，再按规则重新导入；其他连接不受影响。没有启用规则时只做清理，导入完成数为 0。旧工作区作为空归档记录留在宿主；重导为每项任务分配全新的 workspaceId 与 idempotencyKey，讨论也获得新的 agentId 和干净时间线，Run 展示归属重新判定。
+确认后 daemon 暂停后台同步，依次通过公开 SDK 执行 `deleteAgent`、`archiveWorkspace`、`removeProject`，清空当前连接除规则外的状态，再按规则重新导入；其他连接不受影响。没有启用规则时只做清理，导入完成数为 0。旧工作区作为空归档记录留在宿主；每次重建递增持久化代数，使立即重导及以后普通同步导入的任务都使用新的 workspaceId 与 idempotencyKey，讨论也获得新的 agentId 和干净时间线，Run 展示归属重新判定。
 
 进度框显示“删除”和“导入（已完成 x / 共 N 个任务）”，中途不提供取消。离开设置页后 daemon 继续运行，回来可看进度或结果；完成后恢复后台同步。进度只在当前 daemon 进程内保留，失败或重启后再次发起从头重建。不调用 `archiveAgent`，不通过中断取消远端 Run；预检后新出现的远端 Run 不在本地阻塞检查的保证范围内。
 
@@ -117,6 +117,6 @@ multica setup self-host --server-url https://api.example.com --app-url https://a
 - [AskUser 验收与手动清单](docs/askuser-acceptance.md)、[主动加载与通知边界](docs/askuser-wakeup.md)。
 - [当前规格](docs/spec.md)：包含精简后行为与取消的保证。
 - [术语表](GLOSSARY.md)、[设计与原始证据](docs/design.md)、[实现上下文](CONTEXT.md)。
-- [架构决定](docs/adr)：[Thread](docs/adr/0001-thread-as-paseo-session.md)、[目录](docs/adr/0002-use-existing-paseo-with-placeholder-directories.md)、[Run 归属](docs/adr/0003-unique-run-display-ownership.md)、[Stop](docs/adr/0004-native-interrupt-stops-remote-run.md)、[历史](docs/adr/0005-preserve-native-comment-history.md)、[身份](docs/adr/0006-isolate-connection-identities.md)、[评论重试](docs/adr/0007-retry-comments-only-with-deduplication.md)、[CLI 登录](docs/adr/0008-reuse-multica-cli-authentication.md)、[提及选择器](docs/adr/0009-composer-mention-picker.md)、[切换 profile 清理](docs/adr/0010-clear-local-data-on-profile-switch.md)、[Run 子代理](docs/adr/0010-run-as-provider-subagent.md)、[数据重建](docs/adr/0011-data-rebuild.md)。
+- [架构决定](docs/adr)：[Thread](docs/adr/0001-thread-as-paseo-session.md)、[目录](docs/adr/0002-use-existing-paseo-with-placeholder-directories.md)、[Run 归属](docs/adr/0003-unique-run-display-ownership.md)、[Stop](docs/adr/0004-native-interrupt-stops-remote-run.md)、[历史](docs/adr/0005-preserve-native-comment-history.md)、[身份](docs/adr/0006-isolate-connection-identities.md)、[评论重试](docs/adr/0007-retry-comments-only-with-deduplication.md)、[CLI 登录](docs/adr/0008-reuse-multica-cli-authentication.md)、[提及选择器](docs/adr/0009-composer-mention-picker.md)、[切换 profile 清理](docs/adr/0010-clear-local-data-on-profile-switch.md)、[Run 子代理](docs/adr/0011-run-as-provider-subagent.md)、[数据重建](docs/adr/0012-data-rebuild.md)。
 
 CLI 兼容依据为 Multica CLI 0.6.3 固定提交 [`18fa9f7`](https://github.com/multica-ai/multica/tree/18fa9f728a9e25f2465df2789631edb2a75442ad)。开发检查使用真实锁定 SDK、临时 CLI 配置、隔离 HTTP/WebSocket 和公开贡献／provider／RPC 边界；这些测试覆盖故障与竞态，但不能代替真实宿主或真实服务验收。构建后 `dist` 中的副本不进入类型检查或测试发现。
