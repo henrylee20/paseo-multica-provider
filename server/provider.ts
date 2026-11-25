@@ -177,7 +177,7 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
             for (const card of cards) projectPermission(card);
             const projection = new RunProjection(input.sessionId, address.rootId, emit);
             const projectChildren = (latest: typeof issue, replay = false) => {
-              const markers = projection.project(latest, replay, true);
+              const markers = projection.project(latest, replay);
               if (!markers.some(runId => !latest.runs[runId].markerProjected)) return;
               void store.update(state => {
                 const saved = state.connections[address.connectionKey]?.issues[address.issueId];

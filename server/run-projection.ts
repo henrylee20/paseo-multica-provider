@@ -42,7 +42,7 @@ function messageItems(runId: string, message: RunMessage): ProviderTimelineItem[
 export class RunProjection {
   private readonly children = new Map<string, { sessionId: string; status: StoredRun["status"]; rows: Set<string>; messages: Set<number>; ended?: StoredRun["status"]; changes: number }>();
   constructor(private readonly parentSessionId: string, private readonly rootId: string, private readonly emit: (event: ProviderEvent) => void) {}
-  project(issue: IssueMapping, replayMarkers = true, waitForDetails = false) {
+  project(issue: IssueMapping, replayMarkers = true) {
     const markers: string[] = [];
     for (const [runId, run] of Object.entries(issue.runs)) {
       if (run.ownerRootId !== this.rootId) continue;
@@ -89,7 +89,7 @@ export class RunProjection {
           send(field === "error" || field === "failure_reason" ? { type: "error", id, message: `${label}：${part}` } : { type: "notification", id, level: "info", message: `${label}：${part}` });
         }
       }
-      if (!isActiveRun(run.status) && child.ended !== run.status && (!waitForDetails || cache?.finalized)) {
+      if (!isActiveRun(run.status) && child.ended !== run.status) {
         this.emit({ type: "session.turn", sessionId: child.sessionId, turnId: runId, state: run.status === "cancelled" ? "canceled" : run.status as "completed" | "failed" });
         child.ended = run.status;
       }

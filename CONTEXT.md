@@ -34,7 +34,7 @@ Paseo 0.17.4 恢复工作区可能以 60 秒时间戳回退唤醒其他隐藏讨
 
 每轮同步按 Multica 工作区复用 agents／members promise；Thread 显式打开时使用该次请求的目录，不另设 TTL。metadata 存量扫描在进程内成功一次后停止，失败由后续 bootstrap 重试；导入和恢复单独补写。
 
-Thread renderer 挂载仍调用 thread.open，正常不显示说明卡；主讨论也保留不可见的加载条目。仅本进程实际打开的 Thread 继续补读评论正文；描述由 provider 订阅推送。父 provider 协商 session.subsession，讨论打开（含导入、history:skip）立即重新发出全部归属 Run 子会话与缓存；RunDetails 只为本进程实际打开过的讨论补读远端执行消息，每两秒刷新活跃 Run；成功补齐终态后保存 finalized 并停止，结束前不越过序号缺口。profile 清理复用 reset 排空旧读取并清空打开集合，计时器供新 profile 继续使用。
+Thread renderer 挂载仍调用 thread.open，正常不显示说明卡；主讨论也保留不可见的加载条目。仅本进程实际打开的 Thread 继续补读评论正文；描述由 provider 订阅推送。父 provider 协商 session.subsession，讨论打开（含导入、history:skip）立即重新发出全部归属 Run 子会话与缓存；RunDetails 只为本进程实际打开过的讨论补读远端执行消息，每两秒刷新活跃 Run；成功补齐终态后保存 finalized 并停止；补齐前不越过序号缺口。子会话立即按已知 Run 终态结束，不等待明细读取，离线、登出或读取失败不影响终态，后续明细仍可追加。profile 清理复用 reset 排空旧读取并清空打开集合，计时器供新 profile 继续使用。
 
 RunProjection 将执行文本、工具输入／结果、错误及远端目录推送到只读子时间线；原始消息缓存去重并保持序号，活跃期及终态补读完成前，序号缺口后的消息等待补齐；finalized 后按可得源顺序呈现。空字符串与 null 元数据不生成条目。父讨论仅发出一次固定 completed 的 sub_agent 位置标记，子会话 toolCallId 指向它；markerProjected 持久标记已发出的位置标记，history:skip 只补发关闭期间新发现等尚未发出的标记。父关闭只清理本地投影，由宿主取消运行中的子代理，不发送会将其误标 completed 的子会话 session.closed。Run 细分活动状态变化追加说明，completed／failed／cancelled 对应子会话 completed／failed／canceled；聚合父 turn 和原生 Stop 边界保持。旧 multica:run:<runId> 行、renderer 及 run.open／run.read／run.observe RPC 均移除。描述保留 revision／offset 切片，评论事件仍单次读取。缓存重放不依赖 CLI 登录，远端补读仍核对原连接与 Run 归属。
 

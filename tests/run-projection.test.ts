@@ -12,22 +12,30 @@ function fixture() {
   return { issue, events, projection };
 }
 
-it("finishes a terminal child only after finalized output, including an irrecoverable sequence gap", () => {
+it("ends a terminal child immediately and appends finalized output after an irrecoverable sequence gap", () => {
   const { issue, events, projection } = fixture();
-  projection.project(issue, true, true);
+  projection.project(issue);
   expect(events.filter(event => event.type === "timeline.item" && event.item.type === "assistant_message")).toMatchObject([{ item: { text: "First available" } }]);
-  expect(events.filter(event => event.type === "session.turn")).toMatchObject([{ state: "started" }]);
+  expect(events.filter(event => event.type === "session.turn")).toMatchObject([{ state: "started" }, { state: "completed" }]);
   issue.runDetails.run.finalized = true;
-  projection.project(issue, false, true);
+  projection.project(issue, false);
   expect(events.filter(event => event.type === "timeline.item" && event.item.type === "assistant_message")).toMatchObject([{ item: { text: "First available" } }, { item: { text: "Last available" } }]);
-  expect(events.at(-1)).toMatchObject({ type: "session.turn", state: "completed" });
+  expect(events.at(-1)).toMatchObject({ type: "timeline.item", item: { type: "assistant_message", text: "Last available" } });
+  expect(events.filter(event => event.type === "session.turn")).toMatchObject([{ state: "started" }, { state: "completed" }]);
   expect(events).toContainEqual(expect.objectContaining({ type: "session.opened", description: "由关联评论触发" }));
 });
 
-it("a cache-only terminal projection ends without fetching or inventing the missing prefix", () => {
-  const { issue, events, projection } = fixture();
-  issue.runDetails.run.messages.shift();
-  projection.project(issue);
-  expect(events.some(event => event.type === "timeline.item" && event.item.type === "assistant_message")).toBe(false);
-  expect(events.filter(event => event.type === "session.turn")).toMatchObject([{ state: "started" }, { state: "completed" }]);
+it.each(["completed", "failed", "cancelled"] as const)("a cached %s Run ends even without finalized details or a message cache", status => {
+  for (const cached of [true, false]) {
+    const { issue, events, projection } = fixture();
+    issue.runs.run.status = status;
+    if (cached) { issue.runDetails.run.messages.shift(); issue.runDetails.run.finalized = false; }
+    else delete issue.runDetails.run;
+    projection.project(issue);
+    expect(events.some(event => event.type === "timeline.item" && event.item.type === "assistant_message")).toBe(false);
+    expect(events.filter(event => event.type === "session.turn")).toMatchObject([{ state: "started" }, { state: status === "cancelled" ? "canceled" : status }]);
+    const count = events.length;
+    projection.project(issue);
+    expect(events).toHaveLength(count);
+  }
 });

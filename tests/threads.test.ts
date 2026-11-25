@@ -690,7 +690,7 @@ it("does not poll execution details when subsessions are not negotiated", async 
   expect(f.providerEvents.some(event => event.type === "session.opened" && event.parentSessionId)).toBe(false);
 });
 
-it("waits for terminal fill before emitting a missing prefix and ending the child", async () => {
+it("ends a terminal child immediately while deferring messages behind a missing prefix until final fill", async () => {
   const base = { task_id: "gap-end", issue_id: "issue" };
   const f = await fixture([{ id: "gap-end", issue_id: "issue", agent_id: "owned-agent", status: "running", trigger_comment_id: "root" }], true, [{ ...base, seq: 3, type: "text", content: "Third" }]);
   const child = `${f.native.agents[1].id}:run:gap-end`;
@@ -703,13 +703,14 @@ it("waits for terminal fill before emitting a missing prefix and ending the chil
   try {
     await arrived;
     expect(f.timelines.get(child)!.some(row => row.type === "assistant_message")).toBe(false);
-    expect(f.providerEvents.filter(event => event.type === "session.turn" && event.sessionId === child)).toMatchObject([{ state: "started" }]);
+    expect(f.providerEvents.filter(event => event.type === "session.turn" && event.sessionId === child)).toMatchObject([{ state: "started" }, { state: "completed" }]);
     f.messages.push({ ...base, seq: 1, type: "text", content: "First" }, { ...base, seq: 2, type: "text", content: "Second" });
   } finally { release(); }
   await syncing;
   expect(f.timelines.get(child)!.filter(row => row.type === "assistant_message").map(row => row.text)).toEqual(["First", "Second", "Third"]);
   const events = f.providerEvents.filter(event => "sessionId" in event && event.sessionId === child);
-  expect(events.at(-1)).toMatchObject({ type: "session.turn", state: "completed" });
+  expect(events.at(-1)).toMatchObject({ type: "timeline.item", item: { type: "assistant_message", text: "Third" } });
+  expect(events.filter(event => event.type === "session.turn")).toMatchObject([{ state: "started" }, { state: "completed" }]);
   const reads = f.requests.filter(request => request.url.includes("/messages")).length;
   await resync(f.server, f.paseo, "remote-workspace");
   expect(f.requests.filter(request => request.url.includes("/messages"))).toHaveLength(reads);
@@ -723,4 +724,13 @@ it("labels system triggers and never treats a Run's own generated comment as its
   expect(f.providerEvents).toContainEqual(expect.objectContaining({ type: "session.opened", description: "由 系统 的评论触发" }));
   const generated = f.providerEvents.find(event => event.type === "session.opened" && event.sessionId.endsWith(":run:generated"));
   expect(generated).toMatchObject({ description: expect.stringMatching(/^任务级执行 · 11-24 /) });
+});
+
+it("shows a historical Run's terminal state when its execution messages cannot be fetched", async () => {
+  const f = await fixture([{ id: "offline", issue_id: "issue", agent_id: "owned-agent", status: "completed", trigger_comment_id: "root" }], false);
+  f.failMessages(true);
+  const parent = f.native.agents[1], provider = await f.connect();
+  await provider.send({ type: "session.open", requestId: "offline-open", sessionId: parent.id, history: "skip", persistence: JSON.parse(parent.handle.slice(7)), config: { cwd: parent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
+  await expect.poll(() => f.requests.some(request => request.url.includes("/tasks/offline/messages"))).toBe(true);
+  expect(f.providerEvents.filter(event => event.type === "session.turn" && event.sessionId === `${parent.id}:run:offline`)).toMatchObject([{ state: "started" }, { state: "completed" }]);
 });
