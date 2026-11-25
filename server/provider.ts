@@ -256,6 +256,10 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
               const issue = (await store.read()).connections[address.connectionKey]?.issues[address.issueId];
               if (!issue || (address.rootId !== "main" && !issue.threads[address.rootId])) throw new Error("此任务或 Thread 尚未映射。");
               if ("clearPendingPermissions" in input.prompt && input.prompt.clearPendingPermissions === true) await askusers.collapsePending(address);
+              emit({ type: "timeline.item", sessionId: input.sessionId, item: {
+                type: "user_message", id: `multica:input:${input.prompt.clientMessageId}`, messageId: `multica:input:${input.prompt.clientMessageId}`,
+                clientMessageId: input.prompt.clientMessageId, text: body,
+              } });
               void deliveries.send(address, input.prompt.clientMessageId, body).then(() => {
                 if (address.rootId === "main") emit({ type: "timeline.item", sessionId: input.sessionId, item: {
                   type: "plugin", id: `multica:thread-created:${input.prompt.clientMessageId}`, pluginId: "multica", kind: "comment-delivery", version: 1, data: {},

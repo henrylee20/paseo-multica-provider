@@ -128,7 +128,7 @@ it("matches a saved reply to its native input through sync, duplicate dispatch a
   const address = JSON.parse(thread.handle.slice(7)).data;
   await f.server.rpc(threadOpen, address, f.paseo);
   await f.send("root", "A reply", "reply");
-  await expect.poll(() => f.canonical.get(thread.id)?.filter(entry => entry.item.clientMessageId === "reply").length).toBe(1);
+  await expect.poll(() => f.canonical.get(thread.id)?.filter(entry => entry.item.clientMessageId === "reply" && entry.item.messageId === "saved-1").length).toBe(1);
   await f.send("root", "A reply", "reply");
   await resync(f.server, f.paseo, "workspace");
   expect(f.posts).toHaveLength(1);
@@ -263,4 +263,24 @@ it("invalid steer input keeps the captured turn while reporting one local error"
   expect(f.events).toContainEqual(expect.objectContaining({ type: "session.prompt_result", clientMessageId: "invalid-steer", result: { type: "steer", turnId: turn?.type === "session.turn" ? turn.turnId : "" } }));
   expect(f.events.filter(event => event.type === "timeline.item" && event.item.type === "error")).toHaveLength(1);
   expect(f.posts).toEqual([]);
+});
+
+it("projects input before admission and retains it before a later network error", async () => {
+  const f = await fixture();
+  let release!: () => void;
+  f.post(async () => { await new Promise<void>(resolve => { release = resolve; }); return { status: 403, body: { error: "Remote rejection" } }; });
+  await f.send("root", "Visible native input", "visible");
+  await expect.poll(() => f.posts.length).toBe(1);
+  const input = f.events.findIndex(event => event.type === "timeline.item" && event.item.type === "user_message" && event.item.clientMessageId === "visible");
+  const admission = f.events.findIndex(event => event.type === "session.prompt_result" && event.clientMessageId === "visible");
+  const nativeInput = f.events[input];
+  try {
+    expect(nativeInput).toMatchObject({ type: "timeline.item", item: { type: "user_message", id: "multica:input:visible", messageId: "multica:input:visible", clientMessageId: "visible", text: "Visible native input" } });
+    expect(input).toBeLessThan(admission);
+    expect(f.events.some(event => event.type === "timeline.item" && event.item.type === "error")).toBe(false);
+  } finally { release(); }
+  await expect.poll(() => f.events.filter(event => event.type === "timeline.item" && event.item.type === "error").length).toBe(1);
+  expect(f.events.at(-1)).toMatchObject({ type: "timeline.item", item: { type: "error", message: "Remote rejection" } });
+  const thread = f.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
+  expect(f.canonical.get(thread.id)?.filter(entry => entry.item.clientMessageId === "visible")).toHaveLength(1);
 });
