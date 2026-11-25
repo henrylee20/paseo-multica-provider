@@ -33,6 +33,5 @@ export const runOpen = defineRpc({ name: "run.open", input: runAddress, output: 
 }) });
 // Detailed history is a versioned JSON stream, split below the native row/RPC
 // budget even when one tool result is much larger than a single transport frame.
-export const runRead = defineRpc({ name: "run.read", input: runAddress.extend({ revision: z.string(), offset: z.number().int().nonnegative() }),
+export const runRead = defineRpc({ name: "run.read", input: runAddress.extend({ kind: z.enum(["messages", "metadata"]), revision: z.string(), offset: z.number().int().nonnegative() }),
   output: z.object({ text: z.string(), nextOffset: z.number().int().nonnegative().nullable() }) });
-export const runMetadataRead = defineRpc({ name: "run.metadata.read", input: runRead.input, output: runRead.output });

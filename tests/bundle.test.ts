@@ -392,8 +392,8 @@ it.each(["messages", "empty", "unavailable", "terminal"])("expands source Run me
       if (!rpcs.has(contract.name)) rpcs.set(contract.name, async input => {
         calls.push({ name: contract.name, input });
         if (contract.name === "run.open") return { status: mode === "unavailable" ? "cached" : "ready", ...(mode !== "unavailable" ? { revision: String(messages.length) } : {}), metadataRevision: "metadata", message: mode === "unavailable" ? "No message cache" : undefined };
+        if (contract.name === "run.read" && input.kind === "metadata") return input.offset === 0 ? { text: JSON.stringify(metadata).slice(0, 40), nextOffset: 40 } : { text: JSON.stringify(metadata).slice(40), nextOffset: null };
         if (contract.name === "run.read") return input.offset === 0 ? { text: JSON.stringify(messages).slice(0, 80), nextOffset: 80 } : { text: JSON.stringify(messages).slice(80), nextOffset: null };
-        if (contract.name === "run.metadata.read") return input.offset === 0 ? { text: JSON.stringify(metadata).slice(0, 40), nextOffset: 40 } : { text: JSON.stringify(metadata).slice(40), nextOffset: null };
         return { status: "ready" };
       });
       return rpcs.get(contract.name);
@@ -427,7 +427,7 @@ it.each(["messages", "empty", "unavailable", "terminal"])("expands source Run me
     expect(text).not.toContain("REMOTE");
     expect(text).toContain("/remote/agent/../checkout with spaces");
     expect(text).toContain("../checkout with spaces");
-    expect(calls.filter(call => call.name === "run.metadata.read").map(call => call.input.offset)).toEqual([0, 40]);
+    expect(calls.filter(call => call.name === "run.read" && call.input.kind === "metadata").map(call => call.input.offset)).toEqual([0, 40]);
     if (mode === "messages") {
       expect(text).toContain("Run text");
       expect(text.indexOf("Run thought")).toBeGreaterThan(text.indexOf("Run text"));
@@ -443,7 +443,7 @@ it.each(["messages", "empty", "unavailable", "terminal"])("expands source Run me
       messages.push({ task_id: "run", issue_id: "issue", seq: 13, type: "text", content: "Live update" });
       await vi.advanceTimersByTimeAsync(2100);
       expect(render()).toContain("Live update");
-      expect(calls.filter(call => call.name === "run.read").map(call => call.input.offset)).toEqual([0, 80, 0, 80]);
+      expect(calls.filter(call => call.name === "run.read" && call.input.kind === "messages").map(call => call.input.offset)).toEqual([0, 80, 0, 80]);
     }
     if (mode === "terminal") {
       const reads = calls.filter(call => call.name === "run.open").length;

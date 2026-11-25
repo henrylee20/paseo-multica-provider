@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { useRpc, type PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import type { z } from "zod";
-import { isActiveRun, runObserve, runOpen, runRead, runMetadataRead, runMetadataSchema, runMessageSchema, runSummarySchema, type RunMessage, type RunMetadata } from "../shared/runs.js";
+import { isActiveRun, runObserve, runOpen, runRead, runMetadataSchema, runMessageSchema, runSummarySchema, type RunMessage, type RunMetadata } from "../shared/runs.js";
 import { collectText } from "./chunked-text.js";
 import { RunMetadataView } from "./run-metadata.js";
 
@@ -16,7 +16,6 @@ function RunSummaryBody({ item, theme }: Props) {
   const observe = useRpc(runObserve);
   const open = useRpc(runOpen);
   const read = useRpc(runRead);
-  const readMetadata = useRpc(runMetadataRead);
   const [expanded, setExpanded] = useState(false);
   const [messages, setMessages] = useState<RunMessage[]>([]);
   const [metadata, setMetadata] = useState<RunMetadata>();
@@ -42,14 +41,14 @@ function RunSummaryBody({ item, theme }: Props) {
         const result = await open(address);
         if (!active) return;
         if (result.metadataRevision && result.metadataRevision !== metadataRevision) {
-          const text = await collectText(offset => readMetadata({ ...address, revision: result.metadataRevision!, offset }), () => active);
+          const text = await collectText(offset => read({ ...address, kind: "metadata", revision: result.metadataRevision!, offset }), () => active);
           if (text === undefined) return;
           setMetadata(runMetadataSchema.parse(JSON.parse(text)));
           metadataRevision = result.metadataRevision;
         }
         if (!result.revision) { setNotice(result.message ?? "无法读取执行明细；已读内容仍保留。"); return; }
         if (result.revision !== revision) {
-          const text = await collectText(offset => read({ ...address, revision: result.revision!, offset }), () => active);
+          const text = await collectText(offset => read({ ...address, kind: "messages", revision: result.revision!, offset }), () => active);
           if (text === undefined) return;
           const records = runMessageSchema.array().parse(JSON.parse(text));
           setMessages(records);
@@ -64,7 +63,7 @@ function RunSummaryBody({ item, theme }: Props) {
     if (!isActiveRun(status)) return () => { active = false; };
     const timer = setInterval(() => { void refresh(); }, 2000);
     return () => { active = false; clearInterval(timer); };
-  }, [expanded, open, read, readMetadata, connectionKey, issueId, rootId, runId, status, attempt]);
+  }, [expanded, open, read, connectionKey, issueId, rootId, runId, status, attempt]);
 
   const color = { color: theme.colors.foreground };
   const muted = { color: theme.colors.foregroundMuted };

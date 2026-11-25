@@ -1,4 +1,4 @@
-import { runObserve, runOpen, runRead, runMetadataRead } from "../shared/runs.js";
+import { runObserve, runOpen, runRead } from "../shared/runs.js";
 import { RunSynchronizer } from "./runs.js";
 import { RunDetails } from "./run-details.js";
 import { homedir } from "node:os";
@@ -13,8 +13,9 @@ import { DiscussionMetadata } from "./discussion-metadata.js";
 import { workspaceCatalogs } from "./catalogs.js";
 import { createMulticaProvider } from "./provider.js";
 import { DiscussionLifecycle } from "./discussion-lifecycle.js";
+import { readText } from "./chunked-text.js";
 import { readTaskDescription } from "../shared/description.js";
-import { descriptionRevision, descriptionSlice, TaskDescriptions } from "./task-description.js";
+import { TaskDescriptions } from "./task-description.js";
 import { projectionHistory, ThreadSynchronizer } from "./threads.js";
 import { threadOpen, commentEventDetail } from "../shared/threads.js";
 import { ManualHiding } from "./hiding.js";
@@ -115,17 +116,12 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       // The host authenticates this RPC. Cached history belongs to its persisted
       // connection, even while the CLI is offline, logged out, or using another account.
       const issue = (await store.read()).connections[input.connectionKey]?.issues[input.issueId];
-      if (!issue || descriptionRevision(issue.description) !== input.revision || input.offset > issue.description.length) {
-        throw new Error("Task description changed or is unavailable; reopen the discussion");
-      }
-      const text = descriptionSlice(issue.description, input.offset, 8192);
-      const nextOffset = input.offset + text.length;
-      return { text, nextOffset: nextOffset < issue.description.length ? nextOffset : null };
+      if (!issue) throw new Error("Task description unavailable");
+      return readText(issue.description, input);
     });
     server.handle(runObserve, async input => runs.observe(input));
     server.handle(runOpen, async input => runDetails.open(input));
     server.handle(runRead, async input => runDetails.read(input));
-    server.handle(runMetadataRead, async input => runDetails.readMetadata(input));
     server.handle(threadOpen, async input => threads.open(input));
     server.handle(commentEventDetail, async input => {
       const issue = (await store.read()).connections[input.connectionKey]?.issues[input.issueId];

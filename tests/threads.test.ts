@@ -545,17 +545,15 @@ it("uses generated-comment provenance as first-discovery associations but never 
   expect([...f.timelines.values()].flat().some(row => row.type === "assistant_message")).toBe(false);
 });
 
-const metadataRead = defineRpc({ name: "run.metadata.read", input: runRead.input, output: runRead.output });
-
 it("shows task failure metadata and exact remote paths even when a Run failed before streaming", async () => {
   const metadata = { error: "Runtime failed before streaming", failure_reason: "local_directory_error", work_dir: "/remote/agent/../checkout with spaces", relative_work_dir: "../checkout with spaces" };
   const f = await fixture([{ id: "failed", issue_id: "issue", agent_id: "owned-agent", status: "failed", trigger_comment_id: "root", ...metadata }]);
   const address = { ...JSON.parse(f.native.agents[1].handle.slice(7)).data, runId: "failed" };
   const opened = await f.server.rpc(runOpen, address, f.paseo) as { revision?: string; metadataRevision?: string };
   expect(opened.metadataRevision).toEqual(expect.any(String));
-  const page = await f.server.rpc(metadataRead, { ...address, revision: opened.metadataRevision!, offset: 0 }, f.paseo);
+  const page = await f.server.rpc(runRead, { kind: "metadata", ...address, revision: opened.metadataRevision!, offset: 0 }, f.paseo);
   expect(JSON.parse(page.text)).toEqual(metadata);
-  expect(JSON.parse((await f.server.rpc(runRead, { ...address, revision: opened.revision!, offset: 0 }, f.paseo)).text)).toEqual([]);
+  expect(JSON.parse((await f.server.rpc(runRead, { kind: "messages", ...address, revision: opened.revision!, offset: 0 }, f.paseo)).text)).toEqual([]);
   expect(f.native.agents.every(agent => agent.cwd !== metadata.work_dir && agent.cwd !== metadata.relative_work_dir)).toBe(true);
   expect(f.timelines.get(f.native.agents[1].id)?.some(row => row.type === "assistant_message")).toBe(false);
   f.failMessages(true);
@@ -572,7 +570,7 @@ it("retains full versioned task metadata without message access across restart a
   expect(opened.revision).toBeUndefined();
   let text = "", offset: number | null = 0;
   while (offset !== null) {
-    const page: { text: string; nextOffset: number | null } = await f.server.rpc(metadataRead, { ...address, revision: opened.metadataRevision!, offset }, f.paseo);
+    const page: { text: string; nextOffset: number | null } = await f.server.rpc(runRead, { kind: "metadata", ...address, revision: opened.metadataRevision!, offset }, f.paseo);
     expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThan(64 * 1024);
     text += page.text; offset = page.nextOffset;
   }
@@ -585,7 +583,7 @@ it("retains full versioned task metadata without message access across restart a
   f.runs[0].error = null; delete f.runs[0].failure_reason; f.runs[0].relative_work_dir = "";
   await resync(f.server, f.paseo, "remote-workspace");
   const changed = await f.server.rpc(runOpen, address, f.paseo);
-  await expect(f.server.rpc(metadataRead, { ...address, revision: opened.metadataRevision!, offset: 8192 }, f.paseo)).rejects.toThrow("changed");
+  await expect(f.server.rpc(runRead, { kind: "metadata", ...address, revision: opened.metadataRevision!, offset: 8192 }, f.paseo)).rejects.toThrow("changed");
   f.runs[0].status = "running"; f.runs[0].error = "Stale active snapshot";
   await resync(f.server, f.paseo, "remote-workspace");
   expect(await f.server.rpc(runOpen, address, f.paseo)).toMatchObject({ metadataRevision: changed.metadataRevision });
@@ -599,7 +597,7 @@ it("retains full versioned task metadata without message access across restart a
   const requests = f.requests.length;
   const cached = await restarted.server.rpc(runOpen, address, f.paseo);
   expect(cached).toMatchObject({ status: "cached", metadataRevision: changed.metadataRevision });
-  const first = await restarted.server.rpc(metadataRead, { ...address, revision: cached.metadataRevision!, offset: 0 }, f.paseo);
+  const first = await restarted.server.rpc(runRead, { kind: "metadata", ...address, revision: cached.metadataRevision!, offset: 0 }, f.paseo);
   expect(first.text).toContain('"error":null,"failure_reason":"local_directory_error"');
   expect(f.requests).toHaveLength(requests);
 });
@@ -624,7 +622,7 @@ it("loads complete run details only on expansion and chunks large ordered source
   let offset: number | null = 0;
   let text = "";
   while (offset !== null) {
-    const page: { text: string; nextOffset: number | null } = await f.server.rpc(runRead, { ...address, revision: opened.revision!, offset }, f.paseo);
+    const page: { text: string; nextOffset: number | null } = await f.server.rpc(runRead, { kind: "messages", ...address, revision: opened.revision!, offset }, f.paseo);
     expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThan(64 * 1024);
     text += page.text;
     offset = page.nextOffset;
@@ -646,7 +644,7 @@ it("fills delayed sequence gaps, deduplicates repeated run messages and retains 
   // cursor would skip this permanently because seq 3 arrived before seq 2.
   f.messages.push({ ...input, seq: 2, type: "thinking", content: "Delayed thought" });
   const next = await f.server.rpc(runOpen, address, f.paseo);
-  const read = await f.server.rpc(runRead, { ...address, revision: next.revision!, offset: 0 }, f.paseo);
+  const read = await f.server.rpc(runRead, { kind: "messages", ...address, revision: next.revision!, offset: 0 }, f.paseo);
   expect(JSON.parse(read.text)).toEqual([
     { ...input, seq: 1, type: "text", content: "First" },
     { ...input, seq: 2, type: "thinking", content: "Delayed thought" },
@@ -655,9 +653,9 @@ it("fills delayed sequence gaps, deduplicates repeated run messages and retains 
   expect(f.requests.filter(request => request.url.includes("/messages")).at(-1)?.url).toBe("/api/tasks/detail/messages?since=1");
   f.messages.push({ ...input, seq: 4, type: "error", content: "New error" });
   const live = await f.server.rpc(runOpen, address, f.paseo);
-  expect(JSON.parse((await f.server.rpc(runRead, { ...address, revision: live.revision!, offset: 0 }, f.paseo)).text).map((message: RunMessage) => message.seq)).toEqual([1, 2, 3, 4]);
+  expect(JSON.parse((await f.server.rpc(runRead, { kind: "messages", ...address, revision: live.revision!, offset: 0 }, f.paseo)).text).map((message: RunMessage) => message.seq)).toEqual([1, 2, 3, 4]);
   expect(f.requests.filter(request => request.url.includes("/messages")).at(-1)?.url).toBe("/api/tasks/detail/messages?since=3");
-  await expect(f.server.rpc(runRead, { ...address, revision: next.revision!, offset: 0 }, f.paseo)).rejects.toThrow("changed");
+  await expect(f.server.rpc(runRead, { kind: "messages", ...address, revision: next.revision!, offset: 0 }, f.paseo)).rejects.toThrow("changed");
   const before = f.requests.filter(request => request.url.includes("/messages")).length;
   const repeated = await Promise.all([f.server.rpc(runOpen, address, f.paseo), f.server.rpc(runOpen, address, f.paseo)]);
   expect(repeated).toEqual([live, live]);
@@ -669,7 +667,7 @@ it("keeps cached run details readable after restart, remote failures, logout and
   const address = { ...JSON.parse(f.native.agents[1].handle.slice(7)).data, runId: "cache" };
   f.messages.push({ task_id: "cache", issue_id: "issue", seq: 1, type: "tool_result", output: "Read while authorized", output_truncated: true });
   const opened = await f.server.rpc(runOpen, address, f.paseo);
-  const original = await f.server.rpc(runRead, { ...address, revision: opened.revision!, offset: 0 }, f.paseo);
+  const original = await f.server.rpc(runRead, { kind: "messages", ...address, revision: opened.revision!, offset: 0 }, f.paseo);
   f.failMessages(true);
   expect(await f.server.rpc(runOpen, address, f.paseo)).toMatchObject({ status: "cached", revision: opened.revision });
   f.failMessages(false);
@@ -680,16 +678,16 @@ it("keeps cached run details readable after restart, remote failures, logout and
   await f.identity("another-user");
   const beforeSwitch = f.requests.filter(request => request.url.includes("/messages")).length;
   expect(await f.server.rpc(runOpen, address, f.paseo)).toMatchObject({ status: "cached", revision: opened.revision });
-  expect(await f.server.rpc(runRead, { ...address, revision: opened.revision!, offset: 0 }, f.paseo)).toEqual(original);
+  expect(await f.server.rpc(runRead, { kind: "messages", ...address, revision: opened.revision!, offset: 0 }, f.paseo)).toEqual(original);
   expect(f.requests.filter(request => request.url.includes("/messages"))).toHaveLength(beforeSwitch);
   await f.dispose();
   await writeFile(join(f.home, ".multica", "config.json"), "{}");
   const restarted = f.start();
   expect(await restarted.server.rpc(runOpen, address, f.paseo)).toMatchObject({ status: "cached", revision: opened.revision });
-  expect(await restarted.server.rpc(runRead, { ...address, revision: opened.revision!, offset: 0 }, f.paseo)).toEqual(original);
+  expect(await restarted.server.rpc(runRead, { kind: "messages", ...address, revision: opened.revision!, offset: 0 }, f.paseo)).toEqual(original);
   expect(f.requests.filter(request => request.url.includes("/messages"))).toHaveLength(beforeSwitch);
   expect(await restarted.server.rpc(runOpen, { ...address, rootId: "main" }, f.paseo)).toMatchObject({ status: "unavailable" });
-  await expect(restarted.server.rpc(runRead, { ...address, rootId: "main", revision: opened.revision!, offset: 0 }, f.paseo)).rejects.toThrow("does not belong");
+  await expect(restarted.server.rpc(runRead, { kind: "messages", ...address, rootId: "main", revision: opened.revision!, offset: 0 }, f.paseo)).rejects.toThrow("does not belong");
 });
 
 it("catches real task-message invalidations through incremental reads without duplicating details, moving ownership or copying final comments", async () => {
@@ -709,7 +707,7 @@ it("catches real task-message invalidations through incremental reads without du
   f.signal("comment:created", { issue_id: "issue", comment_id: "final-comment" });
   await expect.poll(() => f.timelines.get(f.native.agents[1].id)?.find(row => row.id === "multica:run:stream"), { timeout: 3000 }).toMatchObject({ data: { status: "completed", rootId: "root" } });
   const opened = await f.server.rpc(runOpen, address, f.paseo);
-  const records = JSON.parse((await f.server.rpc(runRead, { ...address, revision: opened.revision!, offset: 0 }, f.paseo)).text);
+  const records = JSON.parse((await f.server.rpc(runRead, { kind: "messages", ...address, revision: opened.revision!, offset: 0 }, f.paseo)).text);
   expect(records.map((record: RunMessage) => record.seq)).toEqual([1, 3]);
   expect(f.requests.filter(request => request.url.includes("/messages")).at(-1)?.url).toBe("/api/tasks/stream/messages?since=1");
   expect(f.timelines.get(f.native.agents[1].id)?.filter(row => row.type === "assistant_message").map(row => row.text)).toEqual(["River: \n\nChild", "Lin Agent: \n\nGrandchild", "Lin Agent: \n\nFinal comment"]);
@@ -757,7 +755,7 @@ it("restores cached discussions and out-of-order run gaps without fetching every
   f.messages.push({ ...identity, seq: 2, type: "thinking", content: "Delayed across restart" });
   const opened = await restarted.server.rpc(runOpen, runAddress, f.paseo);
   expect(f.requests.filter(request => request.url.includes("/messages")).at(-1)?.url).toBe("/api/tasks/recovery-run/messages?since=1");
-  expect(JSON.parse((await restarted.server.rpc(runRead, { ...runAddress, revision: opened.revision!, offset: 0 }, f.paseo)).text).map((message: RunMessage) => message.seq)).toEqual([1, 2, 3]);
+  expect(JSON.parse((await restarted.server.rpc(runRead, { kind: "messages", ...runAddress, revision: opened.revision!, offset: 0 }, f.paseo)).text).map((message: RunMessage) => message.seq)).toEqual([1, 2, 3]);
   expect(f.native.agents).toHaveLength(2);
 });
 

@@ -9,7 +9,7 @@ import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { ProviderConnection, ProviderEvent, ProviderTimelineItem } from "@getpaseo/plugin/server/provider";
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
-import { runObserve, runOpen, runMetadataRead } from "../shared/runs.js";
+import { runObserve, runOpen, runRead } from "../shared/runs.js";
 import { workspaceEnable, syncBootstrap } from "../shared/contracts.js";
 import { createServerContribution } from "../server/contribute.js";
 
@@ -211,7 +211,7 @@ it("keeps available failure metadata from a per-Run Stop receipt when execution 
   const address = { ...JSON.parse(thread.handle.slice(7)).data, runId: "failed-during-stop" };
   const opened = await f.server.rpc(runOpen, address, f.paseo);
   expect(opened).toMatchObject({ status: "cached", metadataRevision: expect.any(String) });
-  const page = await f.server.rpc(runMetadataRead, { ...address, revision: opened.metadataRevision!, offset: 0 }, f.paseo);
+  const page = await f.server.rpc(runRead, { kind: "metadata", ...address, revision: opened.metadataRevision!, offset: 0 }, f.paseo);
   expect(JSON.parse(page.text)).toEqual(metadata);
   expect(f.providerEvents.some(event => event.type === "timeline.item" && event.item.type === "assistant_message")).toBe(false);
 });
