@@ -250,10 +250,13 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
               const address = session?.address;
               if (!address) throw new Error("请在 Multica 设置启用任务工作区后打开已导入的讨论。");
               if (lifecycle.unavailable(address)) throw new Error("此隐藏讨论正在核对本地归档状态，请稍后重试。");
-              // Newer hosts may request local permission clearing on chat. This
-              // is local collapse only; the prompt remains an ordinary comment.
+              const body = input.prompt.input.type === "message" && input.prompt.input.content.every(part => part.type === "text" && !("mimeType" in part))
+                ? input.prompt.input.content.map(part => part.type === "text" ? part.text : "").join("") : undefined;
+              if (!body?.trim() || input.prompt.outputSchema !== undefined) throw new Error("仅支持非空文本评论，请移除附件或结构化输出。");
+              const issue = (await store.read()).connections[address.connectionKey]?.issues[address.issueId];
+              if (!issue || (address.rootId !== "main" && !issue.threads[address.rootId])) throw new Error("此任务或 Thread 尚未映射。");
               if ("clearPendingPermissions" in input.prompt && input.prompt.clearPendingPermissions === true) await askusers.collapsePending(address);
-              void deliveries.send(address, input.prompt).then(() => {
+              void deliveries.send(address, input.prompt.clientMessageId, body).then(() => {
                 if (address.rootId === "main") emit({ type: "timeline.item", sessionId: input.sessionId, item: {
                   type: "plugin", id: `multica:thread-created:${input.prompt.clientMessageId}`, pluginId: "multica", kind: "comment-delivery", version: 1, data: {},
                 } });

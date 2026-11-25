@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import { setTimeout } from "node:timers/promises";
 import { z } from "zod";
-import type { ProviderPrompt } from "@getpaseo/plugin/server/provider";
 import { remoteFetch, type AuthenticatedConnection } from "./connection.js";
 import type { RunAddress } from "./runs.js";
 import { StateStore } from "./state.js";
@@ -15,20 +14,15 @@ const receiptSchema = z.object({ id: z.string(), issue_id: z.string(), parent_id
 export class CommentDelivery {
   private readonly posts = new Map<string, Promise<string>>();
   constructor(private readonly store: StateStore, private readonly connection: () => Promise<AuthenticatedConnection>, private readonly onSaved: () => Promise<void>, private readonly lifecycle?: DiscussionLifecycle) {}
-  send(address: RunAddress, prompt: ProviderPrompt, target: { parent_id?: string; askuser_answer_to?: string } = {}): Promise<string> {
-    const key = JSON.stringify([address.connectionKey, address.issueId, address.rootId, prompt.clientMessageId, target.parent_id, target.askuser_answer_to]);
+  send(address: RunAddress, clientMessageId: string, body: string, target: { parent_id?: string; askuser_answer_to?: string } = {}): Promise<string> {
+    const key = JSON.stringify([address.connectionKey, address.issueId, address.rootId, clientMessageId, target.parent_id, target.askuser_answer_to]);
     const pending = this.posts.get(key);
     if (pending) return pending;
     const operation = (async () => {
-      const body = prompt.input.type === "message" && prompt.input.content.every(part => part.type === "text" && !("mimeType" in part))
-        ? prompt.input.content.map(part => part.type === "text" ? part.text : "").join("") : undefined;
-      if (!body?.trim() || prompt.outputSchema !== undefined) throw new Error("仅支持非空文本评论，请移除附件或结构化输出。");
-      const issue = (await this.store.read()).connections[address.connectionKey]?.issues[address.issueId];
-      if (!issue) throw new Error("任务缓存不可用。");
-      if (address.rootId !== "main" && !issue.threads[address.rootId]) throw new Error("Discussion unavailable");
+      const issue = (await this.store.read()).connections[address.connectionKey].issues[address.issueId];
       const connection = await this.connection();
       if (connection.connectionKey !== address.connectionKey) throw new Error("登录身份已变化；请切回此讨论所属的 Multica 连接。");
-      const saved = issue.commentInputs[prompt.clientMessageId];
+      const saved = issue.commentInputs[clientMessageId];
       if (saved?.rootId === address.rootId) return saved.commentId;
       const workspace = (await remoteJson(connection, "/api/workspaces", z.array(workspaceSchema)) as RemoteWorkspace[]).find(item => item.id === issue.remoteWorkspaceId);
       if (!workspace) throw new Error("Multica 工作区不可用。");
@@ -46,7 +40,7 @@ export class CommentDelivery {
         if (response?.ok) {
           const comment = receiptSchema.parse(await response.json());
           if (comment.issue_id !== address.issueId || (comment.parent_id ?? null) !== (target.parent_id ?? (address.rootId === "main" ? null : address.rootId)) || (comment.askuser_answer_to ?? null) !== (target.askuser_answer_to ?? null) || comment.content !== body || comment.author_id !== connection.userId) throw new Error("评论回执与原输入不匹配。");
-          await this.store.update(state => { state.connections[address.connectionKey].issues[address.issueId].commentInputs[prompt.clientMessageId] = { commentId: comment.id, rootId: address.rootId }; });
+          await this.store.update(state => { state.connections[address.connectionKey].issues[address.issueId].commentInputs[clientMessageId] = { commentId: comment.id, rootId: address.rootId }; });
           return comment.id;
         }
         if (response && (response.status < 500 || attempt === 2)) {

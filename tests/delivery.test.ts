@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import type { PaseoApi } from "@getpaseo/client";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
-import type { ProviderConnection, ProviderEvent } from "@getpaseo/plugin/server/provider";
+import type { ProviderConnection, ProviderEvent, ProviderPrompt } from "@getpaseo/plugin/server/provider";
 import { workspaceEnable, syncBootstrap } from "../shared/contracts.js";
 import { deliveryMentions } from "../shared/delivery.js";
 import { threadOpen } from "../shared/threads.js";
@@ -226,4 +226,41 @@ it("accepts ordinary comment receipts whose optional askuser target is explicitl
   }).toEqual({ commentId: "ordinary-null-target", rootId: "root" });
   expect(f.events.some(event => event.type === "timeline.item" && event.item.type === "error")).toBe(false);
   expect(f.posts).toHaveLength(1);
+});
+
+it.each([
+  { input: { type: "message", content: [{ type: "text", text: "  " }] } },
+  { input: { type: "message", content: [{ type: "image", mimeType: "image/png", data: "image" }] } },
+  { input: { type: "message", content: [{ type: "text", text: "attachment", mimeType: "text/plain" }] } },
+  { input: { type: "command", command: "unsupported" } },
+  { input: { type: "message", content: [{ type: "text", text: "structured" }] }, outputSchema: {} },
+])("rejects unsupported input before admission: %j", async unsupported => {
+  const f = await fixture();
+  const thread = f.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
+  await (await f.connect()).send({ type: "session.prompt", sessionId: thread.id, prompt: { ...unsupported, clientMessageId: "invalid", delivery: "auto" } as unknown as ProviderPrompt });
+  expect(f.events).toContainEqual(expect.objectContaining({ type: "session.prompt_result", clientMessageId: "invalid", result: expect.objectContaining({ type: "failed" }) }));
+  expect(f.events.some(event => event.type === "session.prompt_result" && event.clientMessageId === "invalid" && event.result.type === "completed")).toBe(false);
+  expect(f.posts).toEqual([]);
+});
+
+it.each(["missing-issue", "missing-root"])("rejects an unmapped %s before admitting input", async missing => {
+  const f = await fixture();
+  const agent = f.agents[0];
+  const persistence = JSON.parse(agent.handle.slice(7));
+  if (missing === "missing-issue") persistence.data.issueId = missing;
+  else { persistence.data.discussion = "thread"; persistence.data.rootId = missing; }
+  const provider = await f.connect();
+  await provider.send({ type: "session.open", requestId: missing, sessionId: missing, history: "skip", persistence, config: { cwd: agent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
+  await provider.send({ type: "session.prompt", sessionId: missing, prompt: { clientMessageId: missing, delivery: "auto", input: { type: "message", content: [{ type: "text", text: "Do not accept" }] } } });
+  expect(f.events).toContainEqual(expect.objectContaining({ type: "session.prompt_result", clientMessageId: missing, result: expect.objectContaining({ type: "failed" }) }));
+  expect(f.posts).toEqual([]);
+});
+
+it("invalid steer input keeps the captured turn while reporting one local error", async () => {
+  const f = await fixture(true);
+  const turn = f.events.find(event => event.type === "session.turn" && event.state === "started");
+  await f.send("root", " ", "invalid-steer", "steer");
+  expect(f.events).toContainEqual(expect.objectContaining({ type: "session.prompt_result", clientMessageId: "invalid-steer", result: { type: "steer", turnId: turn?.type === "session.turn" ? turn.turnId : "" } }));
+  expect(f.events.filter(event => event.type === "timeline.item" && event.item.type === "error")).toHaveLength(1);
+  expect(f.posts).toEqual([]);
 });

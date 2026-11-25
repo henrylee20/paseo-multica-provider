@@ -381,7 +381,7 @@ export class AskUsers {
     this.deliveries.set(id, { status: "received", clientMessageId });
     let commentId: string;
     try {
-      commentId = await deliveries.send({ ...address, rootId: card.rootId }, { clientMessageId, delivery: "auto", input: { type: "message", content: [{ type: "text", text: body }] } },
+      commentId = await deliveries.send({ ...address, rootId: card.rootId }, clientMessageId, body,
         { parent_id: address.commentId, askuser_answer_to: address.commentId });
     } catch (error) {
       this.deliveries.set(id, { status: "failed", clientMessageId, message: error instanceof Error ? error.message : "回答发送失败，请重新回答。" });
