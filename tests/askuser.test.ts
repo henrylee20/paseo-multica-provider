@@ -90,6 +90,11 @@ async function fixture() {
   const configPath = join(home, ".multica/config.json");
   await mkdir(join(home, ".multica"));
   await writeFile(configPath, JSON.stringify({ server_url: `http://127.0.0.1:${(http.address() as { port: number }).port}`, token: "synthetic" }));
+  let credentialVersion = 0;
+  const refreshLogin = async () => {
+    const config = JSON.parse(await readFile(configPath, "utf8"));
+    await writeFile(configPath, JSON.stringify({ ...config, token: `synthetic-${++credentialVersion}` }));
+  };
   const agents: Array<{ id: string; workspaceId: string; cwd: string; labels: Record<string, string>; handle: string }> = [];
   const workspaces: Array<{ id: string }> = [];
   const rows = new Map<string, ProviderTimelineItem[]>();
@@ -140,7 +145,7 @@ async function fixture() {
   await server!.rpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, paseo);
   const address = () => ({ connectionKey: agents[1].labels["multica.connection"], issueId: "issue", rootId: "root" });
   const cards = () => (rows.get(agents[1].id) ?? []).filter(row => row.type === "plugin" && row.kind === "askuser") as Array<Extract<ProviderTimelineItem, { type: "plugin" }> & { data: Record<string, any> }>;
-  return { ...started, start, connect, events, posts, skips, receipts, setClock: (value: Date) => { clock = value; }, comments, timeline, runs, documents, requests, remote, rows, agents, cards, address, open, home, configPath, paseo,
+  return { ...started, start, connect, events, posts, skips, receipts, setClock: (value: Date) => { clock = value; }, comments, timeline, runs, documents, requests, remote, rows, agents, cards, address, open, home, configPath, paseo, refreshLogin,
     disconnect: async () => { await provider?.close(); provider = undefined; }, signal: (type: string) => { for (const socket of websocket.clients) socket.send(JSON.stringify({ type })); }, eventsReady: () => expect.poll(() => websocket.clients.size).toBeGreaterThan(0), sync: () => server.rpc(syncBootstrap, {}, paseo) };
 }
 
@@ -337,7 +342,7 @@ it("enforces the attachment byte limit while streaming a chunked response", asyn
 });
 
 it("rechecks Issue access immediately before attachment downloading", async () => {
-  const f = await fixture(); f.comments[0].attachments = [attachment("denied")]; f.documents.set("denied", card); f.remote.objectChecksUntilDeny = 1; await f.sync();
+  const f = await fixture(); f.comments[0].attachments = [attachment("denied")]; f.documents.set("denied", card); f.remote.objectChecksUntilDeny = 0; await f.sync();
   expect(f.cards()[0]?.data).toMatchObject({ status: "invalid", error: expect.stringContaining("HTTP 403") });
   expect(f.requests.some(request => request.path.startsWith("/api/attachments/"))).toBe(false);
 });
@@ -363,7 +368,7 @@ it("places a generated root card in its new Thread while its unanchored Run stay
 
 it("keeps a prior connection's cached card read-only after the CLI resolves another account", async () => {
   const f = await fixture(); f.comments[0].attachments = [attachment("account")]; f.documents.set("account", { ...card, answer_user_id: "me" }); await f.sync();
-  f.remote.userId = "other";
+  f.remote.userId = "other"; await f.refreshLogin();
   const data = await f.server.rpc(observeCard, { ...f.address(), commentId: "root", attachmentId: "account" }, f.paseo);
   expect(data).toMatchObject({ title: card.title, readOnly: true, offline: true });
   await f.sync();
@@ -596,7 +601,7 @@ it.each([403, 503, "network"])("reports %s skip failure without claiming a termi
 
 it.each(["designated user", "different account", "logged out", "inaccessible", "hidden", "unconfirmed"])("rejects reopen and skip for %s before any remote POST", async reason => {
   const f = await fixture(); f.comments[0].attachments = [attachment("action-auth")]; f.documents.set("action-auth", { ...card, ...(reason === "designated user" ? { answer_user_id: "other" } : {}) }); await f.sync();
-  if (reason === "different account") f.remote.userId = "other";
+  if (reason === "different account") { f.remote.userId = "other"; await f.refreshLogin(); }
   if (reason === "logged out") await writeFile(f.configPath, "{}");
   if (reason === "inaccessible") f.remote.issueStatus = 403;
   if (reason === "hidden") await f.server.hook("agent.archive.after", { agent: { ...f.agents[1], provider: "multica" } } as never, f.paseo);
@@ -766,6 +771,7 @@ it("fences an answer received before Stop while its identity preflight is still 
   const f = await fixture(); f.comments[0].attachments = [attachment("stopped-answer")]; f.documents.set("stopped-answer", card); await f.sync();
   let entered!: () => void; let release!: () => void;
   const arrived = new Promise<void>(resolve => { entered = resolve; }); const blocked = new Promise<void>(resolve => { release = resolve; });
+  await f.refreshLogin();
   f.remote.beforeMe = async () => { entered(); await blocked; };
   const submitted = answer(f, ["停止前收到的回答"]).then(value => ({ value }), error => ({ error }));
   await arrived;
@@ -783,7 +789,7 @@ it.each(["thread hide", "workspace hide", "forbidden", "not found", "rule disabl
   await (await f.connect()).send({ type: "session.open", requestId: "second", sessionId: "second", history: "replay", persistence: JSON.parse(agent.handle.slice(7)), config: { cwd: agent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
   if (reason === "thread hide") await f.server.hook("agent.archive.after", { agent: { ...agent, provider: "multica" } } as never, f.paseo);
   if (reason === "workspace hide") await f.server.hook("workspace.archive.after", { workspace: { id: agent.workspaceId } } as never, f.paseo);
-  if (reason === "forbidden" || reason === "not found") { f.remote.issueStatus = reason === "forbidden" ? 403 : 404; await f.sync(); }
+  if (reason === "forbidden" || reason === "not found") { f.remote.issueStatus = reason === "forbidden" ? 403 : 404; f.remote.visible = false; await f.sync(); }
   if (reason === "filter exit") { f.remote.visible = false; await f.sync(); }
   if (reason === "rule disabled") await f.server.rpc(workspaceEnable, { workspaceId: "workspace", enabled: false }, f.paseo);
   expect(f.events.filter(event => event.type === "session.permission_resolved").map(event => event.sessionId).sort()).toEqual([agent.id, "second"].sort());
@@ -795,10 +801,10 @@ it.each(["thread hide", "workspace hide", "forbidden", "not found", "rule disabl
 it.each(["account switch", "logout", "global auth failure", "offline"])("resolves previous connection permissions immediately on %s without touching cached attachments", async reason => {
   const f = await fixture(); f.comments[0].attachments = [attachment("identity")]; f.documents.set("identity", { ...card, answer_user_id: "me" }); await f.sync();
   const before = f.requests.filter(request => request.path.startsWith("/api/attachments/")).length;
-  if (reason === "account switch") f.remote.userId = "other";
+  if (reason === "account switch") { f.remote.userId = "other"; await f.refreshLogin(); }
   if (reason === "logout") await writeFile(f.configPath, "{}");
-  if (reason === "global auth failure") f.remote.meStatus = 401;
-  if (reason === "offline") f.remote.meStatus = 503;
+  if (reason === "global auth failure") { f.remote.meStatus = 401; await f.refreshLogin(); }
+  if (reason === "offline") { f.remote.meStatus = 503; await f.refreshLogin(); }
   await f.server.rpc(connectionStatus, {}, f.paseo);
   expect(f.events).toContainEqual({ type: "session.permission_resolved", sessionId: f.agents[1].id, permissionId: "multica:askuser:root:identity" });
   expect(f.cards()[0].data).toMatchObject({ title: card.title, questions: card.questions, readOnly: true, offline: true });
@@ -822,7 +828,7 @@ it("does not download a newly discovered attachment if the Thread is hidden duri
   const f = await fixture(); f.comments[0].attachments = [attachment("hidden-preflight")]; f.documents.set("hidden-preflight", card);
   let entered!: () => void; let release!: () => void; let checks = 0;
   const arrived = new Promise<void>(resolve => { entered = resolve; }); const blocked = new Promise<void>(resolve => { release = resolve; });
-  f.remote.beforeIssueCheck = async () => { if (++checks === 2) { entered(); await blocked; } };
+  f.remote.beforeIssueCheck = async () => { if (++checks === 1) { entered(); await blocked; } };
   const sync = f.sync(); await arrived;
   await f.server.hook("agent.archive.after", { agent: { ...f.agents[1], provider: "multica" } } as never, f.paseo);
   release(); await sync;
@@ -864,7 +870,7 @@ it.each([false, true])("ordinary chat remains a normal comment when host clearPe
 it("isolates the specified stable permission ID by provider session and connection when remote card IDs match", async () => {
   const f = await fixture(); f.comments[0].attachments = [attachment("same-id")]; f.documents.set("same-id", card); await f.sync();
   const original = pendingQuestion(f);
-  f.remote.userId = "another-account";
+  f.remote.userId = "another-account"; await f.refreshLogin();
   await f.server.rpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, f.paseo);
   const next = pendingQuestion(f);
   expect(next.sessionId).not.toBe(original.sessionId);

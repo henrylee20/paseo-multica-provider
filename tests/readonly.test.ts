@@ -57,7 +57,8 @@ async function fixture(active = false, idempotent = false) {
     response.setHeader("Content-Type", "application/json");
     const url = new URL(request.url!, "http://localhost");
     let body: unknown;
-    if (request.method === "POST") {
+    if (remote.authStatus !== 200) { response.statusCode = remote.authStatus; body = { error: "authentication failed" }; }
+    else if (request.method === "POST") {
       let text = ""; for await (const chunk of request) text += chunk;
       const input = text ? JSON.parse(text) : {};
       posts.push({ path: url.pathname, body: input, key: request.headers["idempotency-key"] as string, slug: request.headers["x-workspace-slug"] as string });

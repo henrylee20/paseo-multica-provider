@@ -8,7 +8,7 @@ import { findNativeDiscussion, type NativeHost } from "./native-host.js";
 import { StateStore } from "./state.js";
 import type { IssueMapping } from "./state.js";
 import type { StoredRow } from "./thread-state.js";
-import { remoteJson, workspaceSchema, type RemoteWorkspace } from "./sync.js";
+import { remoteJson, type RemoteWorkspace } from "./sync.js";
 import { discussionKeys } from "../shared/discussion.js";
 import type { threadAddress } from "../shared/threads.js";
 import type { AskUsers } from "./askuser.js";
@@ -114,7 +114,6 @@ export class ThreadSynchronizer {
       if (!response.ok) { await response.body?.cancel(); throw new Error("Comment history unavailable"); }
       if (response.headers.get("X-Comments-Truncated")?.toLowerCase() === "true") { await response.body?.cancel(); throw new Error("Remote comments were truncated"); }
       const page = z.array(commentSchema).parse(await response.json());
-      await connection.assertCurrent?.();
       for (const comment of page) {
         if (comment.issue_id !== issueId) throw new Error("Comment belongs to another issue");
         comments.set(comment.id, comment);
@@ -198,10 +197,9 @@ export class ThreadSynchronizer {
       assertWritableIssue(issue);
       const connection = await this.connection();
       if (connection.connectionKey !== address.connectionKey) throw new Error("Connection identity changed");
-      const workspaces = await remoteJson(connection, "/api/workspaces", z.array(workspaceSchema)) as RemoteWorkspace[];
-      const workspace = workspaces.find(value => value.id === issue.remoteWorkspaceId);
-      if (!workspace) throw new Error("Workspace unavailable");
-      await this.refresh(connection, workspace, address);
+      const workspace = (await this.store.read()).connections[address.connectionKey]?.projects[issue.remoteWorkspaceId];
+      if (!workspace?.slug) throw new Error("Workspace unavailable");
+      await this.refresh(connection, { id: issue.remoteWorkspaceId, name: workspace.name, slug: workspace.slug }, address);
       return { status: "ready" };
     } catch { return { status: thread.historyLoaded ? "cached" : "unavailable", message: "无法完整读取远端 Thread；保留已读的本地历史。" }; }
   }

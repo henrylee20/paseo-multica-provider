@@ -119,7 +119,7 @@ async function fixture(active = false, idempotent = false) {
     const agent = agents.find(agent => agent.labels["multica.discussion"] === rootId)!;
     await (await connect()).send({ type: "session.prompt", sessionId: agent.id, prompt: { clientMessageId, delivery, input: { type: "message", content: [{ type: "text", text }] } } });
   };
-  return { ...started, home, paseo, agents, events, canonical, nativeHistory, comments, runs, posts, lookups, receipts, deletedReceipts, connect, send, start, lookupFailure: (status?: number) => { lookupFailure = status; }, advance: (milliseconds: number) => { clock = new Date(clock.getTime() + milliseconds); }, beforeLookup: (handler: typeof beforeLookup) => { beforeLookup = handler; }, identity: (id: string) => { identity = id; }, beforeMe: (handler?: () => Promise<void>) => { beforeMe = handler; }, post: (handler: typeof post) => { post = handler; } };
+  return { ...started, home, paseo, agents, events, canonical, nativeHistory, comments, runs, posts, lookups, receipts, deletedReceipts, connect, send, start, lookupFailure: (status?: number) => { lookupFailure = status; }, advance: (milliseconds: number) => { clock = new Date(clock.getTime() + milliseconds); }, beforeLookup: (handler: typeof beforeLookup) => { beforeLookup = handler; }, identity: async (id: string) => { identity = id; await writeFile(join(home, ".multica/config.json"), JSON.stringify({ server_url: `http://127.0.0.1:${(http.address() as { port: number }).port}`, token: `synthetic-${id}` })); }, beforeMe: (handler?: () => Promise<void>) => { beforeMe = handler; }, post: (handler: typeof post) => { post = handler; } };
 }
 
 it("main discussion saves an ordinary text comment, preserves its identity and offers the new Thread", async () => {
@@ -266,6 +266,8 @@ it("native Stop fences a received input before its initial POST and preserves th
   let release: () => void = () => {}, reached: () => void = () => {};
   const blocked = new Promise<void>(resolve => { release = resolve; }), waiting = new Promise<void>(resolve => { reached = resolve; });
   f.beforeMe(async () => { reached(); await blocked; });
+  const configPath = join(f.home, ".multica/config.json");
+  await writeFile(configPath, `${await readFile(configPath, "utf8")}\n`);
   await f.send("root", "Old pending input", "stopped-input", "steer");
   await waiting;
   const thread = f.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
@@ -289,7 +291,7 @@ it("explicit mentions contain typed service identities and same-name agents rema
   await f.send("main", `Hello ${result.agents[1].reference}`, "typed-mention");
   await expect.poll(() => f.posts.length).toBe(1);
   expect(f.posts[0].body).toEqual({ content: "Hello [@Agent \\[A\\]](mention://agent/22345678-1234-4234-9234-123456789abc)", type: "comment" });
-  f.identity("other-user");
+  await f.identity("other-user");
   await expect(f.server.rpc(deliveryMentions, address, f.paseo)).rejects.toThrow("原 Multica 身份");
 });
 
@@ -298,7 +300,7 @@ it("unmapped sessions give configuration guidance and changed connections cannot
   await (await f.connect()).send({ type: "session.prompt", sessionId: "unmapped", prompt: { clientMessageId: "unmapped", delivery: "auto", input: { type: "message", content: [{ type: "text", text: "Do not create Issue" }] } } });
   expect(f.events).toContainEqual(expect.objectContaining({ type: "session.prompt_result", clientMessageId: "unmapped", result: expect.objectContaining({ type: "failed", error: expect.objectContaining({ message: expect.stringContaining("管理页") }) }) }));
   expect(f.posts).toEqual([]);
-  f.identity("other-user");
+  await f.identity("other-user");
   await f.send("main", "Old identity input", "identity-input");
   await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[0]?.status).toBe("failed");
   expect(f.posts).toEqual([]);
@@ -469,7 +471,7 @@ it("management verification never sends, and explicit resend creates one separat
   expect(next.clientMessageId).not.toBe(original.clientMessageId);
   expect(records[1].createdAt).not.toBe(original.createdAt);
   expect(f.posts).toHaveLength(2);
-  f.identity("another-user");
+  await f.identity("another-user");
   await expect(f.server.rpc(deliveryResend, { ...input, requestId: "wrong-identity" }, f.paseo)).rejects.toThrow("原 Multica 身份");
   expect(f.posts).toHaveLength(2);
 });

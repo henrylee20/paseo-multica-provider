@@ -10,7 +10,7 @@ import { connectionIdentitySchema, taskRuleSchema } from "../shared/contracts.js
 import { askuserAttachmentSchema, storedAskuserCardSchema } from "./askuser-state.js";
 import { issueAccessSchema } from "../shared/access.js";
 
-const projectSchema = z.object({ cwd: z.string(), name: z.string(), projectId: z.string().optional(), removed: z.boolean().optional() });
+const projectSchema = z.object({ cwd: z.string(), name: z.string(), slug: z.string().optional(), projectId: z.string().optional(), removed: z.boolean().optional() });
 const issueSchema = z.object({
   remoteWorkspaceId: z.string(), workspaceId: z.string(), cwd: z.string(), title: z.string(),
   projectId: z.string().optional(),

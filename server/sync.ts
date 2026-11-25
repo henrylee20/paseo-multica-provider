@@ -31,9 +31,7 @@ function stableId(...parts: string[]) { return createHash("sha256").update(JSON.
 export async function remoteJson(connection: AuthenticatedConnection, path: string, schema: z.ZodType, workspace?: RemoteWorkspace) {
   const response = await remoteFetch(connection, path, { headers: workspace ? { "X-Workspace-Slug": workspace.slug } : {} });
   if (!response.ok) { await response.body?.cancel(); throw new Error(`Multica read failed (HTTP ${response.status})`); }
-  const value = schema.parse(await response.json());
-  await connection.assertCurrent?.();
-  return value;
+  return schema.parse(await response.json());
 }
 
 export class SidebarSynchronizer {
@@ -210,14 +208,12 @@ export class SidebarSynchronizer {
     const response = await remoteFetch(connection, `/api/issues/${encodeURIComponent(issueId)}`, { headers: { "X-Workspace-Slug": workspace.slug } });
     if (response.ok) {
       const parsed = issueSchema.safeParse(await response.json());
-      await connection.assertCurrent?.();
       if (!parsed.success || parsed.data.id !== issueId || parsed.data.workspace_id !== workspace.id) return "unknown" as const;
       return "available" as const;
     }
     const status = response.status;
     let error = "";
     try { error = z.object({ error: z.string() }).parse(await response.json()).error; } catch { /* An HTML/generic route error is not object evidence. */ }
-    await connection.assertCurrent?.();
     if (status !== 403 && status !== 404) throw new Error(`Multica object read failed (HTTP ${status})`);
     const issue = (await this.options.store.read()).connections[connection.connectionKey]?.issues[issueId];
     const explicitIssueError = /\bissue\b/i.test(error) && /not found|forbidden|denied|permission/i.test(error);
@@ -307,7 +303,7 @@ export class SidebarSynchronizer {
       if (added.error || !added.project || added.project.projectKind === "git") throw new Error("Could not register non-Git native project");
       const projectId = added.project.projectId;
       await this.host.renameProject(projectId, workspace.name);
-      await this.options.store.update(state => { connectionState(state, connection.connectionKey).projects[workspaceId] = { cwd: projectDirectory, projectId, name: workspace.name }; });
+      await this.options.store.update(state => { connectionState(state, connection.connectionKey).projects[workspaceId] = { cwd: projectDirectory, projectId, name: workspace.name, slug: workspace.slug }; });
       for (const issue of issues) {
         const previous = (await this.options.store.read()).connections[connection.connectionKey]?.issues[issue.id];
         const title = [issue.identifier, issue.title].filter(Boolean).join(" ");

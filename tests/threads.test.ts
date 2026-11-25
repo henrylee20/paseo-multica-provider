@@ -174,7 +174,7 @@ async function fixture(initialRuns: Run[] = []) {
   cleanup.push(async () => { await provider?.close(); });
   const paseo = { hosts: { list: async () => ({ self: { serverId: "owning-daemon" } }) } } as unknown as PaseoApi;
   await server!.rpc(workspaceEnable, { workspaceId: "remote-workspace", enabled: true }, paseo);
-  return { ...started, native, timelines, droppedOriginals, nativeHistory, reconnect, comments, requests, paseo, home, start, connect, eventsReady, signal, runs, messages, providerEvents, failMessages: (value: boolean) => { failMessages = value; }, identity: (value: string) => { identity = value; }, failRuns: (value: boolean) => { failRuns = value; }, failDiscovery: (value: boolean) => { failDiscovery = value; }, discoveryPages: (pages: Comment[][]) => { discoveryPages = pages; }, truncated: (value: boolean) => { truncated = value; }, paginate: () => { paginate = true; }, failHistory: (value: boolean) => { failHistory = value; } };
+  return { ...started, native, timelines, droppedOriginals, nativeHistory, reconnect, comments, requests, paseo, home, start, connect, eventsReady, signal, runs, messages, providerEvents, failMessages: (value: boolean) => { failMessages = value; }, identity: async (value: string) => { identity = value; await writeFile(join(home, ".multica/config.json"), JSON.stringify({ server_url: `http://127.0.0.1:${(http.address() as { port: number }).port}`, token: `synthetic-${value}` })); }, failRuns: (value: boolean) => { failRuns = value; }, failDiscovery: (value: boolean) => { failDiscovery = value; }, discoveryPages: (pages: Comment[][]) => { discoveryPages = pages; }, truncated: (value: boolean) => { truncated = value; }, paginate: () => { paginate = true; }, failHistory: (value: boolean) => { failHistory = value; } };
 }
 
 it("discovers one stable native tab for a root and recursive replies without loading full background history", async () => {
@@ -595,7 +595,7 @@ it("retains full versioned task metadata without message access across restart a
   f.runs[0].status = "running"; f.runs[0].error = "Stale active snapshot";
   await f.server.rpc(syncBootstrap, {}, f.paseo);
   expect(await f.server.rpc(runOpen, address, f.paseo)).toMatchObject({ metadataRevision: changed.metadataRevision });
-  f.identity("other-user");
+  await f.identity("other-user");
   const messageReads = f.requests.filter(request => request.url.includes("/messages")).length;
   expect(await f.server.rpc(runOpen, address, f.paseo)).toMatchObject({ status: "cached", metadataRevision: changed.metadataRevision });
   expect(f.requests.filter(request => request.url.includes("/messages"))).toHaveLength(messageReads);
@@ -690,7 +690,7 @@ it("keeps cached run details readable after restart, remote failures, logout and
   f.messages.push({ task_id: "cache", issue_id: "other-issue", seq: 2, type: "text", content: "Wrong issue" });
   expect(await f.server.rpc(runOpen, address, f.paseo)).toMatchObject({ status: "cached", revision: opened.revision });
   f.messages.pop();
-  f.identity("another-user");
+  await f.identity("another-user");
   const beforeSwitch = f.requests.filter(request => request.url.includes("/messages")).length;
   expect(await f.server.rpc(runOpen, address, f.paseo)).toMatchObject({ status: "cached", revision: opened.revision });
   expect(await f.server.rpc(runRead, { ...address, revision: opened.revision!, offset: 0 }, f.paseo)).toEqual(original);
