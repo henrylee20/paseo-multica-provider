@@ -6,7 +6,7 @@ import { rebuildPreflight, rebuildStart, rebuildStatus, type RebuildBlocker, typ
 import { RuleButton } from "./ui-kit.js";
 
 type Preflight = { projects: number; workspaces: number; discussions: number; blockers: RebuildBlocker[] };
-export function DataRebuild({ connectionKey, ready, theme, onRefresh }: { connectionKey?: string; ready: boolean; theme: PluginSurfaceProps["theme"]; onRefresh(): void }) {
+export function DataRebuild({ connectionKey, ready, disabledReason, theme, onRefresh }: { connectionKey?: string; ready: boolean; disabledReason?: string; theme: PluginSurfaceProps["theme"]; onRefresh(): void }) {
   const preflight = useRpc(rebuildPreflight), start = useRpc(rebuildStart), read = useRpc(rebuildStatus);
   const [confirmation, setConfirmation] = useState<Preflight | null>(null);
   const [progress, setProgress] = useState<RebuildProgress | null>(null);
@@ -53,7 +53,7 @@ export function DataRebuild({ connectionKey, ready, theme, onRefresh }: { connec
   const text = { color: theme.colors.foreground };
   return <>
     <SettingsCard><SettingsAction label="重建数据" actionLabel={running ? "查看重建进度" : busy ? "正在预检…" : "重建数据"} disabled={!ready || busy}
-      hint={!ready ? "仅连接就绪时可重建数据，请先恢复 CLI 连接。" : "清理当前连接的 Paseo 数据并按保留的筛选规则重新导入。"} error={error} onPress={() => { void inspect(); }} /></SettingsCard>
+      hint={!ready ? disabledReason ?? "仅连接就绪时可重建数据，请先恢复 CLI 连接。" : "清理当前连接的 Paseo 数据并按保留的筛选规则重新导入。"} error={error} onPress={() => { void inspect(); }} /></SettingsCard>
     {confirmation ? <Modal open title="确认重建数据" onOpenChange={open => { if (!open && !busy) setConfirmation(null); }}>
       <Modal.Content>
         {confirmation.blockers.length ? <><Text style={text}>存在活跃 Run，请等待结束或先手动 Stop：</Text>{confirmation.blockers.map(group => <Text key={`${group.issueId}:${group.rootId}`} style={text}>{group.title} · {group.discussion}{"\n"}{group.runs.map(run => `${run.agentName} · ${run.runId} · ${run.status}`).join("\n")}</Text>)}</>

@@ -153,7 +153,7 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       drain: async () => {
         await deliveries.waitForPosts();
         await stops.close();
-        await runDetails.close();
+        await runDetails.reset();
         await threads.reset();
         await wakeups.reset();
         await askusers.reset();

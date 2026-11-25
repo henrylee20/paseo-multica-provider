@@ -55,14 +55,18 @@ export class RunSynchronizer {
     const agents = records.length ? await workspaceAgents(connection, workspace) : [];
     const snapshot = (await this.store.read()).connections[connection.connectionKey].issues[issueId];
     const source = (run: z.infer<typeof remoteRunSchema>) => run.trigger_comment_id ??
-      [...(run.coalesced_comment_ids ?? []), ...(run.delivered_comment_ids ?? []), ...(run.supplement_comment_ids ?? []),
-        ...Object.entries(snapshot.commentSourceTaskIds).filter(([, taskId]) => taskId === run.id).map(([id]) => id)]
+      [...(run.coalesced_comment_ids ?? []), ...(run.delivered_comment_ids ?? []), ...(run.supplement_comment_ids ?? [])]
         .sort((a, b) => {
           const first = sourceTime(snapshot.commentCreatedAt[a]) ?? 0n, second = sourceTime(snapshot.commentCreatedAt[b]) ?? 0n;
           return first < second ? -1 : first > second ? 1 : a.localeCompare(b);
         })[0];
+    const generated = new Map<string, string[]>();
+    for (const [commentId, runId] of Object.entries(snapshot.commentSourceTaskIds)) {
+      const ids = generated.get(runId) ?? []; ids.push(commentId); generated.set(runId, ids);
+    }
+    const triggerAuthors = new Map(records.map(run => [run.id, snapshot.commentAuthors[source(run)]]));
     const members = records.some(run => {
-      const author = snapshot.commentAuthors[source(run)];
+      const author = triggerAuthors.get(run.id);
       return author?.type === "member" && author.id !== connection.userId;
     }) ? await workspaceMembers(connection, workspace) : [];
 
@@ -72,13 +76,14 @@ export class RunSynchronizer {
         const previous = issue.runs[run.id];
         // A Run ID is one execution: a stale read must not reopen its terminal cycle.
         const staleActive = previous && !isActiveRun(previous.status) && isActiveRun(run.status);
-        const generatedCommentIds = Object.entries(issue.commentSourceTaskIds).filter(([, taskId]) => taskId === run.id).map(([commentId]) => commentId);
+        const generatedCommentIds = generated.get(run.id) ?? [];
         issue.runs[run.id] = { agentId: run.agent_id, agentName: agents.find(agent => agent.id === run.agent_id)?.name ?? `Agent ${run.agent_id}`,
+          markerProjected: previous?.markerProjected,
           status: staleActive ? previous.status : run.status,
           triggerAuthor: (() => {
-            const author = snapshot.commentAuthors[source(run)];
+            const author = triggerAuthors.get(run.id);
             return author?.type === "member" ? members.find(member => member.user_id === author.id)?.name ?? (author.id === connection.userId ? connection.identity?.user.name || "我" : `成员 ${author.id}`)
-              : author ? agents.find(agent => agent.id === author.id)?.name ?? `Agent ${author.id}` : previous?.triggerAuthor;
+              : author?.type === "system" ? "系统" : author ? agents.find(agent => agent.id === author.id)?.name ?? `Agent ${author.id}` : undefined;
           })(),
           ownerRootId: previous?.ownerRootId ?? owner(issue, run, generatedCommentIds), generatedCommentIds, triggerCommentId: run.trigger_comment_id,
           coalescedCommentIds: run.coalesced_comment_ids ?? [], deliveredCommentIds: run.delivered_comment_ids ?? undefined,
@@ -92,12 +97,11 @@ export class RunSynchronizer {
     const issue = (await this.store.read()).connections[connection.connectionKey].issues[issueId];
     for (const rootId of ["main", ...Object.keys(issue.threads)]) await this.observe({ connectionKey: connection.connectionKey, issueId, rootId });
   }
-  async observe(address: RunAddress): Promise<{ status: "ready" | "unavailable" }> {
+  async observe(address: RunAddress): Promise<void> {
     const issue = (await this.store.read()).connections[address.connectionKey]?.issues[address.issueId];
-    if (!issue || (address.rootId !== "main" && !issue.threads[address.rootId])) return { status: "unavailable" };
+    if (!issue || (address.rootId !== "main" && !issue.threads[address.rootId])) return;
     const owned = Object.fromEntries(Object.entries(issue.runs).filter(([, run]) => run.ownerRootId === address.rootId));
     for (const listener of this.listeners.get(key(address)) ?? []) listener(owned);
-    return { status: "ready" };
   }
   close() { this.listeners.clear(); }
 }

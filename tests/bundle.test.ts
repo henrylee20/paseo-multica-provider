@@ -1473,7 +1473,7 @@ it("does not announce task archiving when disabling a workspace with no imported
 });
 
 it.each(["offline", "missing_config"])("disables data rebuild with a reason while connection is %s", async status => {
-  const h = await settingsHarness(name => name === "connection.status" ? { ...readyStatus, status } : name === "rebuild.status" ? { status: "idle" } : { workspaces: [] });
+  const h = await settingsHarness(name => name === "connection.status" ? { ...readyStatus, status } : name === "rebuild.status" ? { status: "idle" } : name === "profile.list" ? { profiles: [] } : { workspaces: [] });
   try {
     await vi.waitFor(() => { h.render(); expect(h.action("重建数据").disabled).toBe(true); });
     expect(h.render()).toContain("仅连接就绪时可重建数据");
@@ -1534,4 +1534,13 @@ it("reopening settings resumes a running rebuild and displays a completed result
       expect(h.calls.some(call => call.name === "rebuild.start")).toBe(false);
     } finally { h.dispose(); }
   }
+});
+
+it("disables data rebuild until profile cleanup completes, even when the new identity is ready", async () => {
+  const h = await settingsHarness(name => name === "connection.status" ? { ...readyStatus, sync: { status: "syncing", stage: "purging", completedWorkspaces: 0, enabledWorkspaces: 0 } }
+    : name === "profile.list" ? { profiles: [] } : name === "workspace.list" ? { connectionKey: "current", workspaces: [] } : name === "rebuild.status" ? { status: "idle" } : undefined);
+  try {
+    await vi.waitFor(() => { h.render(); expect(h.action("重建数据").disabled).toBe(true); expect(h.render()).toContain("请等待旧 profile 本地数据清理完成"); });
+    expect(h.calls.some(call => call.name === "rebuild.start" || call.name === "rebuild.preflight")).toBe(false);
+  } finally { h.dispose(); }
 });

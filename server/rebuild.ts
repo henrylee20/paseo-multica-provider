@@ -31,6 +31,7 @@ export class DataRebuild {
     private readonly sync: SidebarSynchronizer, private readonly lifecycle: DiscussionLifecycle, private readonly details: RunDetails) {}
   status(connectionKey: string) { return { ...this.progress.get(connectionKey) ?? idle() }; }
   private async current(connectionKey: string) {
+    await this.sync.assertNoPurge();
     const connection = await this.connection();
     if (connection.connectionKey !== connectionKey) throw new Error("连接已变化，请刷新设置页。");
     return connection;
@@ -53,9 +54,10 @@ export class DataRebuild {
     const agents = (await directory(cursor => host.fetchAgents({ filter: { includeArchived: true, includeBackground: true, includeInternal: true, labels: { [discussionKeys.connection]: connectionKey } }, page: { limit: 100, cursor } })))
       .map(entry => entry.agent).filter(agent => agent.provider === "multica" && agent.labels[discussionKeys.connection] === connectionKey && agent.labels[discussionKeys.issue] && agent.labels[discussionKeys.discussion]);
     const active = await directory(cursor => host.fetchWorkspaces({ filter: { includeBackground: true, includeInternal: true }, page: { limit: 100, cursor } }));
-    const workspaceIds = new Set(agents.flatMap(agent => agent.workspaceId ? [agent.workspaceId] : []));
-    for (const issue of Object.values(local?.issues ?? {})) if (issue.workspaceCreated || active.some(workspace => workspace.id === issue.workspaceId)) workspaceIds.add(issue.workspaceId);
+    const knownWorkspaceIds = new Set(agents.flatMap(agent => agent.workspaceId ? [agent.workspaceId] : []));
+    for (const issue of Object.values(local?.issues ?? {})) knownWorkspaceIds.add(issue.workspaceId);
     const prefix = join(this.store.directory, "placeholders", connectionKey.slice(0, 20)) + sep;
+    const workspaceIds = new Set(active.filter(workspace => knownWorkspaceIds.has(workspace.id) || workspace.workspaceDirectory?.startsWith(prefix)).map(workspace => workspace.id));
     const projects = (await host.listProjects()).projects.filter(project => project.projectKind === "non_git" &&
       (project.projectRootPath.startsWith(prefix) || Object.values(local?.projects ?? {}).some(cached => cached.projectId === project.projectId && cached.cwd === project.projectRootPath)))
       .filter(project => !active.some(workspace => workspace.projectId === project.projectId && !workspaceIds.has(workspace.id)));
@@ -88,14 +90,14 @@ export class DataRebuild {
         progress.step = "发现插件记录";
         const found = await this.discover(host, connectionKey);
         release = await this.lifecycle.hold(found.agents.map(agent => ({ connectionKey, issueId: agent.labels[discussionKeys.issue], rootId: agent.labels[discussionKeys.discussion] })));
-        progress.step = "删除讨论";
+        progress.step = "删除插件讨论";
         for (const agent of found.agents) await host.deleteAgent(agent.id);
-        progress.step = "归档工作区";
+        progress.step = "归档 Paseo 工作区";
         for (const workspaceId of found.workspaceIds) {
           const result = await host.archiveWorkspace(workspaceId);
           if (result.error) throw new Error(result.error);
         }
-        progress.step = "删除项目";
+        progress.step = "删除 Paseo 项目";
         for (const project of found.projects) {
           // Recheck after archive: a user may have created a workspace meanwhile.
           const active = await directory(cursor => host.fetchWorkspaces({ filter: { includeBackground: true, includeInternal: true }, page: { limit: 100, cursor } }));
@@ -103,16 +105,14 @@ export class DataRebuild {
         }
         progress.step = "清空本地状态";
         await this.store.update(state => {
-          const rules = connectionState(state, connectionKey).rules;
-          state.connections[connectionKey] = { rules, projects: {}, issues: {} };
+          const local = connectionState(state, connectionKey);
+          state.connections[connectionKey] = { rules: local.rules, rebuildGeneration: (local.rebuildGeneration ?? 0) + 1, projects: {}, issues: {} };
         });
         release(); release = undefined;
         this.details.resume(connectionKey);
         progress.stage = "importing"; progress.step = "按筛选规则导入";
         await this.sync.reimport(connectionKey, (completed, total) => { progress.completed = completed; progress.total = total; });
         progress.status = "completed"; progress.message = `重建完成，已导入 ${progress.completed} 个任务。`;
-      } catch (error) {
-        progress.status = "failed"; progress.message = `${progress.step}失败：${error instanceof Error ? error.message : String(error)}`;
       } finally { release?.(); this.details.resume(); }
     }).catch(error => { progress.status = "failed"; progress.message = `${progress.step}失败：${error instanceof Error ? error.message : String(error)}`; })
       .finally(() => { this.operation = undefined; });

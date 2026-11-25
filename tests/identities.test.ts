@@ -1,3 +1,4 @@
+import { rebuildPreflight, rebuildStart } from "../shared/rebuild.js";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
@@ -36,6 +37,8 @@ async function fixture(options: { askuser?: boolean; empty?: boolean } = {}) {
   const credentials = [randomUUID(), randomUUID(), randomUUID()];
   const requests: Array<{ path: string; actor: string; method: string }> = [];
   const posts: Array<{ actor: string; path: string }> = [];
+  const runState = { status: "running" };
+  const messages: Array<{ task_id: string; issue_id: string; seq: number; type: string; content: string }> = [];
   let beforeIdentity: (() => Promise<void>) | undefined;
   const remote = async () => {
     const http = createServer(async (request, response) => {
@@ -53,7 +56,8 @@ async function fixture(options: { askuser?: boolean; empty?: boolean } = {}) {
       else if (url.pathname === "/api/issues")
         body = { issues: [{ id: "issue", workspace_id: "workspace", title: "Task", description: "Description", status: "todo" }], total: 1 };
       else if (url.pathname === "/api/issues/issue/task-runs")
-        body = [{ id: "run", issue_id: "issue", agent_id: "agent", status: "running", trigger_comment_id: "root" }];
+        body = [{ id: "run", issue_id: "issue", agent_id: "agent", status: runState.status, trigger_comment_id: "root" }];
+      else if (url.pathname === "/api/tasks/run/messages") body = messages;
       else if (url.pathname === "/api/issues/issue/comments")
         body = [{ id: "root", issue_id: "issue", parent_id: null, content: "Original Lin comment", author_id: "me", author_type: "member", type: "comment", created_at: "2026-11-24T10:00:00Z", updated_at: "2026-11-24T10:00:00Z", attachments: options.askuser ? [{ id: "question", filename: "askuser.json", content_type: "application/json", download_url: "/api/attachments/question/download" }] : [] }];
       else if (url.pathname === "/api/attachments/question/download") body = { version: "1", title: "发布确认", questions: [{ id: "reason", type: "text", title: "理由" }] };
@@ -142,7 +146,7 @@ async function fixture(options: { askuser?: boolean; empty?: boolean } = {}) {
     const agent = agents.find(agent => agent.labels["multica.connection"] === address().connectionKey && agent.labels["multica.discussion"] === "root")!;
     await (await connect()).send({ type: "session.prompt", sessionId: agent.id, prompt: { clientMessageId, delivery: "steer", input: { type: "message", content: [{ type: "text", text: "Preserve original input" }] } } });
   };
-  return { home, get server() { return server; }, host, paseo,
+  return { runState, messages, home, get server() { return server; }, host, paseo,
     restart: async (legacy = false) => {
       await provider?.close(); provider = undefined; await dispose();
       if (legacy) {
@@ -456,4 +460,25 @@ it.each(["different root", "git", "missing project IDs"])("archives plugin works
   expect(f.host.archiveWorkspace).toHaveBeenCalledExactlyOnceWith(workspace.id);
   expect(f.workspaces.find(workspace => workspace.id === "user-workspace")?.archived).toBeUndefined();
   expect(JSON.parse(await f.persisted()).connections).toEqual({});
+});
+
+it("rejects rebuild during profile purge, retains its owner, and keeps Run polling alive for the next profile", async () => {
+  const f = await fixture();
+  const connectionKey = f.address().connectionKey;
+  await f.login(1, f.primary.apiUrl, "office");
+  const gate = pause(), remove = f.host.deleteAgent.getMockImplementation()!;
+  f.host.deleteAgent.mockImplementation(async id => { await gate.handler(); await remove(id); });
+  f.server.setSettings(multicaSettings.id, { profile: "office" });
+  try {
+    await gate.waiting;
+    expect(JSON.parse(await f.persisted()).owner).toEqual({ profile: "" });
+    await expect(f.server.rpc(rebuildPreflight, { connectionKey }, f.paseo)).rejects.toThrow("清理旧 profile");
+    await expect(f.server.rpc(rebuildStart, { connectionKey }, f.paseo)).rejects.toThrow("清理旧 profile");
+  } finally { gate.release(); }
+  await waitForSync(f.server, f.paseo);
+  expect(JSON.parse(await f.persisted()).owner).toEqual({ profile: "office" });
+  await f.server.syncRpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, f.paseo);
+  const parent = f.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
+  f.messages.push({ task_id: "run", issue_id: "issue", seq: 1, type: "text", content: "New profile periodic output" });
+  await expect.poll(() => f.events.some(event => event.type === "timeline.item" && event.sessionId === `${parent.id}:run:run` && event.item.type === "assistant_message" && event.item.text === "New profile periodic output"), { timeout: 4000 }).toBe(true);
 });

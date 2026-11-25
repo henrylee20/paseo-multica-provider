@@ -55,6 +55,7 @@ async function fixture(initialRuns: Run[] = []) {
     else if (url.pathname === "/api/issues/issue/task-runs") {
       if (failRuns) { response.statusCode = 503; body = {}; } else body = runs;
     }
+    else if (/^\/api\/tasks\/[^/]+\/messages$/.test(url.pathname)) body = [];
     else if (url.pathname === "/api/issues/issue/comments") {
       if (!url.searchParams.has("thread") && failDiscovery) { response.statusCode = 503; response.end("{}"); return; }
       if (url.searchParams.has("thread")) {

@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { mkdir, readdir, rm, rmdir } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { PaseoApi } from "@getpaseo/client";
@@ -190,6 +190,7 @@ export class SidebarSynchronizer {
   }
   /** Let the current sync yield at its next rule-version boundary, then run alone. */
   async exclusive(paseo: PaseoApi, operation: (host: NativeHost) => Promise<void>) {
+    await this.assertNoPurge();
     if (this.paused) throw new Error("数据重建正在进行。");
     this.paused = true;
     this.ruleVersion++;
@@ -202,7 +203,11 @@ export class SidebarSynchronizer {
     }
   }
   async reimport(connectionKey: string, progress: (completed: number, total: number) => void) {
-    await this.sync(this.ruleVersion, { connectionKey, progress });
+    await this.assertNoPurge();
+    const version = this.ruleVersion;
+    await this.sync(version, { connectionKey, progress });
+    await this.assertNoPurge();
+    if (version !== this.ruleVersion) throw new Error("重建期间 profile 已变化，请重新重建。");
   }
   /** Reconcile a saved comment without changing the client's selected discussion. */
   reconcile(): Promise<void> { return this.expectedServerId ? this.triggerSync() : Promise.resolve(); }
@@ -239,7 +244,8 @@ export class SidebarSynchronizer {
   }
   private mutate(operation: () => Promise<void>) {
     const result = this.mutationPending.then(async () => {
-      if (this.closed || this.paused) throw new Error("数据重建期间暂不能修改筛选规则。");
+      if (this.closed) return;
+      if (this.paused) throw new Error("数据重建期间暂不能修改筛选规则。");
       await operation();
       this.ruleVersion++;
       this.startTimer();
@@ -432,8 +438,9 @@ export class SidebarSynchronizer {
       throw error;
     } finally { for (const release of releases.reverse()) release(); }
   }
-private async sync(version: number, rebuild?: { connectionKey: string; progress: (completed: number, total: number) => void }) {
-    await this.purge();
+  private async sync(version: number, rebuild?: { connectionKey: string; progress: (completed: number, total: number) => void }) {
+    if (rebuild) await this.assertNoPurge();
+    else await this.purge();
     if (!this.host) this.host = await this.options.connectHost();
     await this.assertOwningDaemon();
     if (version !== this.ruleVersion) return;
@@ -519,10 +526,12 @@ private async sync(version: number, rebuild?: { connectionKey: string; progress:
         // Persist intent before native creation. A retry uses the same valid native ID.
         await this.options.store.update(state => {
           const local = connectionState(state, connection.connectionKey);
+          const generation = local.rebuildGeneration ?? 0;
+          const newWorkspaceId = `wks_${stableId(connection.connectionKey, issue.id,
+            ...(rebuildWorkspace ? [projectId] : []), ...(generation > 0 ? [String(generation)] : [])).slice(0, 16)}`;
           local.issues[issue.id] = issueSchema.parse({ ...local.issues[issue.id], remoteWorkspaceId: workspaceId,
             projectId,
-            workspaceId: rebuildWorkspace ? `wks_${stableId(connection.connectionKey, issue.id, projectId).slice(0, 16)}`
-              : local.issues[issue.id]?.workspaceId ?? (rebuild ? `wks_${randomUUID().replaceAll("-", "").slice(0, 16)}` : `wks_${stableId(connection.connectionKey, issue.id).slice(0, 16)}`),
+            workspaceId: rebuildWorkspace ? newWorkspaceId : local.issues[issue.id]?.workspaceId ?? newWorkspaceId,
             workspaceCreated: rebuildWorkspace ? false : local.issues[issue.id]?.workspaceCreated,
             cwd, title, description: issue.description ?? "", updatedAt: issue.updated_at });
         });

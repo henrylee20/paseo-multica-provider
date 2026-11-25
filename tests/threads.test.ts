@@ -27,7 +27,7 @@ function conversationRows(rows: ProviderTimelineItem[] | undefined) {
 
 type Run = { created_at?: string; id: string; issue_id: string; agent_id: string; status: string; trigger_comment_id?: string | null; coalesced_comment_ids?: string[]; delivered_comment_ids?: string[]; supplement_comment_ids?: string[]; error?: string | null; failure_reason?: string | null; work_dir?: string | null; relative_work_dir?: string | null };
 type RunMessage = { task_id: string; issue_id: string; seq: number; type: "text" | "thinking" | "tool_use" | "tool_result" | "error"; call_id?: string; tool?: string; content?: string; input?: Record<string, unknown>; output?: string; output_truncated?: boolean };
-async function fixture(initialRuns: Run[] = [], openOnImport = true, initialMessages: RunMessage[] = []) {
+async function fixture(initialRuns: Run[] = [], openOnImport = true, initialMessages: RunMessage[] = [], subsessions = true) {
   const home = await mkdtemp(join(tmpdir(), "multica-threads-"));
   cleanup.push(() => rm(home, { recursive: true, force: true }));
   const requests: Array<{ url: string; method: string; slug?: string }> = [];
@@ -35,6 +35,7 @@ async function fixture(initialRuns: Run[] = [], openOnImport = true, initialMess
   const runs = [...initialRuns];
   const messages: RunMessage[] = [...initialMessages];
   let failMessages = false;
+  let beforeMessages: (() => Promise<void>) | undefined;
   let identity = "member-me";
   let failRuns = false;
   let failDiscovery = false;
@@ -42,7 +43,7 @@ async function fixture(initialRuns: Run[] = [], openOnImport = true, initialMess
   let paginate = false;
   let truncated = false;
   let discoveryPages: Comment[][] | undefined;
-  const http = createServer((request, response) => {
+  const http = createServer(async (request, response) => {
     requests.push({ url: request.url!, method: request.method!, slug: request.headers["x-workspace-slug"] as string });
     response.setHeader("Content-Type", "application/json");
     const url = new URL(request.url!, "http://localhost");
@@ -57,6 +58,7 @@ async function fixture(initialRuns: Run[] = [], openOnImport = true, initialMess
       if (failRuns) { response.statusCode = 503; body = {}; } else body = runs;
     }
     else if (/^\/api\/tasks\/[^/]+\/messages$/.test(url.pathname)) {
+      await beforeMessages?.();
       if (failMessages) { response.statusCode = 503; body = {}; }
       else body = messages.filter(message => message.task_id === decodeURIComponent(url.pathname.split("/")[3]) && (!url.searchParams.has("since") || message.seq > Number(url.searchParams.get("since"))));
     }
@@ -120,7 +122,7 @@ async function fixture(initialRuns: Run[] = [], openOnImport = true, initialMess
   let provider: ProviderConnection | undefined;
   async function connect() {
     if (provider) return provider;
-    provider = await server.providers.get("multica")!.connect({ versions: [1], capabilities: ["session.persistence", "session.subsession", "session.list"] });
+    provider = await server.providers.get("multica")!.connect({ versions: [1], capabilities: ["session.persistence", ...(subsessions ? ["session.subsession"] : []), "session.list"] });
     provider.onEvent(event => {
       providerEvents.push(event);
       if (event.type === "session.opened" && event.parentSessionId) timelines.set(event.sessionId, []);
@@ -177,7 +179,7 @@ async function fixture(initialRuns: Run[] = [], openOnImport = true, initialMess
   cleanup.push(async () => { await provider?.close(); });
   const paseo = { hosts: { list: async () => ({ self: { serverId: "owning-daemon" } }) } } as unknown as PaseoApi;
   await server!.syncRpc(workspaceEnable, { workspaceId: "remote-workspace", enabled: true }, paseo);
-  return { ...started, native, timelines, droppedOriginals, nativeHistory, reconnect, comments, requests, paseo, home, start, connect, eventsReady, signal, runs, messages, providerEvents, failMessages: (value: boolean) => {
+  return { blockMessages: (handler?: () => Promise<void>) => { beforeMessages = handler; }, ...started, native, timelines, droppedOriginals, nativeHistory, reconnect, comments, requests, paseo, home, start, connect, eventsReady, signal, runs, messages, providerEvents, failMessages: (value: boolean) => {
     failMessages = value;
   }, identity: async (value: string) => {
     identity = value;
@@ -643,4 +645,82 @@ it("rejects cross-Issue execution messages and keeps previously cached child con
   await resync(f.server, f.paseo, "remote-workspace");
   const rows = f.timelines.get(`${f.native.agents[1].id}:run:safe`)!;
   expect(rows.filter(row => row.type === "assistant_message").map(row => row.text)).toEqual(["Authorized"]);
+});
+
+it("does not render null or empty Run metadata as errors or paths", async () => {
+  const f = await fixture([{ id: "healthy", issue_id: "issue", agent_id: "owned-agent", status: "completed", trigger_comment_id: "root", error: null, failure_reason: null, work_dir: null, relative_work_dir: "" }]);
+  const rows = f.timelines.get(`${f.native.agents[1].id}:run:healthy`)!;
+  expect(rows.filter(row => row.id.startsWith("run-metadata:"))).toEqual([]);
+  expect(rows.filter(row => row.type === "error")).toEqual([]);
+});
+
+it("leaves running child teardown to the host when its parent closes", async () => {
+  const f = await fixture([{ id: "live-close", issue_id: "issue", agent_id: "owned-agent", status: "running", trigger_comment_id: "root" }]);
+  const parent = f.native.agents[1].id, child = `${parent}:run:live-close`;
+  const start = f.providerEvents.length;
+  await (await f.connect()).send({ type: "session.close", requestId: "close-parent", sessionId: parent });
+  expect(f.providerEvents.slice(start)).toContainEqual({ type: "session.closed", sessionId: parent });
+  expect(f.providerEvents.slice(start).some(event => "sessionId" in event && event.sessionId === child)).toBe(false);
+  expect(f.requests.every(request => request.method === "GET")).toBe(true);
+});
+
+it("skip restoration emits markers discovered while closed exactly once and preserves them across restart", async () => {
+  const f = await fixture([{ id: "old", issue_id: "issue", agent_id: "owned-agent", status: "completed", trigger_comment_id: "root" }]);
+  const parent = f.native.agents[1], provider = await f.connect();
+  await provider.send({ type: "session.close", requestId: "close", sessionId: parent.id });
+  f.runs.push({ id: "while-closed", issue_id: "issue", agent_id: "owned-agent", status: "completed", trigger_comment_id: "root" });
+  await resync(f.server, f.paseo, "remote-workspace");
+  const open = (sessionId: string) => provider.send({ type: "session.open", requestId: sessionId, sessionId, history: "skip", persistence: JSON.parse(parent.handle.slice(7)), config: { cwd: parent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
+  await open("skip-first");
+  expect(f.timelines.get("skip-first")!.filter(row => row.type === "tool_call").map(row => row.id)).toEqual(["multica:run-marker:while-closed"]);
+  await resync(f.server, f.paseo, "remote-workspace");
+  await provider.send({ type: "session.close", requestId: "close-again", sessionId: "skip-first" });
+  await f.dispose(); f.start(); await f.reconnect();
+  const replayed = f.providerEvents.filter(event => event.type === "timeline.item" && event.sessionId === parent.id && event.item.id === "multica:run-marker:while-closed");
+  expect(replayed).toHaveLength(0);
+  expect(f.providerEvents.filter(event => event.type === "timeline.item" && event.item.id === "multica:run-marker:while-closed")).toHaveLength(1);
+});
+
+it("does not poll execution details when subsessions are not negotiated", async () => {
+  const f = await fixture([{ id: "unsupported", issue_id: "issue", agent_id: "owned-agent", status: "running", trigger_comment_id: "root" }], true, [], false);
+  expect((await f.connect()).capabilities).not.toContain("session.subsession");
+  await resync(f.server, f.paseo, "remote-workspace");
+  await new Promise(resolve => setTimeout(resolve, 2200));
+  expect(f.requests.some(request => request.url.includes("/messages"))).toBe(false);
+  expect(f.providerEvents.some(event => event.type === "session.opened" && event.parentSessionId)).toBe(false);
+});
+
+it("waits for terminal fill before emitting a missing prefix and ending the child", async () => {
+  const base = { task_id: "gap-end", issue_id: "issue" };
+  const f = await fixture([{ id: "gap-end", issue_id: "issue", agent_id: "owned-agent", status: "running", trigger_comment_id: "root" }], true, [{ ...base, seq: 3, type: "text", content: "Third" }]);
+  const child = `${f.native.agents[1].id}:run:gap-end`;
+  expect(f.timelines.get(child)!.some(row => row.type === "assistant_message")).toBe(false);
+  let release!: () => void, entered!: () => void;
+  const blocked = new Promise<void>(resolve => { release = resolve; }), arrived = new Promise<void>(resolve => { entered = resolve; });
+  f.blockMessages(async () => { entered(); await blocked; });
+  f.runs[0].status = "completed";
+  const syncing = resync(f.server, f.paseo, "remote-workspace");
+  try {
+    await arrived;
+    expect(f.timelines.get(child)!.some(row => row.type === "assistant_message")).toBe(false);
+    expect(f.providerEvents.filter(event => event.type === "session.turn" && event.sessionId === child)).toMatchObject([{ state: "started" }]);
+    f.messages.push({ ...base, seq: 1, type: "text", content: "First" }, { ...base, seq: 2, type: "text", content: "Second" });
+  } finally { release(); }
+  await syncing;
+  expect(f.timelines.get(child)!.filter(row => row.type === "assistant_message").map(row => row.text)).toEqual(["First", "Second", "Third"]);
+  const events = f.providerEvents.filter(event => "sessionId" in event && event.sessionId === child);
+  expect(events.at(-1)).toMatchObject({ type: "session.turn", state: "completed" });
+  const reads = f.requests.filter(request => request.url.includes("/messages")).length;
+  await resync(f.server, f.paseo, "remote-workspace");
+  expect(f.requests.filter(request => request.url.includes("/messages"))).toHaveLength(reads);
+});
+
+it("labels system triggers and never treats a Run's own generated comment as its trigger", async () => {
+  const f = await fixture();
+  f.comments.push({ ...comment("system-trigger", null, "System", "system-id", "system"), type: "system" }, { ...comment("own-output", null, "Output", "owned-agent", "agent"), source_task_id: "generated" });
+  f.runs.push({ id: "system-run", issue_id: "issue", agent_id: "owned-agent", status: "completed", trigger_comment_id: "system-trigger" }, { id: "generated", issue_id: "issue", agent_id: "owned-agent", status: "completed", created_at: stamp });
+  await resync(f.server, f.paseo, "remote-workspace");
+  expect(f.providerEvents).toContainEqual(expect.objectContaining({ type: "session.opened", description: "由 系统 的评论触发" }));
+  const generated = f.providerEvents.find(event => event.type === "session.opened" && event.sessionId.endsWith(":run:generated"));
+  expect(generated).toMatchObject({ description: expect.stringMatching(/^任务级执行 · 11-24 /) });
 });

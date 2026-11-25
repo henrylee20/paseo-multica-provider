@@ -6,13 +6,12 @@ import { StateStore, cachedWorkspace } from "./state.js";
 import { remoteJson } from "./sync.js";
 
 type Address = RunAddress & { runId: string };
-const key = (address: Address) => JSON.stringify([address.connectionKey, address.issueId, address.rootId, address.runId]);
+const key = (address: RunAddress, runId?: string) => JSON.stringify([address.connectionKey, address.issueId, address.rootId, ...(runId === undefined ? [] : [runId])]);
 
 /** Only discussions actually opened in this process refresh remote output. */
 export class RunDetails {
   private readonly pending = new Map<string, Promise<void>>();
   private readonly opened = new Map<string, RunAddress>();
-  private readonly terminal = new Set<string>();
   private readonly timer: ReturnType<typeof setInterval>;
   private paused = false;
   constructor(private readonly store: StateStore, private readonly connection: () => Promise<AuthenticatedConnection>) {
@@ -20,7 +19,7 @@ export class RunDetails {
     this.timer.unref?.();
   }
   openDiscussion(address: RunAddress) {
-    this.opened.set(JSON.stringify(address), address);
+    this.opened.set(key(address), address);
     void this.refreshOpened().catch(() => {});
   }
   async refreshOpened() {
@@ -30,11 +29,11 @@ export class RunDetails {
     await Promise.all([...this.opened.values()].flatMap(address => {
       const issue = state.connections[address.connectionKey]?.issues[address.issueId];
       return Object.entries(issue?.runs ?? {}).filter(([, run]) => run.ownerRootId === address.rootId).map(async ([runId, run]) => {
-        const target = { ...address, runId }, id = key(target);
-        if (this.terminal.has(id)) return;
+        const target = { ...address, runId }, id = key(address, runId);
+        if (!isActiveRun(run.status) && issue?.runDetails[runId]?.finalized) return;
         let operation = this.pending.get(id);
         if (!operation) {
-          operation = this.refresh(target).then(() => { if (!isActiveRun(run.status)) this.terminal.add(id); }).finally(() => this.pending.delete(id));
+          operation = this.refresh(target).finally(() => this.pending.delete(id));
           this.pending.set(id, operation);
         }
         await operation.catch(() => {}); // Keep the cache; retry unsuccessful terminal reads too.
@@ -45,7 +44,6 @@ export class RunDetails {
   resume(connectionKey?: string) {
     if (connectionKey) {
       for (const [id, address] of this.opened) if (address.connectionKey === connectionKey) this.opened.delete(id);
-      for (const id of this.terminal) if (JSON.parse(id)[0] === connectionKey) this.terminal.delete(id);
     }
     this.paused = false;
   }
@@ -70,10 +68,12 @@ export class RunDetails {
     if (messages.some(message => message.task_id !== address.runId || message.issue_id !== address.issueId)) throw new Error("Run message identity mismatch");
     const unique = new Map(cache?.messages.map(message => [message.seq, message]));
     for (const message of messages) if (!unique.has(message.seq)) unique.set(message.seq, message);
-    if (cache && unique.size === cache.messages.length) return;
+    const finalized = !isActiveRun(issue.runs[address.runId].status);
+    if (cache && unique.size === cache.messages.length && (!finalized || cache.finalized)) return;
     await this.store.update(state => {
-      state.connections[address.connectionKey].issues[address.issueId].runDetails[address.runId] = { messages: [...unique.values()].sort((a, b) => a.seq - b.seq) };
+      state.connections[address.connectionKey].issues[address.issueId].runDetails[address.runId] = { messages: [...unique.values()].sort((a, b) => a.seq - b.seq), ...(finalized ? { finalized: true } : {}) };
     });
   }
+  async reset() { await this.pause(); this.opened.clear(); this.resume(); }
   async close() { clearInterval(this.timer); await this.pause(); this.opened.clear(); }
 }

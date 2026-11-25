@@ -176,12 +176,21 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
             if (sessions.get(input.sessionId) !== session || lifecycle.unavailable(address)) return;
             for (const card of cards) projectPermission(card);
             const projection = new RunProjection(input.sessionId, address.rootId, emit);
+            const projectChildren = (latest: typeof issue, replay = false) => {
+              const markers = projection.project(latest, replay, true);
+              if (!markers.some(runId => !latest.runs[runId].markerProjected)) return;
+              void store.update(state => {
+                const saved = state.connections[address.connectionKey]?.issues[address.issueId];
+                for (const runId of markers) if (saved?.runs[runId]) saved.runs[runId].markerProjected = true;
+              }).catch(() => {});
+            };
             if (capabilities.includes("session.subsession")) {
-              projection.project(issue, input.history === "replay");
+              projectChildren(issue, input.history === "replay");
               session.subscriptions.push(store.subscribe(state => {
                 const latest = state.connections[address.connectionKey]?.issues[address.issueId];
-                if (latest) projection.project(latest);
+                if (latest) projectChildren(latest);
               }), () => projection.close());
+              runDetails.openDiscussion(address);
             }
             let currentRuns: typeof issue.runs = {};
             const projectRuns = (owned: typeof issue.runs, activity = true) => {
@@ -209,7 +218,6 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
             session.subscriptions.push(runs.subscribe(address, owned => projectRuns(owned)));
             emit({ type: "session.ready", requestId: input.requestId, sessionId: input.sessionId });
             opening = false;
-            runDetails.openDiscussion(address);
             // Native registration completes after session.ready / importAgent returns.
             setImmediate(() => { if (sessions.get(input.sessionId) === session) void runs.observe(address).catch(() => {}); });
             return;
@@ -228,7 +236,10 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
                 const address = session?.address;
                 if (!address || lifecycle.unavailable(address)) throw new Error("Discussion unavailable");
                 try { await stops.interrupt(address); }
-                finally { await askusers.collapsePending(address); }
+                finally {
+                  await askusers.collapsePending(address);
+                  if (capabilities.includes("session.subsession")) await runDetails.refreshOpened();
+                }
                 if (interruptedTurnId && sessions.get(input.sessionId) === session) session?.settleInterrupt?.(interruptedTurnId);
                 emit({ type: "request.completed", requestId: input.requestId });
               } catch (error) {
