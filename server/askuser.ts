@@ -7,7 +7,9 @@ import type { ProviderTimelineItem } from "@getpaseo/plugin/server/provider";
 import { askuserDocumentSchema, isAskuserReplyValid, type AskuserCardData } from "../shared/askuser.js";
 import { remoteFetch, type AuthenticatedConnection } from "./connection.js";
 import { StateStore, type IssueMapping } from "./state.js";
-import type { RemoteWorkspace } from "./sync.js";
+import { remoteJson, workspaceSchema, type RemoteWorkspace } from "./sync.js";
+import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
+import type { StopCoordinator } from "./stops.js";
 
 type Address = { connectionKey: string; issueId: string; rootId: string };
 type CardAddress = { connectionKey: string; issueId: string; commentId: string; attachmentId: string };
@@ -45,11 +47,11 @@ export function cachedAskuserCard(address: CardAddress, issue: IssueMapping, con
     const offline = context.offline;
     const targetUser = document?.answer_user_id;
     const readOnlyReason = uncertain ? "回答保存结果待核实，请在 Multica 管理页核实原投递或明确重新发送；请勿重复提交。" : issue.access?.status === "inaccessible" ? "任务已不可访问，仅显示缓存。"
-      : issue.archiveReason || issue.manualHidden.workspace || issue.manualHidden.discussions.includes(record.rootId) ? "讨论已归档，仅显示缓存。"
+      : issue.archiveReason || issue.archivePending || issue.manualHidden.workspace || issue.manualHidden.discussions.includes(record.rootId) ? "讨论已归档，仅显示缓存。"
       : record.deleted ? "原评论已删除，仅显示缓存。" : offline ? "离线缓存，仅供只读。"
       : targetUser && targetUser !== context.userId ? `仅指定用户 ${targetUser} 可作答；当前为只读。` : undefined;
     return { connectionKey: address.connectionKey, issueId: address.issueId, commentId: address.commentId, attachmentId: address.attachmentId, rootId: record.rootId, revision: revision([record, cached, delivery, offline, readOnlyReason]), title: document?.title ?? "askuser.json 提问卡片", description: document?.description,
-      questions: document?.questions ?? [], status: saved && record.status === "pending" ? "answered" : record.status, readOnly: !!readOnlyReason || saved || record.status !== "pending",
+      questions: document?.questions ?? [], status: saved && record.status === "pending" ? "answered" : record.status, collapsed: record.status === "pending" && !!record.collapsed, readOnly: !!readOnlyReason || saved || record.status !== "pending",
       delivery: delivery && { status: delivery.status, clientMessageId: delivery.clientMessageId, message: delivery.message }, readOnlyReason, offline, truncated: false, error: cached?.error, statusError: record.statusError, answer: record.answer ?? (saved ? { commentId: delivery.commentId!, content: delivery.body, actorId: delivery.receipt?.authorId, actorType: "member" } : undefined), skippedAt: record.skippedAt, skippedBy: record.skippedBy };
   }
 
@@ -58,7 +60,7 @@ export class AskUsers {
   private listeners = new Map<string, Set<(row: ProviderTimelineItem, card: AskuserCardData) => void>>();
   private userIds = new Map<string, string>();
   private pending = new Map<string, Promise<void>>();
-  private submissions = new Map<string, Promise<DeliveryRecord>>();
+  private actions = new Map<string, { kind: string; operation: Promise<unknown> }>();
   private online = new Set<string>();
   constructor(private readonly store: StateStore, private readonly connection: () => Promise<AuthenticatedConnection>) {}
   subscribe(address: Address, listener: (row: ProviderTimelineItem, card: AskuserCardData) => void) {
@@ -134,7 +136,7 @@ export class AskUsers {
   private async resolveStatuses(connection: AuthenticatedConnection, workspace: RemoteWorkspace, issueId: string) {
     const issue = (await this.store.read()).connections[connection.connectionKey].issues[issueId];
     const unresolved = Object.entries(issue.askuserCards ?? {}).filter(([, card]) => card.status !== "answered" && card.status !== "skipped" && !card.deleted);
-    if (!unresolved.length) return;
+    if (!unresolved.length) return true;
     try {
       const response = await remoteFetch(connection, `/api/issues/${encodeURIComponent(issueId)}/timeline`, { headers: { "X-Workspace-Slug": workspace.slug } });
       if (!response.ok) { await response.body?.cancel(); throw new Error("Timeline unavailable"); }
@@ -146,22 +148,26 @@ export class AskUsers {
           const record = local.askuserCards![key];
           delete record.statusError;
           const original = entries.find(entry => entry.id === record.commentId);
+          if (original?.deleted_at) { record.deleted = true; continue; }
           if (original?.askuser_skipped_at?.trim()) {
-            record.status = "skipped"; record.skippedAt = original.askuser_skipped_at; record.skippedBy = original.askuser_skipped_by ?? undefined; continue;
+            record.status = "skipped"; delete record.collapsed; record.skippedAt = original.askuser_skipped_at; record.skippedBy = original.askuser_skipped_by ?? undefined; continue;
           }
           const document = local.askuserAttachments?.[record.attachmentId]?.document;
           const answer = document && entries.find(entry => entry.type === "comment" && entry.parent_id === record.commentId && !entry.deleted_at && entry.content && isAskuserReplyValid(document, { ...entry, content: entry.content }));
           if (answer) {
             record.status = "answered";
+            delete record.collapsed;
             record.answer = { commentId: answer.id, content: answer.content!, actorId: answer.actor_id, actorType: answer.actor_type, delegatedBy: answer.delegated_by ?? undefined };
           }
         }
       });
+      return true;
     } catch {
       if (connection.signal?.aborted) this.online.delete(connection.connectionKey);
       await this.store.update(state => {
         for (const [key] of unresolved) state.connections[connection.connectionKey].issues[issueId].askuserCards![key].statusError = "无法核对完整时间线，显示最后已知状态。";
       });
+      return false;
     }
   }
   private async download(connection: AuthenticatedConnection, workspace: RemoteWorkspace, issueId: string, source?: string, rootId?: string) {
@@ -221,14 +227,103 @@ export class AskUsers {
   async deliveryChanged(record: DeliveryRecord) {
     if (record.askuserAnswerTo && (record.status === "saved" || record.status === "pending_verification")) await this.publish(record.connectionKey, record.issueId);
   }
-  submit(address: CardAddress, input: unknown, deliveries: CommentDelivery) {
-    const key = JSON.stringify(address);
-    const active = this.submissions.get(key);
-    if (active) return active;
-    const operation = this.submitAnswer(address, input, deliveries);
-    this.submissions.set(key, operation);
-    void operation.finally(() => { if (this.submissions.get(key) === operation) this.submissions.delete(key); }).catch(() => {});
+  private action<T>(address: CardAddress, kind: string, perform: () => Promise<T>): Promise<T> {
+    const key = JSON.stringify([address.connectionKey, address.issueId, address.commentId, address.attachmentId]);
+    const active = this.actions.get(key);
+    if (active) return active.kind === kind ? active.operation as Promise<T> : Promise.reject(new Error("此卡片的其他操作处理中，请稍后重试。"));
+    const operation = perform();
+    this.actions.set(key, { kind, operation });
+    void operation.finally(() => { if (this.actions.get(key)?.operation === operation) this.actions.delete(key); }).catch(() => {});
     return operation;
+  }
+  collapse(address: CardAddress) { return this.action(address, "collapse", () => this.collapseCard(address)); }
+  private async collapseCard(address: CardAddress) {
+    await this.store.update(state => {
+      const card = state.connections[address.connectionKey]?.issues[address.issueId]?.askuserCards?.[cardKey(address.commentId, address.attachmentId)];
+      if (!card || card.status !== "pending") throw new Error("提问卡片已解决或不可用。");
+      card.collapsed = true;
+    });
+    await this.publish(address.connectionKey, address.issueId);
+  }
+  private actionable(address: CardAddress, issue: IssueMapping | undefined, lifecycle: DiscussionLifecycle) {
+    if (!issue) throw new Error("提问卡片不可用。");
+    const card = this.data(address, issue);
+    if (lifecycle.unavailable({ ...address, rootId: card.rootId })) throw new Error("讨论正在归档，不能操作提问卡片。");
+    if (card.status !== "pending" || card.readOnly) throw new Error(card.readOnlyReason || "提问卡片已解决或不可用。");
+    return card;
+  }
+  private async actionContext(address: CardAddress, lifecycle: DiscussionLifecycle) {
+    const connection = await this.connection();
+    if (connection.connectionKey !== address.connectionKey) throw new Error("登录身份已变化；请连接原 Multica 身份。");
+    this.online.add(connection.connectionKey); this.userIds.set(connection.connectionKey, connection.userId);
+    const issue = (await this.store.read()).connections[address.connectionKey]?.issues[address.issueId];
+    this.actionable(address, issue, lifecycle);
+    const workspaces = await remoteJson(connection, "/api/workspaces", z.array(workspaceSchema)) as RemoteWorkspace[];
+    const workspace = workspaces.find(workspace => workspace.id === issue!.remoteWorkspaceId);
+    if (!workspace) throw new Error("原 Multica 工作区不可用。");
+    const object = await remoteJson(connection, `/api/issues/${encodeURIComponent(address.issueId)}`, z.object({ id: z.string(), workspace_id: z.string() }), workspace) as { id: string; workspace_id: string };
+    if (object.id !== address.issueId || object.workspace_id !== workspace.id) throw new Error("任务访问核对返回了其他任务。");
+    const verified = await this.resolveStatuses(connection, workspace, address.issueId);
+    await this.publish(address.connectionKey, address.issueId);
+    if (!verified) throw new Error("无法核对提问卡片当前状态，请稍后重试。");
+    this.actionable(address, (await this.store.read()).connections[address.connectionKey]?.issues[address.issueId], lifecycle);
+    return { connection, workspace };
+  }
+  reopen(address: CardAddress, lifecycle: DiscussionLifecycle) { return this.action(address, "reopen", () => this.reopenCard(address, lifecycle)); }
+  private async reopenCard(address: CardAddress, lifecycle: DiscussionLifecycle) {
+    const { connection } = await this.actionContext(address, lifecycle);
+    await connection.assertCurrent?.();
+    await this.store.update(state => {
+      const issue = state.connections[address.connectionKey]?.issues[address.issueId];
+      this.actionable(address, issue, lifecycle);
+      delete issue!.askuserCards![cardKey(address.commentId, address.attachmentId)].collapsed;
+    });
+    await this.publish(address.connectionKey, address.issueId);
+    return bounded(this.data(address, (await this.store.read()).connections[address.connectionKey].issues[address.issueId]));
+  }
+  skip(address: CardAddress, stops: StopCoordinator, lifecycle: DiscussionLifecycle) { return this.action(address, "skip", () => this.skipCard(address, stops, lifecycle)); }
+  private async skipCard(address: CardAddress, stops: StopCoordinator, lifecycle: DiscussionLifecycle) {
+    const issue = (await this.store.read()).connections[address.connectionKey]?.issues[address.issueId];
+    const rootId = issue?.askuserCards?.[cardKey(address.commentId, address.attachmentId)]?.rootId;
+    if (!rootId) throw new Error("提问卡片不可用。");
+    const owner = { ...address, rootId };
+    // Capture the original fence before any identity or remote preflight awaits.
+    const epoch = issue!.stopEpochs[rootId] ?? 0;
+    const { connection, workspace } = await this.actionContext(address, lifecycle);
+    await connection.assertCurrent?.();
+    await stops.guardDelivery(owner, epoch, state => {
+      this.actionable(address, state.connections[address.connectionKey]?.issues[address.issueId], lifecycle);
+    });
+    // Keep the final CLI check before the durable fence, then issue POST immediately.
+    let response: Response;
+    try {
+      response = await fetch(`${connection.apiUrl}/api/issues/${encodeURIComponent(address.issueId)}/comments/${encodeURIComponent(address.commentId)}/askuser-skip`, {
+        method: "POST", headers: { Authorization: `Bearer ${connection.token}`, "X-Workspace-Slug": workspace.slug }, redirect: "error",
+        signal: AbortSignal.any([AbortSignal.timeout(10_000), ...(connection.signal ? [connection.signal] : [])]),
+      });
+    } catch { throw new Error("跳过请求结果未确认（网络或登录上下文已变化）；请先核对远端状态，未标记为已跳过。"); }
+    try {
+      await connection.assertCurrent?.();
+      if (!response.ok) throw new Error(`跳过未确认（HTTP ${response.status}）；卡片保留最后已知状态，请核对后重试。`);
+    } finally { await response.body?.cancel().catch(() => {}); }
+    // The endpoint's body is not a measured contract. Only timeline observations
+    // supply remote timestamps and actor identity; a successful empty body is valid.
+    let metadata: z.infer<typeof timelineSchema>[number] | undefined;
+    try {
+      const entries = await remoteJson(connection, `/api/issues/${encodeURIComponent(address.issueId)}/timeline`, timelineSchema, workspace) as z.infer<typeof timelineSchema>;
+      metadata = entries.find(entry => entry.id === address.commentId && entry.askuser_skipped_at?.trim());
+    } catch { /* Command success remains known even when metadata cannot be read. */ }
+    if (response.status === 202 && !metadata) throw new Error("跳过请求已受理，但未确认远端终态；请先核对远端状态。");
+    await this.store.update(state => {
+      const record = state.connections[address.connectionKey].issues[address.issueId].askuserCards![cardKey(address.commentId, address.attachmentId)];
+      record.status = "skipped"; delete record.collapsed; delete record.statusError;
+      if (metadata) { record.skippedAt = metadata.askuser_skipped_at!; record.skippedBy = metadata.askuser_skipped_by ?? undefined; }
+    });
+    await this.publish(address.connectionKey, address.issueId);
+    return bounded(this.data(address, (await this.store.read()).connections[address.connectionKey].issues[address.issueId]));
+  }
+  submit(address: CardAddress, input: unknown, deliveries: CommentDelivery) {
+    return this.action(address, "answer", () => this.submitAnswer(address, input, deliveries));
   }
   private async submitAnswer(address: CardAddress, input: unknown, deliveries: CommentDelivery) {
     await this.checkConnection(address.connectionKey);
@@ -247,6 +342,7 @@ export class AskUsers {
     if (current.status === "saved") await this.store.update(state => {
       const stored = state.connections[address.connectionKey].issues[address.issueId].askuserCards![cardKey(address.commentId, address.attachmentId)];
       stored.status = "answered";
+      delete stored.collapsed;
       stored.answer = { commentId: current.commentId!, content: current.body, actorId: current.receipt?.authorId, actorType: "member" };
     });
     await this.publish(address.connectionKey, address.issueId);
@@ -262,5 +358,5 @@ export class AskUsers {
     const end = Math.min(text.length, address.offset + 8192);
     return { text: text.slice(address.offset, end), nextOffset: end < text.length ? end : null };
   }
-  async close() { await Promise.allSettled(this.pending.values()); this.listeners.clear(); }
+  async close() { await Promise.allSettled([...this.pending.values(), ...[...this.actions.values()].map(action => action.operation)]); this.listeners.clear(); }
 }

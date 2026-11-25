@@ -925,6 +925,71 @@ it("compiled cache-only history renders a complete askuser card without requesti
   } finally { h.dispose(); }
 });
 
+async function askuserActionHarness(answer: Answer, extra: Record<string, unknown> = {}) {
+  const tree = componentTree();
+  const calls: Array<{ name: string; input: unknown }> = [];
+  const buttons: Array<{ accessibilityLabel: string; disabled?: boolean; onPress(): unknown }> = [];
+  const renderers: PluginTimelineRendererContribution[] = [];
+  const rpcs = new Map<string, (input: unknown) => Promise<unknown>>();
+  const base = { connectionKey: "connection", issueId: "issue", rootId: "root", commentId: "card", attachmentId: "file", revision: "v1", title: "发布确认", questions: [{ id: "reason", title: "理由", type: "text" }], status: "pending", readOnly: false, offline: false, truncated: false, collapsed: true, ...extra };
+  const setup = await bundledContribution("../index.client.tsx", {
+    react: tree.react,
+    "@getpaseo/plugin/client": { useRpc: (contract: { name: string }) => {
+      if (!rpcs.has(contract.name)) rpcs.set(contract.name, async input => { calls.push({ name: contract.name, input }); return contract.name === "askuser.observe" ? base : answer(contract.name, input); });
+      return rpcs.get(contract.name);
+    } },
+    "@getpaseo/plugin/client/ui": { Markdown: ({ children }: { children: unknown }) => children },
+    "react-native": { View: "View", Text: "Text", Pressable: (props: typeof buttons[number] & { children: unknown }) => { buttons.push(props); return props.children; } },
+  });
+  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: PluginTimelineRendererContribution) => { renderers.push(renderer); return () => {}; } });
+  const renderer = renderers.find(value => value.kind === "askuser")!;
+  const render = () => { buttons.length = 0; return tree.render(createElement(renderer.Component as FunctionComponent<any>, { item: { data: renderer.schema.parse(base) }, theme: { colors: { foreground: "fg", foregroundMuted: "muted", statusDanger: "danger" } } })); };
+  return { calls, buttons, render, button: (label: string) => { render(); const button = buttons.find(button => button.accessibilityLabel === label); expect(button, label).toBeDefined(); return button!; }, dispose: () => { tree.unmount(); dispose(); } };
+}
+
+it("the compiled askuser card reopens locally collapsed forms and requires a separate confirmation before remote skip", async () => {
+  const h = await askuserActionHarness((name) => ({ connectionKey: "connection", issueId: "issue", rootId: "root", commentId: "card", attachmentId: "file", revision: "v2", title: "发布确认", questions: [], status: name === "askuser.skip" ? "skipped" : "pending", collapsed: false, readOnly: name === "askuser.skip", offline: false, truncated: false }));
+  try {
+    expect(h.render()).toContain("已在本地收起");
+    h.button("跳过此卡").onPress(); expect(h.render()).toContain("此操作会在 Multica 跳过此卡");
+    h.button("取消").onPress(); h.render();
+    expect(h.calls.filter(call => call.name === "askuser.skip")).toEqual([]);
+    h.button("重新展开作答").onPress();
+    await vi.waitFor(() => expect(h.calls.filter(call => call.name === "askuser.reopen")).toHaveLength(1));
+    await vi.waitFor(() => expect(h.render()).not.toContain("已在本地收起"));
+    expect(h.calls.find(call => call.name === "askuser.reopen")?.input).toEqual({ connectionKey: "connection", issueId: "issue", commentId: "card", attachmentId: "file" });
+    h.button("跳过此卡").onPress(); h.button("确认远端跳过").onPress();
+    await vi.waitFor(() => expect(h.render()).toContain("已跳过"));
+    expect(h.calls.filter(call => call.name === "askuser.skip")).toEqual([{ name: "askuser.skip", input: { connectionKey: "connection", issueId: "issue", commentId: "card", attachmentId: "file", confirmed: true } }]);
+  } finally { h.dispose(); }
+});
+
+it("the compiled card reports a failed skip honestly, blocks repeated clicks, and requires confirmation again for retry", async () => {
+  let reject!: (error: Error) => void;
+  const h = await askuserActionHarness(() => new Promise((_, fail) => { reject = fail; }));
+  try {
+    h.render(); await Promise.resolve();
+    h.button("跳过此卡").onPress();
+    const confirm = h.button("确认远端跳过"); confirm.onPress(); confirm.onPress();
+    expect(h.calls.filter(call => call.name === "askuser.skip")).toHaveLength(1);
+    reject(new Error("跳过未确认（HTTP 403），请核对权限。"));
+    await vi.waitFor(() => expect(h.render()).toContain("HTTP 403"));
+    expect(h.render()).toContain("待答"); expect(h.render()).not.toContain("已跳过");
+    expect(h.buttons.some(button => button.accessibilityLabel === "确认远端跳过")).toBe(false);
+    h.button("跳过此卡").onPress(); h.button("取消").onPress();
+    expect(h.calls.filter(call => call.name === "askuser.skip")).toHaveLength(1);
+  } finally { h.dispose(); }
+});
+
+it.each([{ readOnly: true, readOnlyReason: "仅指定用户 other 可作答。" }, { readOnly: true, offline: true }, { status: "answered" }, { status: "skipped" }, { status: "invalid" }])("the compiled card hides reopen and skip controls for read-only or terminal cards: %j", async extra => {
+  const h = await askuserActionHarness(() => { throw new Error("Unexpected action"); }, extra);
+  try {
+    h.render(); await Promise.resolve(); h.render();
+    expect(h.buttons).toEqual([]);
+    expect(h.calls.some(call => call.name === "askuser.skip" || call.name === "askuser.reopen")).toBe(false);
+  } finally { h.dispose(); }
+});
+
 it("the compiled uncertain-answer card opens delivery management and explains conditions with question titles and labels", async () => {
   const renderers: PluginTimelineRendererContribution[] = [];
   const pressables: Array<{ onPress(): void }> = [];
