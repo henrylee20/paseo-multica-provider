@@ -11,7 +11,7 @@ import { defineRpc } from "@getpaseo/plugin";
 import { runObserve, runOpen, runRead } from "../shared/runs.js";
 import { workspaceEnable, syncBootstrap } from "../shared/contracts.js";
 import { createServerContribution } from "../server/contribute.js";
-import { threadOpen, threadResolve, commentEventDetail } from "../shared/threads.js";
+import { threadOpen, commentEventDetail } from "../shared/threads.js";
 import { FakeServer, resync } from "./support/fake-server.js";
 import { metadataHost } from "./support/metadata-host.js";
 
@@ -304,11 +304,6 @@ it("discovers older activity pages, resolves arbitrary descendants and leaves mi
   f.discoveryPages([[...f.comments, missing], [older, comment("old-child", "old-root", "Old reply")]]);
   await resync(f.server, f.paseo, "remote-workspace");
   expect(f.native.agents.map(agent => agent.labels["multica.discussion"])).toEqual(["main", "root", "old-root"]);
-  expect(await f.server.rpc(threadResolve, { ...address, commentIds: ["grandchild", "old-child", "orphan", "missing-parent"] }, f.paseo)).toEqual({ comments: [
-    { commentId: "grandchild", rootId: "root", status: "resolved", createdAt: stamp },
-    { commentId: "old-child", rootId: "old-root", status: "resolved", createdAt: stamp },
-    { commentId: "orphan", status: "unresolved" }, { commentId: "missing-parent", status: "unresolved" },
-  ] });
   expect(f.requests.filter(request => request.url.includes("recent=100")).some(request => request.url.includes("before=") && request.url.includes("before_id=1"))).toBe(true);
   expect(f.requests.some(request => request.url.includes("thread="))).toBe(false);
 });

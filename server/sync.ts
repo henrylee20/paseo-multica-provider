@@ -8,16 +8,16 @@ import { issueQuery } from "./filters.js";
 import { WorkspaceEvents, type WorkspaceEvent } from "./workspace-events.js";
 import { remoteFetch, type AuthenticatedConnection } from "./connection.js";
 import { archiveClosedDiscussion, ensureWorkspaceActive, findActiveWorkspace, findNativeDiscussion, projectHasActiveWorkspaces, restoreMappedDiscussion, type NativeHost } from "./native-host.js";
-import { StateStore, connectionState } from "./state.js";
+import { StateStore, connectionState, issueSchema } from "./state.js";
 import { hiddenAgent, restoreWorkspacePreservingHidden } from "./hiding.js";
 import { discussionKeys } from "../shared/discussion.js";
 import type { DiscussionMetadata } from "./discussion-metadata.js";
 import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
 
 export const workspaceSchema = z.object({ id: z.string().min(1), name: z.string(), slug: z.string().min(1) });
-const issueSchema = z.object({ id: z.string().min(1), workspace_id: z.string(), identifier: z.string().optional(), title: z.string(),
+const remoteIssueSchema = z.object({ id: z.string().min(1), workspace_id: z.string(), identifier: z.string().optional(), title: z.string(),
   description: z.string().nullish(), status: z.string(), status_category: z.string().optional(), updated_at: z.string().optional() });
-const pageSchema = z.object({ issues: z.array(issueSchema), total: z.number().int().nonnegative() });
+const pageSchema = z.object({ issues: z.array(remoteIssueSchema), total: z.number().int().nonnegative() });
 // These requests live only for this snapshot (or an explicit Thread open).
 export type RemoteWorkspace = z.infer<typeof workspaceSchema> & {
   agents?: Promise<Array<{ id: string; name: string }>>;
@@ -79,10 +79,13 @@ export class SidebarSynchronizer {
   async workspaces(connection: AuthenticatedConnection): Promise<RemoteWorkspace[]> {
     return await remoteJson(connection, "/api/workspaces", z.array(workspaceSchema)) as RemoteWorkspace[];
   }
-  async bootstrap(paseo: PaseoApi): Promise<void> {
-    const serverId = (await paseo.hosts.list()).self.serverId;
-    if (this.expectedServerId && this.expectedServerId !== serverId) throw new Error("Bootstrap daemon identity changed");
+  private async assertOwningDaemon(paseo?: PaseoApi) {
+    const serverId = (await (paseo ? paseo.hosts.list() : this.host!.listHosts())).self.serverId;
+    if (this.expectedServerId && this.expectedServerId !== serverId) throw new Error("Native host is not the owning daemon");
     this.expectedServerId = serverId;
+  }
+  async bootstrap(paseo: PaseoApi): Promise<void> {
+    await this.assertOwningDaemon(paseo);
     // A client connection starts daemon recovery even if the first remote read fails.
     if (!this.closed && !this.timer) {
       this.timer = setInterval(() => { void this.requestSync().catch(() => {}); }, this.options.intervalMs);
@@ -110,11 +113,9 @@ export class SidebarSynchronizer {
   }
   withNativeHost(paseo: PaseoApi, operation: (host: NativeHost) => Promise<void>): Promise<void> {
     return this.serialize(async () => {
-      const serverId = (await paseo.hosts.list()).self.serverId;
-      if (this.expectedServerId && this.expectedServerId !== serverId) throw new Error("Bootstrap daemon identity changed");
-      this.expectedServerId = serverId;
+      await this.assertOwningDaemon(paseo);
       if (!this.host) this.host = await this.options.connectHost();
-      if ((await this.host.listHosts()).self.serverId !== serverId) throw new Error("Native host is not the owning daemon");
+      await this.assertOwningDaemon();
       await operation(this.host);
     });
   }
@@ -218,7 +219,7 @@ export class SidebarSynchronizer {
   }
   private async sync() {
     if (!this.host) this.host = await this.options.connectHost();
-    if ((await this.host.listHosts()).self.serverId !== this.expectedServerId) throw new Error("Native host is not the owning daemon");
+    await this.assertOwningDaemon();
     this.syncState.stage = "history";
     await this.options.onCached?.(this.host);
     this.syncState.stage = "connection";
@@ -235,15 +236,14 @@ export class SidebarSynchronizer {
     if (!enabled.length && !disabledIssues.length && !disabledProjects) { this.events.reconcile(connection, []); return; }
     const workspaces = enabled.length ? await this.workspaces(connection) : [];
     this.events.reconcile(connection, workspaces.filter(workspace => local?.rules[workspace.id]?.enabled));
-    if (!this.host) this.host = await this.options.connectHost();
-    if ((await this.host.listHosts()).self.serverId !== this.expectedServerId) throw new Error("Native host is not the owning daemon");
+    await this.assertOwningDaemon();
     for (const [issueId] of disabledIssues) await this.archive(connection.connectionKey, issueId, "rule_disabled");
     await this.removeDisabledProjects(connection.connectionKey);
     for (const [workspaceId, rule] of enabled) {
       const workspace = workspaces.find(item => item.id === workspaceId);
       if (!workspace) throw new Error("Enabled workspace snapshot unavailable");
       this.syncState.stage = "issues";
-      const issues: z.infer<typeof issueSchema>[] = [];
+      const issues: z.infer<typeof remoteIssueSchema>[] = [];
       let offset = 0;
       for (;;) {
         const query = issueQuery(rule, offset);
@@ -280,18 +280,12 @@ export class SidebarSynchronizer {
         // Persist intent before native creation. A retry uses the same valid native ID.
         await this.options.store.update(state => {
           const local = connectionState(state, connection.connectionKey);
-          local.issues[issue.id] = { ...local.issues[issue.id], remoteWorkspaceId: workspaceId,
+          local.issues[issue.id] = issueSchema.parse({ ...local.issues[issue.id], remoteWorkspaceId: workspaceId,
             projectId,
             workspaceId: rebuild ? `wks_${stableId(connection.connectionKey, issue.id, projectId).slice(0, 16)}`
               : local.issues[issue.id]?.workspaceId ?? `wks_${stableId(connection.connectionKey, issue.id).slice(0, 16)}`,
-            workspaceCreated: rebuild ? false : local.issues[issue.id]?.workspaceCreated ?? false,
-            commentSourceTaskIds: local.issues[issue.id]?.commentSourceTaskIds ?? {},
-            runs: local.issues[issue.id]?.runs ?? {}, runDetails: local.issues[issue.id]?.runDetails ?? {}, commentCreatedAt: local.issues[issue.id]?.commentCreatedAt ?? {},
-            commentInputs: local.issues[issue.id]?.commentInputs ?? {},
-            manualHidden: local.issues[issue.id]?.manualHidden ?? { workspace: false, discussions: [] },
-            threads: local.issues[issue.id]?.threads ?? {}, commentRoots: local.issues[issue.id]?.commentRoots ?? {}, unresolvedCommentIds: local.issues[issue.id]?.unresolvedCommentIds ?? [],
-            systemRootIds: local.issues[issue.id]?.systemRootIds ?? [], mainHistory: local.issues[issue.id]?.mainHistory ?? { title: "主讨论", historyLoaded: false, rows: [], observed: {} },
-            ruleArchivedAgentIds: local.issues[issue.id]?.ruleArchivedAgentIds ?? [], archivePending: local.issues[issue.id]?.archivePending ?? false, cwd, title, description: issue.description ?? "", updatedAt: issue.updated_at };
+            workspaceCreated: rebuild ? false : local.issues[issue.id]?.workspaceCreated,
+            cwd, title, description: issue.description ?? "", updatedAt: issue.updated_at });
         });
         const mapping = (await this.options.store.read()).connections[connection.connectionKey].issues[issue.id];
         if (!mapping.workspaceCreated) {

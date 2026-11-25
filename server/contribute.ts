@@ -16,7 +16,7 @@ import { DiscussionLifecycle } from "./discussion-lifecycle.js";
 import { readTaskDescription } from "../shared/description.js";
 import { descriptionRevision, descriptionSlice, TaskDescriptions } from "./task-description.js";
 import { projectionHistory, ThreadSynchronizer } from "./threads.js";
-import { threadOpen, commentEventDetail, threadResolve } from "../shared/threads.js";
+import { threadOpen, commentEventDetail } from "../shared/threads.js";
 import { ManualHiding } from "./hiding.js";
 import { hiddenList, hiddenRestore } from "../shared/hiding.js";
 import { StopCoordinator } from "./stops.js";
@@ -128,13 +128,6 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     server.handle(runRead, async input => runDetails.read(input));
     server.handle(runMetadataRead, async input => runDetails.readMetadata(input));
     server.handle(threadOpen, async input => threads.open(input));
-    server.handle(threadResolve, async input => {
-      const issue = (await store.read()).connections[input.connectionKey]?.issues[input.issueId];
-      return { comments: input.commentIds.map(commentId => {
-        const rootId = issue?.commentRoots[commentId];
-        return rootId ? { commentId, rootId, createdAt: issue?.commentCreatedAt[commentId], status: "resolved" as const } : { commentId, status: "unresolved" as const };
-      }) };
-    });
     server.handle(commentEventDetail, async input => {
       const issue = (await store.read()).connections[input.connectionKey]?.issues[input.issueId];
       const row = issue ? projectionHistory(issue, input.rootId)?.rows.find(row => row.id === input.recordId && row.role === "event") : undefined;
