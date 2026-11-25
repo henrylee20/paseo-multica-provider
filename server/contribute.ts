@@ -4,9 +4,9 @@ import { RunDetails } from "./run-details.js";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { PluginServerContribution } from "@getpaseo/plugin/server";
-import { multicaSettings, connectionStatus, connectionHistory, syncBootstrap, syncStatus, workspaceList, workspaceEnable, workspaceRule, workspaceCatalog, taskRuleSchema, type ConnectionStatus } from "../shared/contracts.js";
+import { multicaSettings, connectionStatus, syncBootstrap, syncStatus, workspaceList, workspaceEnable, workspaceRule, workspaceCatalog, taskRuleSchema, type ConnectionStatus } from "../shared/contracts.js";
 import { createConnectionResolver, type AuthenticatedConnection, type ConnectionDependencies } from "./connection.js";
-import { StateStore, connectionState } from "./state.js";
+import { StateStore } from "./state.js";
 import { SidebarSynchronizer } from "./sync.js";
 import { connectNativeHost, type NativeHost } from "./native-host.js";
 import { DiscussionMetadata } from "./discussion-metadata.js";
@@ -21,7 +21,7 @@ import { ManualHiding } from "./hiding.js";
 import { hiddenList, hiddenRestore } from "../shared/hiding.js";
 import { StopCoordinator } from "./stops.js";
 import { CommentDelivery } from "./delivery.js";
-import { deliveryTargets, deliveryMentions } from "../shared/delivery.js";
+import { deliveryMentions } from "../shared/delivery.js";
 import { AskUsers } from "./askuser.js";
 import { AskuserWakeups } from "./askuser-wakeup.js";
 import { askuserObserve, askuserRead, askuserReopen, askuserSkip } from "../shared/askuser.js";
@@ -80,22 +80,8 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
         }, { once: true });
       }
       await askusers.connectionChanged(status.status === "ready" && status.connectionKey && status.user ? { connectionKey: status.connectionKey, userId: status.user.id } : undefined);
-      if (status.status === "ready" && status.connectionKey && status.apiUrl && status.user) {
-        const { connectionKey, apiUrl, appUrl, user } = status;
-        await store.update(state => {
-          const connection = connectionState(state, connectionKey);
-          connection.identity = { apiUrl, ...(appUrl ? { appUrl } : {}), user,
-            profiles: [...new Set([...(connection.identity?.profiles ?? []), profile])], lastVerifiedAt: new Date().toISOString() };
-        });
-      }
       return status;
     }
-    server.handle(connectionHistory, async () => ({ connections: Object.entries((await store.read()).connections).map(([connectionKey, connection]) => {
-      const issues = Object.values(connection.issues);
-      return { ...connection.identity, connectionKey, profiles: connection.identity?.profiles ?? [], projectCount: Object.keys(connection.projects).length, issueCount: issues.length,
-        hiddenCount: issues.reduce((count, issue) => count + Number(issue.manualHidden.workspace) + issue.manualHidden.discussions.length, 0),
-      };
-    }) }));
     const lifecycle = new DiscussionLifecycle();
     const askusers = new AskUsers(store, connection, lifecycle);
     server.handle(askuserObserve, input => askusers.observe(input));
@@ -122,7 +108,6 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     server.handle(askuserSkip, input => askusers.skip(input, lifecycle));
     const deliveries = new CommentDelivery(store, connection, () => synchronizer.reconcile(), lifecycle);
     threads.coordinateDeliveries(() => deliveries.waitForPosts());
-    server.handle(deliveryTargets, async () => deliveries.targets());
     server.handle(deliveryMentions, async input => deliveries.mentions(input));
     const descriptions = new TaskDescriptions(store);
     server.registerProvider(createMulticaProvider(store, threads, runs, stops, deliveries, descriptions, lifecycle, askusers));

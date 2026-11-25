@@ -32,7 +32,7 @@ it("the host-compiled server entry registers CLI connection management", async (
   await dispose();
 }, 15_000);
 
-it("the host-compiled client entry offers a Multica management screen and sidebar entry", async () => {
+it("the host-compiled client entry offers only the Multica settings screen", async () => {
   const setup = await bundledContribution("../index.client.tsx", { "@getpaseo/plugin/client": {}, "@getpaseo/plugin/client/ui": {}, "react-native": {} });
   const entries: Array<{ kind: string; id: string; Component?: unknown }> = [];
   const add = (kind: string) => (entry: { id: string; Component?: unknown }) => {
@@ -41,7 +41,7 @@ it("the host-compiled client entry offers a Multica management screen and sideba
   };
   const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: add("settings"), addScreen: add("screen"), addSidebarHeaderItem: add("sidebar"), addTimelineRenderer: () => () => {} });
   expect(entries.map(({ kind, id }) => ({ kind, id }))).toEqual([
-    { kind: "settings", id: "multica" }, { kind: "screen", id: "management" }, { kind: "sidebar", id: "multica" },
+    { kind: "settings", id: "multica" },
   ]);
   expect(entries.every(entry => typeof entry.Component === "function")).toBe(true);
   dispose();
@@ -503,7 +503,7 @@ function componentTree() {
 
 type Answer = (name: string, input: unknown) => unknown;
 /** `host.composerItems` is a Paseo 0.16+ host; without it the client context is the 0.15 surface. */
-async function managementHarness(answer: Answer, host: { composerItems?: boolean } = {}) {
+async function settingsHarness(answer: Answer, host: { composerItems?: boolean } = {}) {
   const tree = componentTree();
   const calls: Array<{ name: string; input: unknown }> = [];
   const actions: Array<{ label: string; hint?: string; actionLabel: string; disabled?: boolean; onPress(): unknown }> = [];
@@ -541,13 +541,12 @@ async function managementHarness(answer: Answer, host: { composerItems?: boolean
   const composerItems: string[] = [];
   const dispose = setup({ rpc: async () => ({ status: "ready" }), openScreen: (input: unknown) => opened.push(input),
     addSettingsScreen: (entry: { Component: FunctionComponent<Record<string, unknown>> }) => { screens.settings = entry.Component; return () => {}; },
-    addScreen: (entry: { Component: FunctionComponent<Record<string, unknown>> }) => { screens.management = entry.Component; return () => {}; },
     addSidebarHeaderItem: () => () => {}, addTimelineRenderer: () => () => {},
     ...(host.composerItems ? { addComposerItem: (entry: { id: string }) => { composerItems.push(entry.id); return () => {}; } } : {}) });
   const colors = { foreground: "fg", foregroundMuted: "muted", statusDanger: "danger", statusWarning: "warning", statusSuccess: "success" };
   return {
     calls, actions, switches, selects, pressables, copied, opened, navigation, scrolls, composerItems,
-    render(screen: "settings" | "management" = "management", props: Record<string, unknown> = {}) {
+    render(screen: "settings" = "settings", props: Record<string, unknown> = {}) {
       actions.length = 0; switches.length = 0; selects.length = 0; pressables.length = 0; scrolls.length = 0;
       return tree.render(createElement(screens[screen], { host: { id: "host", label: "Host" }, theme: { colors }, layout: { compact: false, platform: "web" },
         navigation: { openAgent: (input: unknown) => navigation.push(input) }, ...props }));
@@ -561,37 +560,15 @@ const readyStatus = { status: "ready", message: "已验证", profile: "", connec
   source: { api: "config", credentials: "config", app: "config" }, user: { id: "me", name: "Lin", email: "lin@example.test" }, loginCommand: "multica login" };
 const defaultRule = { statusCategories: ["unstarted", "started"], statuses: [], assignees: [], projectIds: [], labelIds: [] };
 const empty: Answer = name => ({
-  "connection.history": { connections: [] }, "stop.list": { records: [] }, "hidden.list": { objects: [] }, "issue.history.list": { issues: [] },
-  "delivery.list": { records: [] }, "delivery.targets": { issues: [] }, "sync.status": { status: "ready", stage: "idle", completedWorkspaces: 1, enabledWorkspaces: 1 },
+  "hidden.list": { objects: [] }, "sync.status": { status: "ready", stage: "idle", completedWorkspaces: 1, enabledWorkspaces: 1 },
 } as Record<string, unknown>)[name];
 
-it("management points at the composer's agent picker where the host has one, and at the copied reference elsewhere", async () => {
-  const answer: Answer = (name, input) => name === "delivery.targets" ? { issues: [{ connectionKey: "old-connection", issueId: "issue", title: "Task" }] } : empty(name, input);
-  const legacy = await managementHarness(answer);
-  try {
-    await vi.waitFor(() => expect(legacy.render()).toContain("提及 Agent"));
-    expect(legacy.composerItems).toEqual([]);
-    for (const text of ["需要 Paseo 0.16.0", "复制完整身份引用"]) expect(legacy.render()).toContain(text);
-  } finally { legacy.dispose(); }
-  const current = await managementHarness(answer, { composerItems: true });
-  try {
-    await vi.waitFor(() => expect(current.render()).toContain("提及 Agent"));
-    expect(current.composerItems).toEqual(["multica-mention"]);
-    const page = current.render();
-    expect(page).toContain("输入框");
-    expect(page).not.toContain("需要 Paseo 0.16.0");
-  } finally { current.dispose(); }
-});
-
-it("management lists shared hidden objects and offers separate workspace and selected-tab restoration", async () => {
+it("settings lists shared hidden objects and offers separate workspace and selected-tab restoration", async () => {
   const objects = [
     { connectionKey: "old-connection", issueId: "issue", workspaceId: "workspace", cwd: "/original", kind: "workspace", title: "Task" },
     { connectionKey: "old-connection", issueId: "issue", workspaceId: "workspace", cwd: "/original", kind: "thread", rootId: "root", agentId: "original-agent", title: "Task · Root" },
   ];
-  const h = await managementHarness(name => {
-    if (name === "connection.history") return { connections: [{ connectionKey: "old-connection", apiUrl: "https://original.example.test", user: { id: "original-user", name: "Original account", email: "" }, profiles: ["office"], projectCount: 1, issueCount: 2, hiddenCount: 1, pendingDeliveryCount: 1, stopWarningCount: 1 }] };
-    if (name === "delivery.targets") return { issues: [{ connectionKey: "old-connection", issueId: "issue", title: "Task" }] };
-    if (name === "delivery.mentions") return { agents: [{ id: "agent-id", name: "Agent A", reference: "[@Agent A](mention://agent/agent-id)" }] };
+  const h = await settingsHarness(name => {
     if (name === "hidden.list") return { objects };
     if (name === "hidden.restore") return { status: "ready" };
     if (name === "workspace.list") return { workspaces: [] };
@@ -601,60 +578,29 @@ it("management lists shared hidden objects and offers separate workspace and sel
   try {
     await vi.waitFor(() => { expect(h.render()).toContain("人工隐藏"); expect(h.render()).toContain("Task · Root"); });
     const page = h.render();
-    for (const text of ["历史连接", "Original account", "https://original.example.test"])
-      expect(page).toContain(text);
-    h.selects.find(select => select.label === "任务")!.onValueChange(JSON.stringify(["old-connection", "issue"]));
-    await vi.waitFor(() => expect(h.render()).toContain("Agent A"));
-    h.action("复制引用").onPress();
-    await vi.waitFor(() => expect(h.copied).toEqual(["[@Agent A](mention://agent/agent-id)"]));
-    expect(h.render()).toContain("已复制");
     expect(h.actions.map(action => action.actionLabel)).toContain("仅恢复 Paseo 工作区");
     h.action("恢复此讨论").onPress();
     await vi.waitFor(() => expect(h.calls).toContainEqual({ name: "hidden.restore", input: { connectionKey: "old-connection", issueId: "issue", rootId: "root" } }));
   } finally { h.dispose(); }
 });
 
-it("management hides empty record sections, and settings links to management instead of loading records", async () => {
+it("settings hides empty recovery and removed management sections", async () => {
   const answer: Answer = (name, input) => name === "connection.status" ? readyStatus : name === "workspace.list" ? { connectionKey: "current", workspaces: [] } : empty(name, input);
-  const management = await managementHarness(answer);
+  const management = await settingsHarness(answer);
   try {
     await vi.waitFor(() => expect(management.render()).toContain("当前没有可用的 Multica 工作区"));
     const page = management.render();
     for (const text of ["Multica 连接", "已连接 · Lin", "https://api.example.test", "Multica 工作区与筛选规则"]) expect(page).toContain(text);
     for (const text of ["人工隐藏", "停止结果", "评论投递", "只读历史", "历史连接", "提及 Agent", "恢复 CLI 登录", readyStatus.configPath, "凭据来源", "ID me"]) expect(page).not.toContain(text);
   } finally { management.dispose(); }
-  const settings = await managementHarness(answer);
-  try {
-    await vi.waitFor(() => expect(settings.render("settings")).toContain("当前没有可用的 Multica 工作区"));
-    expect(settings.render("settings")).toContain("Multica 连接");
-    expect(settings.calls.map(call => call.name).filter(name => ["delivery.list", "stop.list", "hidden.list", "issue.history.list", "connection.history", "delivery.targets"].includes(name))).toEqual([]);
-    settings.action("打开管理页").onPress();
-    expect(settings.opened).toEqual([{ screenId: "management" }]);
-  } finally { settings.dispose(); }
-});
 
-it("management scrolls inside its own padded ScrollView; settings leaves scrolling to the host page", async () => {
-  // The host hands a plugin screen a bare flex box that neither scrolls nor pads, so a page taller
-  // than the window is unreachable until the screen provides the scroll area itself.
-  const h = await managementHarness(empty);
-  try {
-    expect(h.render()).toContain("Multica 连接");
-    expect(h.scrolls).toHaveLength(1);
-    expect(h.scrolls[0].style).toEqual({ flex: 1 });
-    expect(h.scrolls[0].contentContainerStyle).toEqual({ padding: 24 });
-    h.render("settings");
-    expect(h.scrolls).toHaveLength(0);
-    h.render("management", { layout: { compact: true, platform: "ios" } });
-    expect(h.scrolls).toHaveLength(1);
-    expect(h.scrolls[0].contentContainerStyle).toEqual({ padding: 16 });
-  } finally { h.dispose(); }
 });
 
 it("refreshing or toggling a Multica workspace keeps the connection, rules and an open filter editor on screen", async () => {
   let release: (() => void) | undefined;
   let statusReads = 0;
   const workspace = { id: "ws", name: "Team space", enabled: false, rule: defaultRule };
-  const h = await managementHarness(async (name, input) => {
+  const h = await settingsHarness(async (name, input) => {
     if (name === "connection.status") {
       // The refresh reading stays pending: the rows from the previous reading must stay put meanwhile.
       if (++statusReads > 1) await new Promise<void>(resolve => { release = resolve; });
@@ -692,7 +638,7 @@ it("refreshing or toggling a Multica workspace keeps the connection, rules and a
 it("does not report an empty Multica workspace list before the list has been read", async () => {
   // The connection reads ready before the workspace list arrives, so an empty list is first a pending read.
   let release: ((value: unknown) => void) | undefined;
-  const h = await managementHarness((name, input) => name === "workspace.list" ? new Promise(resolve => { release = resolve; }) : name === "connection.status" ? readyStatus : empty(name, input));
+  const h = await settingsHarness((name, input) => name === "workspace.list" ? new Promise(resolve => { release = resolve; }) : name === "connection.status" ? readyStatus : empty(name, input));
   try {
     await vi.waitFor(() => { h.render("settings"); expect(release).toBeDefined(); });
     let page = h.render("settings");
@@ -708,7 +654,7 @@ it("does not report an empty Multica workspace list before the list has been rea
 
 it("the filter editor filters by category or by specific status, collapses long catalogs and saves the visible rule", async () => {
   const labels = Array.from({ length: 10 }, (_, index) => ({ id: `label-${index}`, name: `Label ${index}` }));
-  const h = await managementHarness((name, input) => {
+  const h = await settingsHarness((name, input) => {
     if (name === "connection.status") return readyStatus;
     if (name === "workspace.list") return { connectionKey: "current", workspaces: [{ id: "ws", name: "Team space", enabled: true, rule: defaultRule }] };
     if (name === "workspace.catalog") return { assignees: [], statuses: [{ key: "todo", name: "Todo", category: "unstarted" }], projects: [], labels };
@@ -740,7 +686,7 @@ it("the filter editor filters by category or by specific status, collapses long 
 });
 
 it("a lost CLI login shows the recovery command with a copy action instead of an empty connection", async () => {
-  const h = await managementHarness((name, input) => name === "connection.status"
+  const h = await settingsHarness((name, input) => name === "connection.status"
     ? { status: "not_logged_in", message: "CLI 未登录", profile: "work", configPath: "/home/user/.multica/profiles/work/config.json", source: { api: "config", credentials: "none", app: "none" }, loginCommand: "multica --profile work login" }
     : empty(name, input));
   try {

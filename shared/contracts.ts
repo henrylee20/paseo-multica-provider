@@ -21,17 +21,6 @@ export const connectionStatusSchema = z.object({
 export type ConnectionStatus = z.output<typeof connectionStatusSchema>;
 export const connectionStatus = defineRpc({ name: "connection.status", input: z.object({}), output: connectionStatusSchema });
 
-export const connectionIdentitySchema = z.object({
-  apiUrl: z.string(), appUrl: z.string().optional(), user: z.object({ id: z.string(), name: z.string(), email: z.string() }),
-  profiles: z.array(z.string()), lastVerifiedAt: z.string(),
-});
-export const connectionHistory = defineRpc({ name: "connection.history", input: z.object({}), output: z.object({
-  connections: z.array(connectionIdentitySchema.partial().extend({
-    connectionKey: z.string(), profiles: z.array(z.string()), projectCount: z.number().int().nonnegative(), issueCount: z.number().int().nonnegative(),
-    hiddenCount: z.number().int().nonnegative(),
-  })),
-}) });
-
 export const syncBootstrap = defineRpc({ name: "sync.bootstrap", input: z.object({}), output: z.object({
   status: z.enum(["ready", "unavailable"]), message: z.string().optional(),
 }) });

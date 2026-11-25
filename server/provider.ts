@@ -108,7 +108,7 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
               return;
             }
             if (!parsed.success || !issue || (parsed.data.data.discussion === "thread" && !issue.threads[parsed.data.data.rootId]) || issue.cwd !== input.config.cwd || sessions.has(input.sessionId)) {
-              emit({ type: "request.failed", requestId: input.requestId, error: { code: "unmapped_issue", message: "请在 Multica 管理页启用任务工作区后打开已导入的主讨论。" } });
+              emit({ type: "request.failed", requestId: input.requestId, error: { code: "unmapped_issue", message: "请在 Multica 设置启用任务工作区后打开已导入的主讨论。" } });
               return;
             }
             sessions.add(input.sessionId);
@@ -266,7 +266,7 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
             const capturedTurnId = activeTurns.get(input.sessionId);
             try {
               const address = addresses.get(input.sessionId);
-              if (!address) throw new Error("请在 Multica 管理页启用任务工作区后打开已导入的讨论。");
+              if (!address) throw new Error("请在 Multica 设置启用任务工作区后打开已导入的讨论。");
               if (lifecycle.unavailable(address)) throw new Error("此隐藏讨论正在核对本地归档状态，请稍后重试。");
               // Newer hosts may request local permission clearing on chat. This
               // is local collapse only; the prompt remains an ordinary comment.

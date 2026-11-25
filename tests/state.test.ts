@@ -66,8 +66,9 @@ it("reads old state while stripping removed fields without migration", async () 
   try {
     const issue = { remoteWorkspaceId: "remote", workspaceId: "native", cwd: directory, title: "Task", description: "Goal",
       stopEpochs: { main: 9 }, stopRecords: { old: { cleanup: "unknown" } }, deliveries: { old: { body: "Discarded input" } }, access: { status: "inaccessible" } };
-    await writeFile(join(directory, "state.json"), JSON.stringify({ version: 1, connections: { old: { rules: {}, projects: {}, issues: { task: issue } } } }));
+    await writeFile(join(directory, "state.json"), JSON.stringify({ version: 1, connections: { old: { identity: { user: { id: "former-user" } }, rules: {}, projects: {}, issues: { task: issue } } } }));
     const state = await new StateStore(directory).read();
+    expect(state.connections.old).not.toHaveProperty("identity");
     expect(state.connections.old.issues.task.title).toBe("Task");
     expect(state.connections.old.issues.task).not.toHaveProperty("stopEpochs");
     expect(state.connections.old.issues.task).not.toHaveProperty("stopRecords");

@@ -8,7 +8,7 @@ import { afterEach, expect, it } from "vitest";
 import type { PaseoApi } from "@getpaseo/client";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { ProviderConnection, ProviderEvent } from "@getpaseo/plugin/server/provider";
-import { workspaceEnable, syncBootstrap, connectionStatus, connectionHistory as historyRpc, multicaSettings, workspaceList } from "../shared/contracts.js";
+import { workspaceEnable, syncBootstrap, connectionStatus, multicaSettings, workspaceList } from "../shared/contracts.js";
 import { deliveryMentions } from "../shared/delivery.js";
 import { hiddenList } from "../shared/hiding.js";
 import { threadOpen } from "../shared/threads.js";
@@ -142,27 +142,6 @@ it("logout retires the authenticated workspace socket and leaves no old-cache re
   expect(f.requests.length).toBe(before);
 });
 
-it("management retains verified service and account history after logout without storing credentials", async () => {
-  const f = await fixture();
-  const original = await f.server.rpc(connectionStatus, {}, f.paseo);
-  await f.login(2);
-  const switched = await f.server.rpc(connectionStatus, {}, f.paseo);
-  await f.login(null);
-  await f.server.rpc(connectionStatus, {}, f.paseo);
-  const history = defineRpc({ name: "connection.history", input: z.object({}), output: z.object({ connections: z.array(z.object({
-    connectionKey: z.string(), apiUrl: z.string().optional(), user: z.object({ id: z.string(), name: z.string(), email: z.string() }).optional(), profiles: z.array(z.string()),
-    projectCount: z.number(), issueCount: z.number(), hiddenCount: z.number(),
-  })) }) });
-  const result = await f.server.rpc(history, {}, f.paseo);
-  expect(result.connections).toEqual(expect.arrayContaining([
-    expect.objectContaining({ connectionKey: original.connectionKey, apiUrl: f.primary.apiUrl, user: { id: "me", name: "Lin", email: "" }, profiles: [""], projectCount: 1, issueCount: 1 }),
-    expect.objectContaining({ connectionKey: switched.connectionKey, apiUrl: f.primary.apiUrl, user: { id: "other", name: "Kai", email: "" }, projectCount: 0, issueCount: 0 }),
-  ]));
-  expect(f.secretAbsent(result)).toBe(true);
-  expect(f.secretAbsent(await f.persisted())).toBe(true);
-  expect(await f.historyReader().rpc(history, {}, f.paseo)).toEqual(result);
-});
-
 it("credential rotation reuses history while account and service switches isolate mappings, roles, hiding and pending work", async () => {
   const f = await fixture();
   const original = f.address();
@@ -223,9 +202,7 @@ it("credential rotation reuses history while account and service switches isolat
   expect((await f.server.rpc(connectionStatus, {}, f.paseo)).connectionKey).toBe(original.connectionKey);
   expect(f.agents).toHaveLength(6);
   expect(originalThread.archivedAt).toBeTruthy();
-  const history = await f.server.rpc(historyRpc, {}, f.paseo);
-  expect(history.connections.find(connection => connection.connectionKey === original.connectionKey)).toMatchObject({ hiddenCount: 1 });
-  expect(f.secretAbsent([history, f.events, await f.persisted()])).toBe(true);
+  expect(f.secretAbsent([f.events, await f.persisted()])).toBe(true);
 });
 
 it("an account switch during Stop setup fails without sending an old cancellation", async () => {

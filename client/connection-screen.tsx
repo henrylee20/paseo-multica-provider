@@ -1,13 +1,11 @@
 import { useEffect, useState } from "react";
 import { Text, View } from "react-native";
 import { useRpc, useSettings, type PluginSurfaceProps } from "@getpaseo/plugin/client";
-import { copyText, ScrollView, SettingsAction, SettingsCard, SettingsInput, SettingsRow, SettingsSection, SettingsSwitch } from "@getpaseo/plugin/client/ui";
+import { copyText, SettingsAction, SettingsCard, SettingsInput, SettingsRow, SettingsSection, SettingsSwitch } from "@getpaseo/plugin/client/ui";
 import { connectionStatus, multicaSettings, workspaceList, workspaceEnable, type ConnectionStatus, type TaskRule } from "../shared/contracts.js";
 import { useSyncStatus } from "./sync-status.js";
 import { describeRule, WorkspaceRuleEditor } from "./workspace-rule.js";
 import { HiddenObjects } from "./hidden-objects.js";
-import { MentionReferences } from "./delivery-status.js";
-import { ConnectionHistory } from "./connection-history.js";
 import { HeaderAction, Notice } from "./ui-kit.js";
 
 type Workspace = { connectionKey: string; id: string; name: string; enabled: boolean; rule: TaskRule };
@@ -17,15 +15,7 @@ const labels: Record<ConnectionStatus["status"], string> = {
   not_logged_in: "未登录", authentication_failed: "登录已失效", offline: "无法连接", isolated_context: "任务上下文受隔离", invalid_settings: "插件设置无效",
 };
 
-export interface ConnectionScreenProps extends PluginSurfaceProps {
-  /** Settings shows what configures the connection; management adds the records that need handling. */
-  scope?: "settings" | "management";
-  openManagement?(): void;
-  /** Whether this Paseo host draws the composer's agent picker (0.16 and later). */
-  mentionPicker?: boolean;
-}
-
-export function ConnectionScreen({ host, theme, layout, navigation, scope = "management", openManagement, mentionPicker = false }: ConnectionScreenProps) {
+export function ConnectionScreen({ host, theme }: PluginSurfaceProps) {
   const settings = useSettings(multicaSettings);
   const readStatus = useRpc(connectionStatus);
   const listWorkspaces = useRpc(workspaceList);
@@ -167,23 +157,9 @@ export function ConnectionScreen({ host, theme, layout, navigation, scope = "man
     </SettingsCard> : null}
   </SettingsSection>;
 
-  if (scope === "settings") return <View>
-    {connection}
-    {rules}
-    {openManagement ? <SettingsSection title="记录与恢复">
-      <SettingsCard>
-        <SettingsAction label="Multica 管理页" hint="查看记录或恢复隐藏讨论。" actionLabel="打开管理页" onPress={openManagement} />
-      </SettingsCard>
-    </SettingsSection> : null}
-  </View>;
-  // The host hands a plugin screen a bare flex box: it neither scrolls nor pads, so the screen owns both.
-  // Settings is a page of the host's own settings view, which already scrolls.
-  return <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: layout.compact ? 16 : 24 }}>
-    {/* Records that need a decision come right after the connection; recovery and tools follow the rules. */}
+  return <View>
     {connection}
     {rules}
     <HiddenObjects theme={theme} refreshKey={refreshKey} />
-    <ConnectionHistory theme={theme} currentKey={status?.connectionKey} />
-    <MentionReferences theme={theme} refreshKey={refreshKey} mentionPicker={mentionPicker} />
-  </ScrollView>;
+  </View>;
 }

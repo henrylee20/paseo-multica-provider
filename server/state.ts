@@ -4,7 +4,7 @@ import { z } from "zod";
 import { storedRunSchema } from "./run-state.js";
 import { runMessageSchema } from "../shared/runs.js";
 import { threadSchema } from "./thread-state.js";
-import { connectionIdentitySchema, taskRuleSchema } from "../shared/contracts.js";
+import { taskRuleSchema } from "../shared/contracts.js";
 import { askuserAttachmentSchema, storedAskuserCardSchema } from "./askuser-state.js";
 
 const projectSchema = z.object({ cwd: z.string(), name: z.string(), slug: z.string().optional(), projectId: z.string().optional(), removed: z.boolean().optional() });
@@ -28,7 +28,6 @@ const issueSchema = z.object({
   mainHistory: threadSchema.default({ title: "主讨论", historyLoaded: false, rows: [], observed: {} }),
 });
 const connectionSchema = z.object({
-  identity: connectionIdentitySchema.optional(),
   rules: z.record(z.string(), taskRuleSchema.extend({ enabled: z.boolean() })),
   projects: z.record(z.string(), projectSchema), issues: z.record(z.string(), issueSchema),
 });

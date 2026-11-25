@@ -34,7 +34,7 @@ export function AskuserContents({ data, theme }: { data: AskuserCardData; theme:
   </View>;
 }
 
-export function AskuserCard(props: Props & { openManagement?: () => void }) {
+export function AskuserCard(props: Props) {
   const observe = useRpc(askuserObserve);
   const [data, setData] = useState(props.item.data);
   const { connectionKey, issueId, commentId, attachmentId, revision } = props.item.data;
@@ -53,10 +53,10 @@ export function AskuserCard(props: Props & { openManagement?: () => void }) {
     const timer = setInterval(() => { void refresh(); }, 10_000);
     return () => { active = false; clearInterval(timer); };
   }, [observe, connectionKey, issueId, commentId, attachmentId, revision]);
-  return <AskuserBody key={data.revision} data={data} theme={props.theme} onChanged={setData} openManagement={props.openManagement} />;
+  return <AskuserBody key={data.revision} data={data} theme={props.theme} onChanged={setData} />;
 }
 
-function AskuserBody({ data, theme, onChanged, openManagement }: { data: AskuserCardData; theme: PluginSurfaceProps["theme"]; onChanged: (card: AskuserCardData) => void; openManagement?: () => void }) {
+function AskuserBody({ data, theme, onChanged }: { data: AskuserCardData; theme: PluginSurfaceProps["theme"]; onChanged: (card: AskuserCardData) => void }) {
   const read = useRpc(askuserRead);
   const reopen = useRpc(askuserReopen);
   const skip = useRpc(askuserSkip);

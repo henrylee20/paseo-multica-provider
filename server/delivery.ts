@@ -63,7 +63,6 @@ export class CommentDelivery {
     return operation;
   }
   async waitForPosts() { await Promise.allSettled(this.posts.values()); }
-  async targets() { const state = await this.store.read(); return { issues: Object.entries(state.connections).flatMap(([connectionKey, connection]) => Object.entries(connection.issues).map(([issueId, issue]) => ({ connectionKey, issueId, title: issue.title }))) }; }
   async mentions(address: { connectionKey: string; issueId: string }) {
     const issue = (await this.store.read()).connections[address.connectionKey]?.issues[address.issueId];
     if (!issue) throw new Error("任务缓存不可用。");
