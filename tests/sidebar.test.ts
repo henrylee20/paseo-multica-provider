@@ -17,7 +17,7 @@ import { connectionStatus } from "../shared/contracts.js";
 import { hiddenRestore } from "../shared/hiding.js";
 
 const bootstrap = defineRpc({ name: "sync.bootstrap", input: z.object({}), output: z.object({ status: z.string() }) });
-const management = defineRpc({ name: "workspace.list", input: z.object({}), output: z.object({ workspaces: z.array(z.object({ id: z.string(), name: z.string(), enabled: z.boolean() })) }) });
+const workspaces = defineRpc({ name: "workspace.list", input: z.object({}), output: z.object({ workspaces: z.array(z.object({ id: z.string(), name: z.string(), enabled: z.boolean() })) }) });
 const enable = defineRpc({ name: "workspace.enable", input: z.object({ workspaceId: z.string(), enabled: z.boolean() }), output: z.object({ status: z.string() }) });
 const readDescription = defineRpc({ name: "description.read", input: z.object({ connectionKey: z.string(), issueId: z.string(), revision: z.string(), offset: z.number() }),
   output: z.object({ text: z.string(), nextOffset: z.number().nullable() }) });
@@ -177,7 +177,7 @@ async function fixture(syncIntervalMs = 15_000, homePrefix = "multica-sidebar-")
 it("client bootstrap leaves the native sidebar empty until a workspace rule is explicitly enabled", async () => {
   const f = await fixture();
   expect(await f.server.rpc(bootstrap, {}, f.paseo)).toMatchObject({ status: "ready" });
-  expect(await f.server.rpc(management, {}, f.paseo)).toEqual({ workspaces: [{ id: "remote-workspace", name: "产品开发", enabled: false }] });
+  expect(await f.server.rpc(workspaces, {}, f.paseo)).toEqual({ workspaces: [{ id: "remote-workspace", name: "产品开发", enabled: false }] });
   expect(f.requests.some(path => path.startsWith("/api/issues"))).toBe(false);
   expect(f.websocketRequests).toEqual([]);
 });
@@ -396,7 +396,7 @@ it("repeated bootstrap, title edits, token rotation and normal restart preserve 
   await f.dispose();
   const restarted = f.start();
   expect(await resync(restarted.server, f.paseo, "remote-workspace")).toMatchObject({ status: "ready" });
-  expect(await restarted.server.rpc(management, {}, f.paseo)).toMatchObject({ workspaces: [{ id: "remote-workspace", enabled: true }] });
+  expect(await restarted.server.rpc(workspaces, {}, f.paseo)).toMatchObject({ workspaces: [{ id: "remote-workspace", enabled: true }] });
   expect(f.native.workspaces.map(item => item.id)).toEqual(workspaceIds);
   expect(f.native.agents.map(item => item.id)).toEqual(agentIds);
   expect(f.native.workspaces[0].title).toBe("PRD-1 登录标题已修改");
@@ -659,8 +659,8 @@ it("typed multi-value filters intersect fields and keep directly assigned member
   rule.assignees = [{ type: "agent", id: "agent-owned" }];
   await f.server.rpc(ruleRpc, { workspaceId: "remote-workspace", rule }, f.paseo);
   expect(f.native.workspaces.map(item => !!item.archived)).toEqual([true, false]);
-  const managementRules = defineRpc({ name: "workspace.list", input: z.object({}), output: z.object({ workspaces: z.array(z.object({ id: z.string(), rule: ruleRpc.input.shape.rule })) }) });
-  expect((await f.server.rpc(managementRules, {}, f.paseo)).workspaces[0].rule).toEqual(rule);
+  const workspaceRules = defineRpc({ name: "workspace.list", input: z.object({}), output: z.object({ workspaces: z.array(z.object({ id: z.string(), rule: ruleRpc.input.shape.rule })) }) });
+  expect((await f.server.rpc(workspaceRules, {}, f.paseo)).workspaces[0].rule).toEqual(rule);
   await f.dispose();
   const restart = f.start();
   await resync(restart.server, f.paseo, "remote-workspace");
@@ -796,7 +796,7 @@ it("a restarted daemon keeps one retry worker after the connecting client leaves
   try {
     const restarted = f.start();
     expect(await restarted.server.rpc(bootstrap, {}, f.paseo)).toMatchObject({ status: "unavailable" });
-    // No further client RPC or management page is needed after this connection.
+    // No further client RPC or settings page is needed after this connection.
     f.remote.authStatus = 200;
     f.issues.push({ ...f.issues[0], id: "issue-after-client-close", title: "Recovered in background" });
     await vi.advanceTimersByTimeAsync(1000);

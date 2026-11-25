@@ -236,7 +236,7 @@ it("an account switch during Stop setup fails without sending an old cancellatio
   expect(f.events).toContainEqual(expect.objectContaining({ type: "request.failed", requestId: "switch-during-stop" }));
 });
 
-it("a management action opened under an old account cannot enable rules for a newly selected account", async () => {
+it("a settings action opened under an old account cannot enable rules for a newly selected account", async () => {
   const f = await fixture();
   const original = f.address().connectionKey;
   await f.login(2);

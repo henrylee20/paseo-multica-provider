@@ -23,7 +23,7 @@ async function bundledContribution(entry: string, runtime: Record<string, unknow
   return exports.default;
 }
 
-it("the host-compiled server entry registers CLI connection management", async () => {
+it("the host-compiled server entry registers CLI connection settings", async () => {
   const setup = await bundledContribution("../index.server.ts");
   const server = new FakeServer();
   const dispose = setup(server.context);
@@ -681,17 +681,17 @@ it("settings lists shared hidden objects and offers separate workspace and selec
   } finally { h.dispose(); }
 });
 
-it("settings hides empty recovery and removed management sections", async () => {
+it("settings shows only connection and rules when nothing is hidden", async () => {
   const answer: Answer = (name, input) => name === "connection.status" ? readyStatus : name === "workspace.list" ? { connectionKey: "current", workspaces: [] } : empty(name, input);
-  const management = await settingsHarness(answer);
+  const settings = await settingsHarness(answer);
   try {
-    await vi.waitFor(() => expect(management.render()).toContain("当前没有可用的 Multica 工作区"));
-    const page = management.render();
-    expect(management.calls.some(call => ["sync.status", "hidden.list"].includes(call.name))).toBe(false);
+    await vi.waitFor(() => expect(settings.render()).toContain("当前没有可用的 Multica 工作区"));
+    const page = settings.render();
+    expect(settings.calls.some(call => ["sync.status", "hidden.list"].includes(call.name))).toBe(false);
     for (const text of ["Multica 连接", "已连接 · Lin", "https://api.example.test", "Multica 工作区与筛选规则"]) expect(page).toContain(text);
     for (const text of ["人工隐藏", "停止结果", "评论投递", "只读历史", "历史连接", "提及 Agent", "恢复 CLI 登录", readyStatus.configPath, "凭据来源", "ID me"])
       expect(page).not.toContain(text);
-  } finally { management.dispose(); }
+  } finally { settings.dispose(); }
 
 });
 
