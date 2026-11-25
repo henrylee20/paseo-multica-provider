@@ -7,7 +7,7 @@ import type { PluginTimelineRendererContribution } from "@getpaseo/plugin/client
 import * as pluginRuntime from "@getpaseo/plugin";
 import * as zod from "zod";
 import { expect, it, vi } from "vitest";
-import type { TaskRule } from "../shared/contracts.js";
+import type { ProfileList, TaskRule } from "../shared/contracts.js";
 import { FakeServer } from "./support/fake-server.js";
 
 async function bundledContribution(entry: string, runtime: Record<string, unknown> = {}) {
@@ -598,7 +598,7 @@ async function settingsHarness(answer: Answer, host: { composerItems?: boolean }
   const calls: Array<{ name: string; input: unknown }> = [];
   const actions: Array<{ label: string; hint?: string; actionLabel: string; disabled?: boolean; onPress(): unknown }> = [];
   const switches: Array<{ label: string; value: boolean; disabled?: boolean; onValueChange(value: boolean): unknown }> = [];
-  const selects: Array<{ label: string; value: string; onValueChange(value: string): unknown }> = [];
+  const selects: Array<{ label: string; value: string; options: { label: string; value: string }[]; disabled?: boolean; hint?: string; error?: string; onValueChange(value: string): unknown }> = [];
   const pressables: Array<{ accessibilityLabel?: string; accessibilityRole?: string; accessibilityState?: { checked?: boolean | "mixed" }; disabled?: boolean; style?: { borderStyle?: string }; onPress(): unknown }> = [];
   const inputs: Array<{ accessibilityLabel: string; value: string; onChangeText(value: string): void }> = [];
   const modals: Array<{ title: string; onOpenChange(open: boolean): void }> = [];
@@ -609,11 +609,15 @@ async function settingsHarness(answer: Answer, host: { composerItems?: boolean }
   const scrolls: Array<{ style?: unknown; contentContainerStyle?: unknown }> = [];
   const rpcs = new Map<string, (input: unknown) => Promise<unknown>>();
   let profile = "";
+  const settings = { status: "ready", saving: false, saveError: null as string | null, error: "Settings validation failed" };
+  const settingsSave = vi.fn(async (values: { profile: string }, _revision: string) => { profile = values.profile; return true; });
+  const settingsReload = vi.fn(async () => {});
+  const settingsReset = vi.fn(async () => { profile = ""; settings.status = "ready"; return true; });
   const passthrough = (props: Record<string, unknown>) => [props.label, props.title, props.info, props.hint, props.error, props.trailing, props.children];
   const setup = await bundledContribution("../index.client.tsx", {
     react: tree.react,
     "@getpaseo/plugin/client": {
-      useSettings: () => ({ status: "ready", values: { profile }, revision: "1", saving: false, saveError: null, reload: async () => {}, save: async () => true, reset: async () => true }),
+      useSettings: () => ({ ...settings, values: { profile }, revision: "1", reload: settingsReload, save: settingsSave, reset: settingsReset }),
       useRpc: (contract: { name: string }) => {
         if (!rpcs.has(contract.name)) rpcs.set(contract.name, async input => { calls.push({ name: contract.name, input }); return contract.name === "connection.status" ? { sync: { status: "ready", stage: "idle", completedWorkspaces: 1, enabledWorkspaces: 1 }, hidden: [], ...(await answer(contract.name, input) as object) } : answer(contract.name, input); });
         return rpcs.get(contract.name);
@@ -621,10 +625,10 @@ async function settingsHarness(answer: Answer, host: { composerItems?: boolean }
     },
     "@getpaseo/plugin/client/ui": {
       Markdown: ({ children }: { children: string }) => children, Icon: () => null, ExternalLink: ({ children }: { children: unknown }) => children,
-      SettingsSection: passthrough, SettingsCard: passthrough, SettingsInput: passthrough, SettingsRow: passthrough,
+      SettingsSection: passthrough, SettingsCard: passthrough, SettingsRow: passthrough,
       SettingsAction: (props: typeof actions[number] & { error?: string }) => { actions.push(props); return [props.label, props.hint, props.error, props.actionLabel]; },
       SettingsSwitch: (props: typeof switches[number] & { hint?: string }) => { switches.push(props); return [props.label, props.hint]; },
-      SettingsSelect: (props: typeof selects[number] & { hint?: string }) => { selects.push(props); return [props.label, props.hint]; },
+      SettingsSelect: (props: typeof selects[number]) => { selects.push(props); return [props.label, props.hint, props.error]; },
       Modal: Object.assign((props: typeof modals[number] & { children: unknown }) => { modals.push(props); return [props.title, props.children]; },
         { Content: (props: typeof modalContents[number]) => { modalContents.push(props); return props.children; } }),
       TextInput: (props: typeof inputs[number]) => { inputs.push(props); return null; },
@@ -642,6 +646,7 @@ async function settingsHarness(answer: Answer, host: { composerItems?: boolean }
   const colors = { surface0: "base", surface1: "raised", surface2: "control", border: "border", accent: "accent", accentForeground: "on-accent", foreground: "fg", foregroundMuted: "muted", statusDanger: "danger", statusWarning: "warning", statusSuccess: "success" };
   return {
     calls, actions, switches, selects, pressables, inputs, modals, modalContents, copied, opened, navigation, scrolls, composerItems,
+    settings, settingsSave, settingsReload, settingsReset,
     setProfile(value: string) { profile = value; },
     render(screen: "settings" = "settings", props: Record<string, unknown> = {}) {
       actions.length = 0; switches.length = 0; selects.length = 0; pressables.length = 0; scrolls.length = 0; inputs.length = 0; modals.length = 0; modalContents.length = 0;
@@ -663,7 +668,138 @@ async function settingsHarness(answer: Answer, host: { composerItems?: boolean }
 const readyStatus = { status: "ready", message: "已验证", profile: "", connectionKey: "current", apiUrl: "https://api.example.test", appUrl: "https://app.example.test", configPath: "/home/user/.multica/config.json",
   source: { api: "config", credentials: "config", app: "config" }, user: { id: "me", name: "Lin", email: "lin@example.test" }, loginCommand: "multica login" };
 const defaultRule: TaskRule = { statusCategories: ["unstarted", "started"], statuses: [], assignees: [], projectIds: [], labelIds: [] };
-const empty: Answer = name => name === "workspace.preview" ? { total: 0, imported: 0, entering: 0, leaving: [] } : undefined;
+const empty: Answer = name => name === "workspace.preview" ? { total: 0, imported: 0, entering: 0, leaving: [] }
+  : name === "profile.list" ? { profiles: [], overridden: false, isolated: false } : undefined;
+
+it("the profile dropdown lists logged-in choices and retains logged-out or missing selections", async () => {
+  const h = await settingsHarness((name, input) => name === "profile.list" ? { profiles: [
+    { name: "", loggedIn: true, apiHost: "default.example.test" },
+    { name: "office", loggedIn: true, apiHost: "office.example.test:8443" },
+    { name: "logout", loggedIn: false, apiHost: "logout.example.test" },
+    { name: "other-logout", loggedIn: false },
+  ], overridden: false, isolated: false } : name === "connection.status" ? readyStatus : empty(name, input));
+  try {
+    h.setProfile("logout");
+    await vi.waitFor(() => { h.render(); expect(h.selects[0].disabled).toBe(false); });
+    expect(h.selects[0]).toMatchObject({ value: "logout", hint: "仅列出已在 daemon 主机登录的 profile。", options: [
+      { value: "", label: "默认 · default.example.test" },
+      { value: "office", label: "office · office.example.test:8443" },
+      { value: "logout", label: "logout · logout.example.test（未登录）" },
+    ] });
+    h.setProfile("missing"); h.render();
+    expect(h.selects[0].options).toEqual([
+      { value: "", label: "默认 · default.example.test" },
+      { value: "office", label: "office · office.example.test:8443" },
+      { value: "missing", label: "missing（未登录）" },
+    ]);
+    h.selects[0].onValueChange("missing");
+    expect(h.settingsSave).not.toHaveBeenCalled();
+    h.selects[0].onValueChange("../unsafe");
+    expect(h.render()).toContain("Profile 必须是单个名称");
+    expect(h.settingsSave).not.toHaveBeenCalled();
+    const statusReads = h.calls.filter(call => call.name === "connection.status").length;
+    h.selects[0].onValueChange("office");
+    await vi.waitFor(() => { h.render(); expect(h.calls.filter(call => call.name === "connection.status").length).toBeGreaterThan(statusReads); });
+    expect(h.settingsSave).toHaveBeenCalledExactlyOnceWith({ profile: "office" }, "1");
+    expect(h.selects[0].value).toBe("office");
+    expect(h.render()).not.toContain("Profile 必须是单个名称");
+    expect(h.calls.filter(call => call.name === "profile.list")).toHaveLength(1);
+    expect(h.modals).toHaveLength(0);
+  } finally { h.dispose(); }
+});
+
+it("loads profiles on mount, header refresh and host changes, discarding late reads from the previous host", async () => {
+  const pending: Array<(value: ProfileList) => void> = [];
+  const result = (name: string): ProfileList => ({ profiles: [{ name, loggedIn: true }], overridden: false, isolated: false });
+  const h = await settingsHarness((name, input) => name === "profile.list" ? new Promise(resolve => pending.push(resolve))
+    : name === "connection.status" ? readyStatus : empty(name, input));
+  try {
+    h.render();
+    expect(h.selects[0]).toMatchObject({ disabled: true, value: "", options: [{ value: "", label: "默认（未登录）" }] });
+    expect(pending).toHaveLength(1);
+    pending[0](result("office"));
+    await vi.waitFor(() => { h.render(); expect(h.selects[0].disabled).toBe(false); });
+    h.press("刷新"); h.render();
+    expect(h.settingsReload).toHaveBeenCalledTimes(1);
+    expect(h.selects[0].disabled).toBe(true);
+    expect(pending).toHaveLength(2);
+    const nextHost = { host: { id: "another-host", label: "Another host" } };
+    h.render("settings", nextHost);
+    expect(h.selects[0]).toMatchObject({ disabled: true, options: [{ value: "", label: "默认（未登录）" }] });
+    expect(pending).toHaveLength(3);
+    pending[2](result("new-host"));
+    await vi.waitFor(() => { h.render("settings", nextHost); expect(h.selects[0].disabled).toBe(false); });
+    pending[1](result("old-host"));
+    await Promise.resolve(); await Promise.resolve();
+    h.render("settings", nextHost);
+    expect(h.selects[0].options.map(option => option.value)).toEqual(["new-host", ""]);
+    expect(h.calls.filter(call => call.name === "profile.list")).toHaveLength(3);
+  } finally { h.dispose(); }
+});
+
+it("a failed profile list shows a row error and only the configured profile, and refresh retries", async () => {
+  let failed = true;
+  const h = await settingsHarness((name, input) => {
+    if (name === "profile.list") return failed ? Promise.reject(new Error("unreadable CLI root"))
+      : { profiles: [{ name: "office", loggedIn: true }], overridden: false, isolated: false };
+    return name === "connection.status" ? readyStatus : empty(name, input);
+  });
+  try {
+    h.setProfile("missing");
+    await vi.waitFor(() => expect(h.render()).toContain("无法读取此主机的 CLI profile"));
+    expect(h.selects[0]).toMatchObject({ value: "missing", options: [{ value: "missing", label: "missing（未登录）" }] });
+    failed = false; h.press("刷新");
+    await vi.waitFor(() => { h.render(); expect(h.selects[0].options).toHaveLength(2); });
+    expect(h.selects[0].error).toBeUndefined();
+  } finally { h.dispose(); }
+});
+
+it.each([
+  { overridden: true, isolated: false }, { overridden: false, isolated: true }, { overridden: true, isolated: true },
+])("the profile row explains overrides and disables isolated contexts: %j", async flags => {
+  const h = await settingsHarness((name, input) => name === "profile.list" ? { profiles: [{ name: "office", loggedIn: true }], ...flags }
+    : name === "connection.status" ? readyStatus : empty(name, input));
+  try {
+    await vi.waitFor(() => { h.render(); expect(h.selects[0].hint).toContain(flags.isolated ? "任务上下文不能使用拥有者的 profile" : "环境变量覆盖 CLI 凭据"); });
+    if (flags.overridden) expect(h.selects[0].hint).toContain("切换 profile 不会改变账号");
+    expect(h.selects[0].disabled).toBe(flags.isolated);
+    h.selects[0].onValueChange("office");
+    expect(h.settingsSave).toHaveBeenCalledTimes(flags.isolated ? 0 : 1);
+  } finally { h.dispose(); }
+});
+
+it("disables profile selection while saving and displays save failures without changing the selected profile", async () => {
+  const h = await settingsHarness((name, input) => name === "profile.list" ? { profiles: [{ name: "office", loggedIn: true }], overridden: false, isolated: false }
+    : name === "connection.status" ? readyStatus : empty(name, input));
+  try {
+    await vi.waitFor(() => { h.render(); expect(h.selects[0].disabled).toBe(false); });
+    h.settings.saving = true; h.render();
+    expect(h.selects[0].disabled).toBe(true);
+    h.selects[0].onValueChange("office");
+    expect(h.settingsSave).not.toHaveBeenCalled();
+    h.settings.saving = false;
+    h.settingsSave.mockImplementation(async () => { h.settings.saveError = "无法保存 profile"; return false; });
+    const statusReads = h.calls.filter(call => call.name === "connection.status").length;
+    h.render(); h.selects[0].onValueChange("office");
+    await vi.waitFor(() => expect(h.render()).toContain("无法保存 profile"));
+    expect(h.selects[0].value).toBe("");
+    expect(h.calls.filter(call => call.name === "connection.status")).toHaveLength(statusReads);
+  } finally { h.dispose(); }
+});
+
+it("keeps the settings loading row and invalid-settings reset action", async () => {
+  const h = await settingsHarness((name, input) => name === "connection.status" ? readyStatus : empty(name, input));
+  try {
+    h.settings.status = "loading";
+    expect(h.render()).toContain("正在读取设置…");
+    expect(h.selects).toHaveLength(0);
+    h.settings.status = "invalid";
+    expect(h.render()).toContain("已保存的插件设置无效");
+    h.action("重置为默认 profile").onPress();
+    await vi.waitFor(() => { h.render(); expect(h.selects[0].value).toBe(""); });
+    expect(h.settingsReset).toHaveBeenCalledTimes(1);
+  } finally { h.dispose(); }
+});
 
 it("settings lists shared hidden objects and offers separate workspace and selected-tab restoration", async () => {
   const objects = [
@@ -673,7 +809,8 @@ it("settings lists shared hidden objects and offers separate workspace and selec
   const h = await settingsHarness(name => {
     if (name === "hidden.restore") return { status: "ready" };
     if (name === "workspace.list") return { workspaces: [] };
-    return { hidden: objects, status: "offline", message: "offline", profile: "", source: { api: "none", credentials: "none", app: "none" }, loginCommand: "multica login" };
+    if (name === "connection.status") return { hidden: objects, status: "offline", message: "offline", profile: "", source: { api: "none", credentials: "none", app: "none" }, loginCommand: "multica login" };
+    return empty(name, {});
   });
   try {
     await vi.waitFor(() => { expect(h.render()).toContain("人工隐藏"); expect(h.render()).toContain("Task · Root"); });
@@ -782,7 +919,7 @@ it.each([
     await vi.waitFor(() => expect(h.render()).toContain("Team space"));
     h.action("编辑筛选").onPress();
     await vi.waitFor(() => expect(h.render()).toContain("In Review"));
-    expect(h.selects).toEqual([]);
+    expect(h.selects.map(select => select.label)).toEqual(["CLI profile"]);
     for (const label of clicks) { h.press(label); h.render(); }
     if (expected.statuses.length) {
       expect(h.checkbox("进行中").accessibilityState).toEqual({ checked: "mixed" });
@@ -1392,7 +1529,7 @@ it("polls settings every two seconds during sync and returns to ten seconds when
   let syncing = true;
   const h = await settingsHarness(name => name === "connection.status"
     ? { ...readyStatus, sync: { status: syncing ? "syncing" : "ready", stage: syncing ? "issues" : "idle", completedWorkspaces: 0, enabledWorkspaces: 1 } }
-    : { connectionKey: "current", workspaces: [] });
+    : name === "workspace.list" ? { connectionKey: "current", workspaces: [] } : empty(name, {}));
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   const reads = () => h.calls.filter(call => call.name === "connection.status").length;
   try {
@@ -1410,6 +1547,7 @@ it("polls settings every two seconds during sync and returns to ten seconds when
     expect(reads()).toBe(2);
     await vi.advanceTimersByTimeAsync(1);
     expect(reads()).toBe(3);
+    expect(h.calls.filter(call => call.name === "profile.list")).toHaveLength(1);
   } finally { h.dispose(); vi.useRealTimers(); }
 });
 
@@ -1420,7 +1558,7 @@ it("shows the daemon read error even when the previous status was syncing", asyn
       if (failed) throw new Error("daemon disconnected");
       return { ...readyStatus, sync: { status: "syncing", stage: "issues", completedWorkspaces: 0, enabledWorkspaces: 1 } };
     }
-    return { connectionKey: "current", workspaces: [] };
+    return name === "workspace.list" ? { connectionKey: "current", workspaces: [] } : empty(name, {});
   });
   try {
     await vi.waitFor(() => expect(h.render()).toContain("任务与筛选核对"));

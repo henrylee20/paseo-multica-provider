@@ -7,6 +7,12 @@ export const multicaSettings = defineSettings({
   schema: z.object({ profile: z.string().trim().max(128).refine(value => value !== "." && value !== ".." && !/[\\/\u0000-\u001f]/.test(value), "Profile must be a single safe name").default("") }),
 });
 
+export const profileList = defineRpc({ name: "profile.list", input: z.object({}), output: z.object({
+  profiles: z.array(z.object({ name: z.string(), loggedIn: z.boolean(), apiHost: z.string().optional() })),
+  overridden: z.boolean(), isolated: z.boolean(),
+}) });
+export type ProfileList = z.output<typeof profileList.output>;
+
 export const connectionStatusSchema = z.object({
   status: z.enum(["ready", "missing_config", "unreadable_config", "invalid_config", "not_logged_in", "authentication_failed", "offline", "isolated_context", "invalid_settings"]),
   profile: z.string(),

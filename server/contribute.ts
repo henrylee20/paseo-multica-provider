@@ -4,8 +4,8 @@ import { RunDetails } from "./run-details.js";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { PluginServerContribution } from "@getpaseo/plugin/server";
-import { multicaSettings, connectionStatus, syncBootstrap, workspaceList, workspaceEnable, workspaceRule, workspacePreview, workspaceCatalog, taskRuleSchema } from "../shared/contracts.js";
-import { createConnectionResolver, type AuthenticatedConnection, type ConnectionDependencies } from "./connection.js";
+import { multicaSettings, profileList, connectionStatus, syncBootstrap, workspaceList, workspaceEnable, workspaceRule, workspacePreview, workspaceCatalog, taskRuleSchema } from "../shared/contracts.js";
+import { createConnectionResolver, listProfiles, type AuthenticatedConnection, type ConnectionDependencies } from "./connection.js";
 import { StateStore } from "./state.js";
 import { SidebarSynchronizer, importedIssues } from "./sync.js";
 import { connectNativeHost, type NativeHost } from "./native-host.js";
@@ -37,9 +37,11 @@ export interface ServerDependencies extends ConnectionDependencies {
 export function createServerContribution(dependencies: Partial<ServerDependencies> = {}): PluginServerContribution {
   return server => {
     const settings = server.registerSettings(multicaSettings);
-    const resolve = createConnectionResolver({ homeDirectory: dependencies.homeDirectory ?? homedir(),
+    const connectionDependencies = { homeDirectory: dependencies.homeDirectory ?? homedir(),
       workingDirectory: dependencies.workingDirectory ?? process.cwd(), environment: dependencies.environment ?? process.env,
-      currentProfile: async () => { const state = await settings.read(); return state.status === "ready" ? state.values.profile : undefined; } });
+      currentProfile: async () => { const state = await settings.read(); return state.status === "ready" ? state.values.profile : undefined; } };
+    const resolve = createConnectionResolver(connectionDependencies);
+    server.handle(profileList, () => listProfiles(connectionDependencies));
     server.handle(connectionStatus, async () => {
       const details = { sync: synchronizer.status(), hidden: (await hiding.list()).objects };
       const state = await settings.read();

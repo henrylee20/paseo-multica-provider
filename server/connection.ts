@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
-import { readFile, stat } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { z } from "zod";
-import type { ConnectionStatus } from "../shared/contracts.js";
+import { multicaSettings, type ConnectionStatus, type ProfileList } from "../shared/contracts.js";
 
 export interface ConnectionDependencies {
   homeDirectory: string;
@@ -27,6 +27,38 @@ const cliConfig = z.object({ server_url: z.string().nullish(), app_url: z.string
 const remoteUser = z.object({ id: z.string().min(1), name: z.string().nullish(), email: z.string().nullish() });
 const identityTtlMs = 60_000;
 
+/** Read CLI profiles without touching the active connection's config or identity cache. */
+export async function listProfiles(dependencies: ConnectionDependencies): Promise<ProfileList> {
+  const env = dependencies.environment;
+  const overridden = !!(env.MULTICA_TOKEN?.trim() || env.MULTICA_SERVER_URL?.trim());
+  const isolated = await isTaskContext(env, () => hasTaskMarker(dependencies.workingDirectory));
+  if (isolated) return { profiles: [], overridden, isolated };
+  const taskRoot = env.MULTICA_TASK_CONFIG_ROOT?.trim();
+  if (taskRoot && !isAbsolute(taskRoot)) throw new Error("MULTICA_TASK_CONFIG_ROOT 必须是绝对路径。");
+  const root = taskRoot || join(dependencies.homeDirectory, ".multica");
+  const names = [""];
+  try {
+    const entries = await readdir(join(root, "profiles"), { withFileTypes: true });
+    names.push(...entries.filter(entry => {
+      const parsed = multicaSettings.schema.shape.profile.safeParse(entry.name);
+      return entry.isDirectory() && parsed.success && parsed.data === entry.name;
+    }).map(entry => entry.name).sort());
+  } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  const profiles: ProfileList["profiles"] = [];
+  for (const name of names) {
+    const profile: ProfileList["profiles"][number] = { name, loggedIn: false };
+    try {
+      const config = cliConfig.parse(JSON.parse(await readFile(join(root, ...(name ? ["profiles", name] : []), "config.json"), "utf8")));
+      if (config.server_url) {
+        try { profile.apiHost = new URL(normalizeApiUrl(config.server_url)).host; } catch { /* Invalid URLs have no host label. */ }
+      }
+      profile.loggedIn = !!(config.token?.trim() && profile.apiHost);
+    } catch (error) { if (name && (error as NodeJS.ErrnoException).code === "ENOENT") continue; }
+    profiles.push(profile);
+  }
+  return { profiles, overridden, isolated };
+}
+
 /** File metadata is checked on every use; parsed credentials stay in daemon memory. */
 export function createConnectionResolver(dependencies: ConnectionDependencies) {
   let active: { fingerprint: string; controller: AbortController; identity?: AuthenticatedConnection["identity"] } | undefined;
@@ -42,8 +74,7 @@ export function createConnectionResolver(dependencies: ConnectionDependencies) {
       loginCommand: profile ? `multica --profile '${profile.replaceAll("'", "'\\''")}' login` : "multica login",
     };
     const fail = (status: ConnectionStatus["status"], message: string) => ({ status: { ...base, status, message } });
-    const taskContext = !!(env.MULTICA_AGENT_ID || env.MULTICA_TASK_ID || env.MULTICA_DAEMON_PORT)
-      || await (taskMarker ??= hasTaskMarker(dependencies.workingDirectory));
+    const taskContext = await isTaskContext(env, () => taskMarker ??= hasTaskMarker(dependencies.workingDirectory));
     const taskRoot = env.MULTICA_TASK_CONFIG_ROOT?.trim();
     if (taskContext && !taskRoot) return fail("isolated_context", "任务上下文缺少 MULTICA_TASK_CONFIG_ROOT，不能读取拥有者登录。");
     if (taskRoot && !isAbsolute(taskRoot)) return fail("isolated_context", "MULTICA_TASK_CONFIG_ROOT 必须是绝对路径。");
@@ -168,6 +199,10 @@ function normalizeAppUrl(raw: string) {
   const url = new URL(raw.trim());
   if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) throw new Error("Invalid app URL");
   return raw.trim().replace(/\/+$/, "");
+}
+
+async function isTaskContext(env: NodeJS.ProcessEnv, marker: () => Promise<boolean>) {
+  return !!(env.MULTICA_AGENT_ID || env.MULTICA_TASK_ID || env.MULTICA_DAEMON_PORT) || await marker();
 }
 
 async function hasTaskMarker(cwd: string) {
