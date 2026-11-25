@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Text, View } from "react-native";
 import { useRpc, useSettings, type PluginSurfaceProps } from "@getpaseo/plugin/client";
-import { copyText, ExternalLink, SettingsAction, SettingsCard, SettingsInput, SettingsRow, SettingsSection, SettingsSwitch } from "@getpaseo/plugin/client/ui";
+import { copyText, ExternalLink, ScrollView, SettingsAction, SettingsCard, SettingsInput, SettingsRow, SettingsSection, SettingsSwitch } from "@getpaseo/plugin/client/ui";
 import { connectionStatus, multicaSettings, workspaceList, workspaceEnable, type ConnectionStatus, type TaskRule } from "../shared/contracts.js";
 import { useSyncStatus } from "./sync-status.js";
 import { describeRule, WorkspaceRuleEditor } from "./workspace-rule.js";
@@ -26,7 +26,7 @@ export interface ConnectionScreenProps extends PluginSurfaceProps {
   openManagement?(): void;
 }
 
-export function ConnectionScreen({ host, theme, navigation, scope = "management", openManagement }: ConnectionScreenProps) {
+export function ConnectionScreen({ host, theme, layout, navigation, scope = "management", openManagement }: ConnectionScreenProps) {
   const settings = useSettings(multicaSettings);
   const readStatus = useRpc(connectionStatus);
   const listWorkspaces = useRpc(workspaceList);
@@ -185,8 +185,10 @@ export function ConnectionScreen({ host, theme, navigation, scope = "management"
       </SettingsCard>
     </SettingsSection> : null}
   </View>;
-  // Records that need a decision come right after the connection; recovery and tools follow the rules.
-  return <View>
+  // The host hands a plugin screen a bare flex box: it neither scrolls nor pads, so the screen owns both.
+  // Settings is a page of the host's own settings view, which already scrolls.
+  return <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: layout.compact ? 16 : 24 }}>
+    {/* Records that need a decision come right after the connection; recovery and tools follow the rules. */}
     {connection}
     <DeliveryManagement theme={theme} navigation={navigation} host={host} refreshKey={refreshKey} />
     <StopResults theme={theme} refreshKey={refreshKey} />
@@ -195,5 +197,5 @@ export function ConnectionScreen({ host, theme, navigation, scope = "management"
     <ReadonlyHistory theme={theme} />
     <ConnectionHistory theme={theme} currentKey={status?.connectionKey} />
     <MentionReferences theme={theme} refreshKey={refreshKey} />
-  </View>;
+  </ScrollView>;
 }

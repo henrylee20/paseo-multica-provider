@@ -437,6 +437,7 @@ async function managementHarness(answer: Answer) {
   const copied: string[] = [];
   const opened: unknown[] = [];
   const navigation: unknown[] = [];
+  const scrolls: Array<{ style?: unknown; contentContainerStyle?: unknown }> = [];
   const rpcs = new Map<string, (input: unknown) => Promise<unknown>>();
   const passthrough = (props: Record<string, unknown>) => [props.label, props.title, props.info, props.hint, props.error, props.trailing, props.children];
   const setup = await bundledContribution("../index.client.tsx", {
@@ -456,6 +457,7 @@ async function managementHarness(answer: Answer) {
       SettingsSelect: (props: typeof selects[number] & { hint?: string }) => { selects.push(props); return [props.label, props.hint]; },
       Modal: Object.assign(({ title, children }: { title: string; children: unknown }) => [title, children], { Content: ({ children }: { children: unknown }) => children }),
       copyText: async (text: string) => { copied.push(text); },
+      ScrollView: (props: typeof scrolls[number] & { children?: unknown }) => { scrolls.push(props); return props.children; },
     },
     "react-native": { View: "View", Text: "Text", Pressable: (props: typeof pressables[number] & { children: unknown }) => { pressables.push(props); return props.children; } },
   });
@@ -466,10 +468,11 @@ async function managementHarness(answer: Answer) {
     addSidebarHeaderItem: () => () => {}, addTimelineRenderer: () => () => {} });
   const colors = { foreground: "fg", foregroundMuted: "muted", statusDanger: "danger", statusWarning: "warning", statusSuccess: "success" };
   return {
-    calls, actions, switches, selects, pressables, copied, opened, navigation,
-    render(screen: "settings" | "management" = "management") {
-      actions.length = 0; switches.length = 0; selects.length = 0; pressables.length = 0;
-      return tree.render(createElement(screens[screen], { host: { id: "host", label: "Host" }, theme: { colors }, navigation: { openAgent: (input: unknown) => navigation.push(input) } }));
+    calls, actions, switches, selects, pressables, copied, opened, navigation, scrolls,
+    render(screen: "settings" | "management" = "management", props: Record<string, unknown> = {}) {
+      actions.length = 0; switches.length = 0; selects.length = 0; pressables.length = 0; scrolls.length = 0;
+      return tree.render(createElement(screens[screen], { host: { id: "host", label: "Host" }, theme: { colors }, layout: { compact: false, platform: "web" },
+        navigation: { openAgent: (input: unknown) => navigation.push(input) }, ...props }));
     },
     action(actionLabel: string) { const found = actions.find(action => action.actionLabel === actionLabel); expect(found, actionLabel).toBeDefined(); return found!; },
     dispose() { tree.unmount(); dispose(); },
@@ -561,6 +564,23 @@ it("management hides empty record sections, and settings links to management ins
     settings.action("打开管理页").onPress();
     expect(settings.opened).toEqual([{ screenId: "management" }]);
   } finally { settings.dispose(); }
+});
+
+it("management scrolls inside its own padded ScrollView; settings leaves scrolling to the host page", async () => {
+  // The host hands a plugin screen a bare flex box that neither scrolls nor pads, so a page taller
+  // than the window is unreachable until the screen provides the scroll area itself.
+  const h = await managementHarness(empty);
+  try {
+    expect(h.render()).toContain("Multica 连接");
+    expect(h.scrolls).toHaveLength(1);
+    expect(h.scrolls[0].style).toEqual({ flex: 1 });
+    expect(h.scrolls[0].contentContainerStyle).toEqual({ padding: 24 });
+    h.render("settings");
+    expect(h.scrolls).toHaveLength(0);
+    h.render("management", { layout: { compact: true, platform: "ios" } });
+    expect(h.scrolls).toHaveLength(1);
+    expect(h.scrolls[0].contentContainerStyle).toEqual({ padding: 16 });
+  } finally { h.dispose(); }
 });
 
 it("refreshing or toggling a Multica workspace keeps the connection, rules and an open filter editor on screen", async () => {

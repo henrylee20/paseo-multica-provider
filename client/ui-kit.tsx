@@ -16,7 +16,8 @@ export function CardBody({ children, gap = 6 }: { children: ReactNode; gap?: num
 /** A section header's trailing action, as Paseo places Refresh or Add. */
 export function HeaderAction({ theme, label, icon = "RefreshCw", onPress, disabled }: { theme: Theme; label: string; icon?: string; onPress(): void; disabled?: boolean }) {
   return <Pressable accessibilityRole="button" accessibilityLabel={label} hitSlop={8} disabled={disabled} onPress={onPress}
-    style={{ flexDirection: "row", alignItems: "center", gap: 4, opacity: disabled ? 0.5 : 1 }}>
+    // The 4px right margin mirrors the section header's own left inset, so the label ends on the card's rail.
+    style={{ flexDirection: "row", alignItems: "center", gap: 4, marginRight: 4, opacity: disabled ? 0.5 : 1 }}>
     <Icon name={icon} size={14} color={theme.colors.foregroundMuted} />
     <Text style={{ color: theme.colors.foregroundMuted, fontSize: 13 }}>{label}</Text>
   </Pressable>;
