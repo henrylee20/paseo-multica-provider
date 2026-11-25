@@ -169,10 +169,7 @@ export class SidebarSynchronizer {
       cursor = next;
     }
     const workspaceActive = await findActiveWorkspace(this.host!, issue.workspaceId);
-    if (issue.archiveReason && !workspaceActive && !activeAgents.length) {
-      if (issue.archivePending) await this.options.store.update(state => { state.connections[connectionKey].issues[issueId].archivePending = false; });
-      return;
-    }
+    if (issue.archiveReason && !workspaceActive && !activeAgents.length) return;
     // Native prompt admission can reopen an agent inside an archived workspace.
     // Preserve the original restore set while repairing that later native drift.
     await this.options.store.update(state => {
@@ -181,7 +178,6 @@ export class SidebarSynchronizer {
         mapping.archiveReason = reason;
         mapping.ruleArchivedAgentIds = activeAgents;
       }
-      mapping.archivePending = true;
     });
     // An already archived workspace ignores bulk archive. Restore its record
     // before bulk teardown, whose close path does not interrupt remote Runs.
@@ -198,7 +194,6 @@ export class SidebarSynchronizer {
       const result = await this.host!.archiveWorkspace(issue.workspaceId);
       if (result.error) throw new Error("Native workspace archive failed");
     }
-    await this.options.store.update(state => { state.connections[connectionKey].issues[issueId].archivePending = false; });
   }
 
   private async removeDisabledProjects(connectionKey: string) {
@@ -319,7 +314,6 @@ export class SidebarSynchronizer {
           await this.options.store.update(state => {
             const saved = state.connections[connection.connectionKey].issues[issue.id];
             delete saved.archiveReason;
-            saved.archivePending = false;
             saved.ruleArchivedAgentIds = [];
           });
         }

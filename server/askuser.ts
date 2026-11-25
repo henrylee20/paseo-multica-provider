@@ -69,7 +69,7 @@ export class AskUsers {
     this.unsubscribe = store.subscribe(state => {
       for (const [connectionKey, connection] of Object.entries(state.connections)) for (const [issueId, issue] of Object.entries(connection.issues)) {
         const key = JSON.stringify([connectionKey, issueId]);
-        const availability = JSON.stringify([issue.archiveReason, issue.archivePending, issue.manualHidden]);
+        const availability = JSON.stringify([issue.archiveReason, issue.manualHidden]);
         const previous = this.availability.get(key);
         this.availability.set(key, availability);
         if (previous !== availability) this.project(connectionKey, issueId, issue);

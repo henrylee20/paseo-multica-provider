@@ -12,7 +12,8 @@ export const issueSchema = z.object({
   remoteWorkspaceId: z.string(), workspaceId: z.string(), cwd: z.string(), title: z.string(),
   projectId: z.string().optional(),
   description: z.string(), updatedAt: z.string().optional(), workspaceCreated: z.boolean().default(false), mainAgentId: z.string().optional(),
-  archiveReason: z.enum(["rule_disabled", "filter_exit", "inaccessible"]).optional(), ruleArchivedAgentIds: z.array(z.string()).default([]), archivePending: z.boolean().default(false),
+  // "inaccessible" is accepted only so states written before OPT-08 remain readable.
+  archiveReason: z.enum(["rule_disabled", "filter_exit", "inaccessible"]).optional(), ruleArchivedAgentIds: z.array(z.string()).default([]),
   manualHidden: z.object({ workspace: z.boolean(), discussions: z.array(z.string()) }).default({ workspace: false, discussions: [] }),
   threads: z.record(z.string(), threadSchema).default({}),
   runs: z.record(z.string(), storedRunSchema).default({}),
