@@ -7,7 +7,6 @@ import { afterEach, expect, it, vi } from "vitest";
 import type { PaseoApi } from "@getpaseo/client";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { ProviderConnection, ProviderEvent, ProviderTimelineItem } from "@getpaseo/plugin/server/provider";
-import { defineRpc } from "@getpaseo/plugin";
 import { runObserve, runOpen, runRead } from "../shared/runs.js";
 import { workspaceEnable, syncBootstrap } from "../shared/contracts.js";
 import { createServerContribution } from "../server/contribute.js";
@@ -320,7 +319,6 @@ it("retains cached messages when a cursorless response explicitly reports trunca
 
 it("discovers older activity pages, resolves arbitrary descendants and leaves missing parents unresolved", async () => {
   const f = await fixture();
-  const address = JSON.parse(f.native.agents[1].handle.slice(7)).data;
   const older = comment("old-root", null, "Old discussion");
   const missing = comment("orphan", "missing-parent", "Unknown ancestry");
   f.discoveryPages([[...f.comments, missing], [older, comment("old-child", "old-root", "Old reply")]]);

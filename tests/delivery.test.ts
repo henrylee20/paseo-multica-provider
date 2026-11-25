@@ -6,7 +6,7 @@ import { afterEach, expect, it } from "vitest";
 import type { PaseoApi } from "@getpaseo/client";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { ProviderConnection, ProviderEvent, ProviderPrompt } from "@getpaseo/plugin/server/provider";
-import { workspaceEnable, syncBootstrap } from "../shared/contracts.js";
+import { workspaceEnable } from "../shared/contracts.js";
 import { deliveryMentions } from "../shared/delivery.js";
 import { threadOpen } from "../shared/threads.js";
 import { createServerContribution } from "../server/contribute.js";

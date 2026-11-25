@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import type { PaseoApi } from "@getpaseo/client";
 import type { ProviderConnection, ProviderEvent } from "@getpaseo/plugin/server/provider";
-import { workspaceEnable, workspaceRule, syncBootstrap } from "../shared/contracts.js";
+import { workspaceEnable, workspaceRule } from "../shared/contracts.js";
 import { askuserReopen } from "../shared/askuser.js";
 import { hiddenRestore } from "../shared/hiding.js";
 import { createServerContribution } from "../server/contribute.js";

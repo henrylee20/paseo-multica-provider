@@ -12,7 +12,6 @@ import { workspaceEnable, syncBootstrap, connectionStatus, multicaSettings, work
 import { deliveryMentions } from "../shared/delivery.js";
 import { threadOpen } from "../shared/threads.js";
 import { createServerContribution } from "../server/contribute.js";
-import type { LocalState } from "../server/state.js";
 import { FakeServer, hiddenObjects } from "./support/fake-server.js";
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";

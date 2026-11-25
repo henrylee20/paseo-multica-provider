@@ -1,16 +1,12 @@
 import { createServer } from "node:http";
-import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import type { PaseoApi } from "@getpaseo/client";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { ProviderConnection, ProviderEvent } from "@getpaseo/plugin/server/provider";
-import { defineRpc } from "@getpaseo/plugin";
-import { z } from "zod";
-import { workspaceEnable, syncBootstrap, connectionStatus } from "../shared/contracts.js";
-import { threadOpen } from "../shared/threads.js";
-import { runOpen, runRead } from "../shared/runs.js";
+import { workspaceEnable, connectionStatus } from "../shared/contracts.js";
 import { hiddenRestore } from "../shared/hiding.js";
 import { createServerContribution } from "../server/contribute.js";
 import { FakeServer, resync, hiddenObjects } from "./support/fake-server.js";
@@ -19,7 +15,6 @@ const cleanup: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const dispose of cleanup.splice(0).reverse()) await dispose(); });
 const stamp = "2026-11-24T10:00:00Z";
 const comment = (id: string, parent_id: string | null, content: string) => ({ id, parent_id, content, author_id: "me", author_type: "member", issue_id: "issue", type: "comment", created_at: stamp, updated_at: stamp, attachments: [] });
-const deliveryMentions = defineRpc({ name: "delivery.mentions", input: z.object({ connectionKey: z.string(), issueId: z.string() }), output: z.object({ agents: z.array(z.object({ id: z.string(), name: z.string(), reference: z.string() })) }) });
 async function fixture(active = false, idempotent = false) {
   const home = await mkdtemp(join(tmpdir(), "multica-delivery-"));
   cleanup.push(() => rm(home, { recursive: true, force: true }));
@@ -243,7 +238,6 @@ it.each(["all", "one"])("reconciles %s host-reopened filtered discussions withou
   }
   const main = f.agents.find(agent => agent.labels["multica.discussion"] === "main")!;
   const thread = f.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
-  const address = { connectionKey: main.labels["multica.connection"], issueId: "issue" };
   thread.archivedAt = stamp;
   await f.server.hook("agent.archive.after", { agent: { ...thread, provider: "multica" } } as never, f.paseo);
   const hidden = await hiddenObjects(f.server, f.paseo);

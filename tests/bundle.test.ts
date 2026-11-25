@@ -8,7 +8,6 @@ import * as pluginRuntime from "@getpaseo/plugin";
 import * as zod from "zod";
 import { expect, it, vi } from "vitest";
 import { FakeServer } from "./support/fake-server.js";
-import { formatTime } from "../client/format.js";
 
 async function bundledContribution(entry: string, runtime: Record<string, unknown> = {}) {
   const result = await build({ entryPoints: [fileURLToPath(new URL(entry, import.meta.url))], bundle: true,
@@ -674,7 +673,7 @@ it("settings lists shared hidden objects and offers separate workspace and selec
   });
   try {
     await vi.waitFor(() => { expect(h.render()).toContain("人工隐藏"); expect(h.render()).toContain("Task · Root"); });
-    const page = h.render();
+    h.render();
     expect(h.actions.map(action => action.actionLabel)).toContain("恢复 Paseo 工作区");
     h.action("恢复讨论").onPress();
     await vi.waitFor(() => expect(h.calls).toContainEqual({ name: "hidden.restore", input: { connectionKey: "old-connection", issueId: "issue", rootId: "root" } }));

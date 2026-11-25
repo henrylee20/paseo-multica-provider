@@ -10,7 +10,7 @@ import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { ProviderConnection, ProviderEvent } from "@getpaseo/plugin/server/provider";
 import { z } from "zod";
 import { createServerContribution } from "../server/contribute.js";
-import { syncBootstrap, workspaceEnable } from "../shared/contracts.js";
+import { workspaceEnable } from "../shared/contracts.js";
 import { FakeServer, resync, hiddenObjects } from "./support/fake-server.js";
 
 const hiddenRestore = defineRpc({ name: "hidden.restore", input: z.object({ connectionKey: z.string(), issueId: z.string(), rootId: z.string().optional() }),

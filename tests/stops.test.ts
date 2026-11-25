@@ -1,16 +1,14 @@
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
-import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import type { PaseoApi } from "@getpaseo/client";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { ProviderConnection, ProviderEvent, ProviderTimelineItem } from "@getpaseo/plugin/server/provider";
-import { defineRpc } from "@getpaseo/plugin";
-import { z } from "zod";
 import { runObserve, runOpen, runRead } from "../shared/runs.js";
-import { workspaceEnable, syncBootstrap } from "../shared/contracts.js";
+import { workspaceEnable } from "../shared/contracts.js";
 import { createServerContribution } from "../server/contribute.js";
 
 import { FakeServer, resync } from "./support/fake-server.js";
@@ -22,11 +20,6 @@ const comment = (id: string, parent_id: string | null, content: string, author_i
   id, parent_id, content, author_id, author_type, source_task_id: undefined as string | null | undefined, issue_id: "issue", type: "comment", created_at: stamp, updated_at: stamp, attachments: [],
 });
 type Comment = ReturnType<typeof comment>;
-function conversationRows(rows: ProviderTimelineItem[] | undefined) {
-  return rows?.filter(row => row.type !== "plugin" || !row.data || typeof row.data !== "object" || Array.isArray(row.data) || row.data.category !== "source");
-}
-
-
 type Run = { id: string; issue_id: string; agent_id: string; status: string; trigger_comment_id?: string | null; coalesced_comment_ids?: string[]; delivered_comment_ids?: string[]; supplement_comment_ids?: string[] };
 async function fixture(initialRuns: Run[] = []) {
   const home = await mkdtemp(join(tmpdir(), "multica-threads-"));

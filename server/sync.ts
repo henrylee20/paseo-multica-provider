@@ -23,7 +23,6 @@ export type RemoteWorkspace = z.infer<typeof workspaceSchema> & {
   agents?: Promise<Array<{ id: string; name: string; archived_at?: string | null }>>;
   members?: Promise<Array<{ user_id: string; name: string }>>;
 };
-export const defaultStatusCategories = ["unstarted", "started"];
 export const providerId = "multica";
 export function mainPersistence(connectionKey: string, issueId: string) {
   return { version: 1, data: { connectionKey, issueId, discussion: "main" } } as const;

@@ -6,7 +6,7 @@ import { afterEach, expect, it } from "vitest";
 import type { PaseoApi } from "@getpaseo/client";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { ProviderConnection, ProviderEvent } from "@getpaseo/plugin/server/provider";
-import { workspaceEnable, syncBootstrap } from "../shared/contracts.js";
+import { workspaceEnable } from "../shared/contracts.js";
 import { runObserve } from "../shared/runs.js";
 import { createServerContribution } from "../server/contribute.js";
 import { FakeServer, resync } from "./support/fake-server.js";
