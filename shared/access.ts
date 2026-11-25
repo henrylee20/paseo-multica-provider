@@ -1,5 +1,6 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
+import { askuserCardSchema } from "./askuser.js";
 import { runMetadataSchema, runMessageSchema } from "./runs.js";
 
 export const issueAccessSchema = z.object({
@@ -17,6 +18,7 @@ export const cachedIssueSnapshot = z.object({
     id: z.string(), role: z.string(), text: z.string(), sourceCreatedAt: z.string().optional(), sourceUpdatedAt: z.string().optional(),
   })) })),
   runs: z.array(z.object({ id: z.string(), agentName: z.string(), status: z.string(), ownerRootId: z.string().optional(), metadata: runMetadataSchema.optional(), messages: z.array(runMessageSchema).optional() })),
+  askuserCards: z.array(askuserCardSchema).default([]),
   deliveries: z.array(z.object({ clientMessageId: z.string(), idempotencyKey: z.string(), body: z.string(), status: z.string(), createdAt: z.string(), message: z.string().optional() })),
   stops: z.array(z.object({ runId: z.string(), status: z.string(), cleanup: z.string(), message: z.string().optional() })),
 });

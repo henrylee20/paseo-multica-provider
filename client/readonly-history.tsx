@@ -4,6 +4,7 @@ import { useRpc, type PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { Markdown, Modal, SettingsAction, SettingsCard, SettingsSection } from "@getpaseo/plugin/client/ui";
 import { cachedIssueSnapshot, issueHistoryList, issueHistoryRead } from "../shared/access.js";
 import type { z } from "zod";
+import { AskuserContents } from "./askuser-card.js";
 import { RunMetadataView } from "./run-metadata.js";
 import { collectText } from "./chunked-text.js";
 import { formatTime, runStatusLabel } from "./format.js";
@@ -32,6 +33,7 @@ function SnapshotView({ issue, snapshot, theme }: { issue: Summary; snapshot: Sn
         <Markdown>{row.text}</Markdown>
       </View>)}
     </View>)}
+    {snapshot.askuserCards.map(card => <AskuserContents key={`${card.commentId}:${card.attachmentId}`} data={card} theme={theme} />)}
     {snapshot.runs.map(run => <View key={run.id} style={{ gap: 6 }}>
       <SubHeading theme={theme}>执行 · {run.agentName} · {runStatusLabel(run.status)}</SubHeading>
       <Text selectable style={muted}>Run {run.id} · {run.ownerRootId ? `归属 ${run.ownerRootId}` : "归属待定"}</Text>

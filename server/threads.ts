@@ -11,9 +11,10 @@ import type { StoredRow } from "./thread-state.js";
 import { remoteJson, workspaceSchema, type RemoteWorkspace } from "./sync.js";
 import { discussionKeys } from "../shared/discussion.js";
 import type { threadAddress } from "../shared/threads.js";
+import type { AskUsers } from "./askuser.js";
 
 type Address = z.infer<typeof threadAddress>;
-const attachmentSchema = z.object({ id: z.string().optional(), filename: z.string().optional(), file_name: z.string().optional(), name: z.string().optional(), url: z.string().optional(), download_url: z.string().optional() });
+const attachmentSchema = z.object({ id: z.string().optional().catch(undefined), filename: z.string().optional().catch(undefined), content_type: z.unknown().optional(), file_name: z.string().optional().catch(undefined), name: z.string().optional().catch(undefined), url: z.string().optional().catch(undefined), download_url: z.string().optional().catch(undefined) }).catch({});
 const commentSchema = z.object({
   id: z.string(), issue_id: z.string(), parent_id: z.string().nullish(), content: z.string(),
   author_id: z.string(), author_type: z.enum(["member", "agent", "system"]), type: z.enum(["comment", "status_change", "progress_update", "system"]),
@@ -76,7 +77,7 @@ export class ThreadSynchronizer {
   private readonly opened = new Set<string>();
   private readonly pending = new Map<string, Promise<void>>();
   private waitForDeliveries: () => Promise<void> = async () => {};
-  constructor(private readonly store: StateStore, private readonly connection: () => Promise<AuthenticatedConnection>) {}
+  constructor(private readonly store: StateStore, private readonly connection: () => Promise<AuthenticatedConnection>, private readonly askusers: AskUsers) {}
   coordinateDeliveries(wait: () => Promise<void>) { this.waitForDeliveries = wait; }
   subscribe(address: Address, deliver: (row: StoredRow, includeOriginal?: boolean) => void, recovery = false) {
     const listener = { deliver, recovery };
@@ -141,6 +142,7 @@ export class ThreadSynchronizer {
         else issue.unresolvedCommentIds.push(comment.id);
       }
     });
+    await this.askusers.discover(connection, workspace, issueId, [...comments.values()], roots);
     // A completely removed root cannot be fetched via ?thread any more. The
     // complete activity sweep still proves missing IDs, unless ancestry broke.
     if (![...roots.values()].some(rootId => rootId === undefined)) {
@@ -179,10 +181,10 @@ export class ThreadSynchronizer {
       }
       await host.updateAgent(agentId, { name: mapping.title });
       const address = { connectionKey: connection.connectionKey, issueId, rootId: root.id };
-      if (mapping.historyLoaded && this.opened.has(key(address))) await this.refresh(connection, workspace, address);
+      if (mapping.historyLoaded && this.opened.has(key(address))) await this.refresh(connection, workspace, address, false);
     }
     if (this.opened.has(key({ connectionKey: connection.connectionKey, issueId, rootId: "main" })) && (await this.store.read()).connections[connection.connectionKey].issues[issueId].mainHistory.historyLoaded) {
-      await this.refresh(connection, workspace, { connectionKey: connection.connectionKey, issueId, rootId: "main" });
+      await this.refresh(connection, workspace, { connectionKey: connection.connectionKey, issueId, rootId: "main" }, false);
     }
   }
   async open(address: Address): Promise<{ status: "ready" | "cached" | "unavailable"; message?: string }> {
@@ -203,7 +205,7 @@ export class ThreadSynchronizer {
       return { status: "ready" };
     } catch { return { status: thread.historyLoaded ? "cached" : "unavailable", message: "无法完整读取远端 Thread；保留已读的本地历史。" }; }
   }
-  private refresh(connection: AuthenticatedConnection, workspace: RemoteWorkspace, address: Address) {
+  private refresh(connection: AuthenticatedConnection, workspace: RemoteWorkspace, address: Address, discoverCards = true) {
     const id = key(address);
     const operation = (this.pending.get(id) ?? Promise.resolve()).catch(() => {}).then(async () => {
       const issue = (await this.store.read()).connections[address.connectionKey].issues[address.issueId];
@@ -273,6 +275,7 @@ export class ThreadSynchronizer {
         thread.historyLoaded = true;
       });
       for (const row of newRows) for (const listener of this.listeners.get(id) ?? []) listener.deliver(row);
+      if (discoverCards) await this.askusers.discover(connection, workspace, address.issueId, [...comments.values()], roots, address.rootId);
     });
     this.pending.set(id, operation);
     return operation.finally(() => { if (this.pending.get(id) === operation) this.pending.delete(id); });
