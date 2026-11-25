@@ -18,6 +18,15 @@ export function askuserPermission(card: AskuserCardData): ProviderPermissionRequ
     })) } };
 }
 
+/** Paseo encodes Dismiss as an empty allow for all optional text questions. */
+export function isEmptyAskuserDismiss(card: AskuserCardData, input: unknown) {
+  const questions = askuserPermission(card).input!.questions as Array<{ header: string; allowEmpty: boolean; options: unknown[] }>;
+  const answers = (input as { answers?: unknown } | undefined)?.answers;
+  if (!answers || typeof answers !== "object" || Array.isArray(answers)) return false;
+  return questions.every(question => question.allowEmpty && question.options.length === 0) &&
+    Object.values(answers).every(value => typeof value === "string" && !value.trim());
+}
+
 /** Native answers join labels with comma-space, including labels which themselves contain it. */
 export function formatAskuserAnswers(card: AskuserCardData, input: unknown) {
   const object = input as { answers?: unknown } | undefined;

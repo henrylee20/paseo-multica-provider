@@ -32,16 +32,22 @@ async function fixture() {
   const timeline: TimelineEntry[] = [];
   const runs: Array<Record<string, unknown>> = [];
   const posts: Array<{ body: Record<string, any>; key: string }> = [];
+  const skips: string[] = [];
   const receipts = new Map<string, Record<string, any>>();
   let clock = new Date(stamp);
   const documents = new Map<string, unknown>();
   const requests: Array<{ path: string; slug?: string; authorization?: string }> = [];
-  const remote = { status: 200, contentType: "application/json", redirect: false, chunked: false, issueStatus: 200, userId: "me", objectChecksUntilDeny: -1, postStatus: 200, loseResponse: false, beforePost: undefined as (() => Promise<void>) | undefined, beforeDownload: undefined as (() => Promise<void>) | undefined };
+  const remote = { status: 200, contentType: "application/json", redirect: false, chunked: false, issueStatus: 200, userId: "me", objectChecksUntilDeny: -1, postStatus: 200, loseResponse: false, skipStatus: 204, loseSkipResponse: false, beforeSkip: undefined as (() => Promise<void>) | undefined, beforeIssueCheck: undefined as (() => Promise<void>) | undefined, beforePost: undefined as (() => Promise<void>) | undefined, beforeDownload: undefined as (() => Promise<void>) | undefined };
   const http = createServer(async (request, response) => {
     requests.push({ path: request.url!, slug: request.headers["x-workspace-slug"] as string, authorization: request.headers.authorization });
     const url = new URL(request.url!, "http://localhost");
     response.setHeader("Content-Type", "application/json");
     let body: unknown;
+    if (request.method === "POST" && url.pathname.endsWith("/askuser-skip")) {
+      skips.push(url.pathname); await remote.beforeSkip?.();
+      if (remote.loseSkipResponse) { response.destroy(); return; }
+      response.statusCode = remote.skipStatus; response.end(remote.skipStatus === 204 ? undefined : JSON.stringify({})); return;
+    }
     if (request.method === "POST" && url.pathname === "/api/issues/issue/comments") {
       let text = ""; for await (const chunk of request) text += chunk;
       const input = JSON.parse(text); const key = request.headers["idempotency-key"] as string; posts.push({ body: input, key });
@@ -61,7 +67,7 @@ async function fixture() {
     else if (url.pathname === "/api/workspaces") body = [{ id: "workspace", name: "Product", slug: "product" }];
     else if (url.pathname === "/api/agents") body = [{ id: "agent", name: "Builder" }];
     else if (url.pathname === "/api/issues") body = { issues: [{ id: "issue", workspace_id: "workspace", title: "Task", description: "Description", status: "todo" }], total: 1 };
-    else if (url.pathname === "/api/issues/issue") { response.statusCode = remote.objectChecksUntilDeny === 0 ? 403 : remote.issueStatus; if (remote.objectChecksUntilDeny > 0) remote.objectChecksUntilDeny--; body = { id: "issue", workspace_id: "workspace", title: "Task", status: "todo" }; }
+    else if (url.pathname === "/api/issues/issue") { await remote.beforeIssueCheck?.(); response.statusCode = remote.objectChecksUntilDeny === 0 ? 403 : remote.issueStatus; if (remote.objectChecksUntilDeny > 0) remote.objectChecksUntilDeny--; body = { id: "issue", workspace_id: "workspace", title: "Task", status: "todo" }; }
     else if (url.pathname === "/api/issues/issue/comments") body = comments.map(c => url.searchParams.has("summary") ? { ...c, content: [...c.content].slice(0, 200).join(""), content_truncated: [...c.content].length > 200 } : c);
     else if (url.pathname === "/api/issues/issue/timeline") body = timeline;
     else if (url.pathname === "/api/issues/issue/task-runs") body = runs;
@@ -132,7 +138,7 @@ async function fixture() {
   await server!.rpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, paseo);
   const address = () => ({ connectionKey: agents[1].labels["multica.connection"], issueId: "issue", rootId: "root" });
   const cards = () => (rows.get(agents[1].id) ?? []).filter(row => row.type === "plugin" && row.kind === "askuser") as Array<Extract<ProviderTimelineItem, { type: "plugin" }> & { data: Record<string, any> }>;
-  return { ...started, start, connect, events, posts, receipts, setClock: (value: Date) => { clock = value; }, comments, timeline, runs, documents, requests, remote, rows, agents, cards, address, open, home, configPath, paseo,
+  return { ...started, start, connect, events, posts, skips, receipts, setClock: (value: Date) => { clock = value; }, comments, timeline, runs, documents, requests, remote, rows, agents, cards, address, open, home, configPath, paseo,
     disconnect: async () => { await provider?.close(); provider = undefined; }, signal: (type: string) => { for (const socket of websocket.clients) socket.send(JSON.stringify({ type })); }, eventsReady: () => expect.poll(() => websocket.clients.size).toBeGreaterThan(0), sync: () => server.rpc(syncBootstrap, {}, paseo) };
 }
 
@@ -439,6 +445,135 @@ const answer = async (f: Awaited<ReturnType<typeof fixture>>, values: string[], 
   return (await f.connect()).send({ type: "session.permission", sessionId: f.agents[1].id, permissionId: request.id,
     response: { behavior: "allow", updatedInput: { answers: Object.fromEntries(questions.map((question, i) => [question.header, values[i] ?? ""])) } } });
 };
+
+it("Dismiss only collapses a native form locally, persisting across synchronization and restart", async () => {
+  const f = await fixture(); f.comments[0].attachments = [attachment("dismiss")]; f.documents.set("dismiss", card); await f.sync();
+  const permission = pendingQuestion(f).request;
+  await (await f.connect()).send({ type: "session.permission", sessionId: f.agents[1].id, permissionId: permission.id, response: { behavior: "deny", message: "Dismissed by user" } });
+  expect(f.cards()[0].data).toMatchObject({ status: "pending", collapsed: true, readOnly: false });
+  expect(f.events).toContainEqual({ type: "session.permission_resolved", sessionId: f.agents[1].id, permissionId: permission.id });
+  await f.sync();
+  expect(f.events.filter(event => event.type === "session.permission")).toHaveLength(1);
+  await f.dispose(); await f.disconnect(); f.events.length = 0; f.start(); await f.open("skip"); await f.sync();
+  expect(f.cards()[0].data).toMatchObject({ status: "pending", collapsed: true });
+  expect(f.events.some(event => event.type === "session.permission")).toBe(false);
+  expect(f.posts).toEqual([]);
+  expect(f.requests.some(request => request.path.includes("askuser-skip"))).toBe(false);
+});
+
+it("protects blank all-optional-text allow responses from the native Dismiss encoding", async () => {
+  const f = await fixture(); f.comments[0].attachments = [attachment("empty-dismiss")];
+  f.documents.set("empty-dismiss", { ...card, questions: [{ id: "note", title: "备注", type: "text", required: false }, { id: "details", title: "补充", type: "text", required: false }] }); await f.sync();
+  await answer(f, [" \n ", "\t"]);
+  expect(f.cards()[0].data).toMatchObject({ status: "pending", collapsed: true });
+  expect(f.events).toContainEqual({ type: "session.permission_resolved", sessionId: f.agents[1].id, permissionId: pendingQuestion(f).request.id });
+  expect(f.posts).toEqual([]);
+  expect(f.requests.some(request => request.path.includes("askuser-skip"))).toBe(false);
+});
+
+it("explicitly reopening a collapsed card validates the current card and immediately restores its native permission", async () => {
+  const f = await fixture(); f.comments[0].attachments = [attachment("reopen")]; f.documents.set("reopen", { ...card, answer_user_id: "me" }); await f.sync();
+  const request = pendingQuestion(f).request;
+  await (await f.connect()).send({ type: "session.permission", sessionId: f.agents[1].id, permissionId: request.id, response: { behavior: "deny", message: "Dismissed" } });
+  const action = defineRpc({ name: "askuser.reopen", input: z.any(), output: z.any() });
+  const result = await f.server.rpc(action, { ...f.address(), commentId: "root", attachmentId: "reopen" }, f.paseo);
+  expect(result).toMatchObject({ status: "pending", collapsed: false, readOnly: false });
+  expect(f.events.filter(event => event.type === "session.permission").map(event => event.request.id)).toEqual([request.id, request.id]);
+  f.timeline.push({ id: "web-answer", type: "comment", parent_id: "root", content: "**确认结果**\n\n1. **理由**：网页回答", actor_type: "member", actor_id: "me" });
+  await expect(f.server.rpc(action, { ...f.address(), commentId: "root", attachmentId: "reopen" }, f.paseo)).rejects.toThrow("解决");
+  expect(f.cards()[0].data.status).toBe("answered");
+  expect(f.posts).toEqual([]);
+});
+
+const skipCard = defineRpc({ name: "askuser.skip", input: z.any(), output: z.any() });
+it("explicit remote skip updates the stable card, persists skipped state and resolves its native permission without inventing a timestamp", async () => {
+  const f = await fixture(); f.comments.push(comment("child", "root", [attachment("skip")])); f.documents.set("skip", card); await f.sync();
+  const id = f.cards()[0].id;
+  const result = await f.server.rpc(skipCard, { ...f.address(), commentId: "child", attachmentId: "skip", confirmed: true }, f.paseo);
+  expect(result).toMatchObject({ status: "skipped", readOnly: true });
+  expect(result.skippedAt).toBeUndefined(); expect(result.skippedBy).toBeUndefined();
+  expect(f.skips).toEqual(["/api/issues/issue/comments/child/askuser-skip"]); expect(f.posts).toEqual([]);
+  expect(f.cards()).toHaveLength(1); expect(f.cards()[0]).toMatchObject({ id, data: { status: "skipped" } });
+  expect(f.events).toContainEqual({ type: "session.permission_resolved", sessionId: f.agents[1].id, permissionId: "multica:askuser:child:skip" });
+  await f.dispose(); await f.disconnect(); f.events.length = 0; f.start(); await f.open("skip");
+  expect(f.cards()[0].data.status).toBe("skipped"); expect(f.events.some(event => event.type === "session.permission")).toBe(false);
+});
+
+it("coalesces concurrent skip decisions and prevents answering or reopening the same card during skip", async () => {
+  const f = await fixture(); f.comments[0].attachments = [attachment("race-skip")]; f.documents.set("race-skip", card); await f.sync();
+  const target = { ...f.address(), commentId: "root", attachmentId: "race-skip", confirmed: true };
+  let entered!: () => void; let release!: () => void;
+  const arrived = new Promise<void>(resolve => { entered = resolve; }); const blocked = new Promise<void>(resolve => { release = resolve; });
+  f.remote.beforeSkip = async () => { entered(); await blocked; };
+  const first = f.server.rpc(skipCard, target, f.paseo); await arrived;
+  const second = f.server.rpc(skipCard, target, f.paseo);
+  try {
+    await expect(answer(f, ["并发回答"])).rejects.toThrow("处理中");
+    await expect(f.server.rpc(defineRpc({ name: "askuser.reopen", input: z.any(), output: z.any() }), target, f.paseo)).rejects.toThrow("处理中");
+  } finally { release(); await Promise.allSettled([first, second]); }
+  expect(await first).toMatchObject({ status: "skipped" }); expect(await second).toMatchObject({ status: "skipped" });
+  expect(f.skips).toHaveLength(1); expect(f.posts).toHaveLength(0);
+});
+
+it("refuses to reopen or skip a card whose source was deleted remotely before preflight", async () => {
+  const f = await fixture(); f.comments[0].attachments = [attachment("deleted-action")]; f.documents.set("deleted-action", card); await f.sync();
+  f.timeline.push({ id: "root", type: "comment", deleted_at: stamp });
+  const target = { ...f.address(), commentId: "root", attachmentId: "deleted-action", confirmed: true };
+  await expect(f.server.rpc(skipCard, target, f.paseo)).rejects.toThrow("删除");
+  await expect(f.server.rpc(defineRpc({ name: "askuser.reopen", input: z.any(), output: z.any() }), target, f.paseo)).rejects.toThrow("删除");
+  expect(f.skips).toEqual([]); expect(f.posts).toEqual([]);
+});
+
+it.each([403, 503, "network"])("reports %s skip failure without claiming a terminal state or resolving the native form", async failure => {
+  const f = await fixture(); f.comments[0].attachments = [attachment("failed-skip")]; f.documents.set("failed-skip", card); await f.sync();
+  if (failure === "network") f.remote.loseSkipResponse = true; else f.remote.skipStatus = failure as number;
+  const target = { ...f.address(), commentId: "root", attachmentId: "failed-skip", confirmed: true };
+  await expect(f.server.rpc(skipCard, target, f.paseo)).rejects.toThrow(failure === "network" ? "未确认" : `HTTP ${failure}`);
+  expect(f.cards()[0].data).toMatchObject({ status: "pending", readOnly: false });
+  expect(f.events.some(event => event.type === "session.permission_resolved")).toBe(false);
+  expect(f.skips).toHaveLength(1); expect(f.posts).toHaveLength(0);
+});
+
+it.each(["designated user", "different account", "logged out", "inaccessible", "hidden", "unconfirmed"])("rejects reopen and skip for %s before any remote POST", async reason => {
+  const f = await fixture(); f.comments[0].attachments = [attachment("action-auth")]; f.documents.set("action-auth", { ...card, ...(reason === "designated user" ? { answer_user_id: "other" } : {}) }); await f.sync();
+  if (reason === "different account") f.remote.userId = "other";
+  if (reason === "logged out") await writeFile(f.configPath, "{}");
+  if (reason === "inaccessible") f.remote.issueStatus = 403;
+  if (reason === "hidden") await f.server.hook("agent.archive.after", { agent: { ...f.agents[1], provider: "multica" } } as never, f.paseo);
+  const target = { ...f.address(), commentId: "root", attachmentId: "action-auth", confirmed: reason !== "unconfirmed" };
+  await expect(f.server.rpc(skipCard, target, f.paseo)).rejects.toThrow();
+  if (reason !== "unconfirmed") await expect(f.server.rpc(defineRpc({ name: "askuser.reopen", input: z.any(), output: z.any() }), target, f.paseo)).rejects.toThrow();
+  expect(f.skips).toEqual([]); expect(f.posts).toEqual([]);
+});
+
+it("honors the original Stop fence when a skip preflight is waiting on remote access verification", async () => {
+  const f = await fixture(); f.comments[0].attachments = [attachment("stopped-skip")]; f.documents.set("stopped-skip", card); await f.sync();
+  let entered!: () => void; let release!: () => void;
+  const arrived = new Promise<void>(resolve => { entered = resolve; }); const blocked = new Promise<void>(resolve => { release = resolve; });
+  f.remote.beforeIssueCheck = async () => { entered(); await blocked; };
+  const action = f.server.rpc(skipCard, { ...f.address(), commentId: "root", attachmentId: "stopped-skip", confirmed: true }, f.paseo);
+  const settled = action.then(value => ({ value }), error => ({ error }));
+  await arrived;
+  await (await f.connect()).send({ type: "session.interrupt", requestId: "stop-skip", sessionId: f.agents[1].id });
+  release();
+  expect(await settled).toMatchObject({ error: expect.objectContaining({ message: "Delivery was stopped" }) });
+  expect(f.skips).toEqual([]); expect(f.posts).toEqual([]);
+});
+
+it.each([200, 202, 204])("reads skip timestamp and operator only from confirmed timeline metadata after HTTP %s", async status => {
+  const f = await fixture(); f.comments[0].attachments = [attachment("skip-metadata")]; f.documents.set("skip-metadata", card); await f.sync();
+  f.remote.skipStatus = status;
+  f.remote.beforeSkip = async () => { f.timeline.push({ id: "root", type: "comment", askuser_skipped_at: "2026-11-25T08:30:00Z", askuser_skipped_by: "remote-operator" }); };
+  const result = await f.server.rpc(skipCard, { ...f.address(), commentId: "root", attachmentId: "skip-metadata", confirmed: true }, f.paseo);
+  expect(result).toMatchObject({ status: "skipped", skippedAt: "2026-11-25T08:30:00Z", skippedBy: "remote-operator" });
+});
+
+it("does not confuse HTTP 202 acceptance with a confirmed remote skip", async () => {
+  const f = await fixture(); f.comments[0].attachments = [attachment("accepted-skip")]; f.documents.set("accepted-skip", card); await f.sync(); f.remote.skipStatus = 202;
+  await expect(f.server.rpc(skipCard, { ...f.address(), commentId: "root", attachmentId: "accepted-skip", confirmed: true }, f.paseo)).rejects.toThrow("未确认");
+  expect(f.cards()[0].data.status).toBe("pending");
+  expect(f.events.some(event => event.type === "session.permission_resolved")).toBe(false);
+});
 
 it("submits a child card once in canonical Chinese format, keeping its Thread root as ownership and deduplicating its saved echo", async () => {
   const f = await fixture(); f.comments.push(comment("child", "root", [attachment("submit")]));

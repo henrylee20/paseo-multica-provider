@@ -31,11 +31,13 @@ export const askuserAddress = z.object({ connectionKey: z.string(), issueId: z.s
 export const askuserAnswerSchema = z.object({ commentId: z.string(), content: z.string(), actorId: z.string().optional(), actorType: z.string().optional(), delegatedBy: z.string().optional() });
 export const askuserCardSchema = askuserAddress.extend({ rootId: z.string(), revision: z.string(), title: z.string(), description: z.string().optional(),
   delivery: z.object({ status: z.enum(["received", "saved", "failed", "pending_verification"]), clientMessageId: z.string(), message: z.string().optional() }).optional(),
-  questions: z.array(askuserQuestionSchema), status: z.enum(["pending", "answered", "skipped", "invalid"]),
+  questions: z.array(askuserQuestionSchema), status: z.enum(["pending", "answered", "skipped", "invalid"]), collapsed: z.boolean().optional(),
   readOnly: z.boolean(), readOnlyReason: z.string().optional(), offline: z.boolean(), truncated: z.boolean(), error: z.string().optional(), statusError: z.string().optional(), answer: askuserAnswerSchema.optional(), skippedAt: z.string().optional(), skippedBy: z.string().optional(),
 });
 export type AskuserCardData = z.infer<typeof askuserCardSchema>;
 export const askuserObserve = defineRpc({ name: "askuser.observe", input: askuserAddress, output: askuserCardSchema });
+export const askuserReopen = defineRpc({ name: "askuser.reopen", input: askuserAddress, output: askuserCardSchema });
+export const askuserSkip = defineRpc({ name: "askuser.skip", input: askuserAddress.extend({ confirmed: z.literal(true) }), output: askuserCardSchema });
 export const askuserRead = defineRpc({ name: "askuser.read", input: askuserAddress.extend({ revision: z.string(), offset: z.number().int().nonnegative() }),
   output: z.object({ text: z.string(), nextOffset: z.number().int().nonnegative().nullable() }) });
 

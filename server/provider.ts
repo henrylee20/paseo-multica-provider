@@ -1,4 +1,4 @@
-import { askuserPermission, askuserPermissionId } from "./askuser-answers.js";
+import { askuserPermission, askuserPermissionId, isEmptyAskuserDismiss } from "./askuser-answers.js";
 import type { AskuserCardData } from "../shared/askuser.js";
 import type { AskUsers } from "./askuser.js";
 import { randomUUID } from "node:crypto";
@@ -155,7 +155,7 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
               const permissionId = askuserPermissionId(card);
               const pending = permissions.get(input.sessionId) ?? new Map();
               permissions.set(input.sessionId, pending);
-              if (card.status === "pending" && !card.readOnly && !lifecycle.unavailable(address)) {
+              if (card.status === "pending" && !card.collapsed && !card.readOnly && !lifecycle.unavailable(address)) {
                 if (!pending.has(permissionId)) { pending.set(permissionId, card); emit({ type: "session.permission", sessionId: input.sessionId, request: askuserPermission(card) }); }
               } else if (pending.delete(permissionId)) emit({ type: "session.permission_resolved", sessionId: input.sessionId, permissionId });
             };
@@ -254,10 +254,12 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
           }
           if (input.type === "session.permission") {
             const card = permissions.get(input.sessionId)?.get(input.permissionId);
-            if (!card || input.response.behavior !== "allow") throw new Error("提问权限不可用。");
+            if (!card) throw new Error("提问权限不可用。");
             const address = addresses.get(input.sessionId);
             if (!address || lifecycle.unavailable(address)) throw new Error("讨论不可写。");
-            const record = await askusers.submit({ connectionKey: address.connectionKey, issueId: address.issueId, commentId: card.commentId, attachmentId: card.attachmentId }, input.response.updatedInput, deliveries);
+            const target = { connectionKey: address.connectionKey, issueId: address.issueId, commentId: card.commentId, attachmentId: card.attachmentId };
+            if (input.response.behavior === "deny" || isEmptyAskuserDismiss(card, input.response.updatedInput)) { await askusers.collapse(target); return; }
+            const record = await askusers.submit(target, input.response.updatedInput, deliveries);
             const row = deliveryInput(record);
             if (rememberOriginal(input.sessionId, row)) emit({ type: "timeline.item", sessionId: input.sessionId, item: projectRow(address, row) });
             if (permissions.get(input.sessionId)?.delete(input.permissionId)) emit({ type: "session.permission_resolved", sessionId: input.sessionId, permissionId: input.permissionId });

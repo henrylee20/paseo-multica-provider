@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { useRpc, type PluginSurfaceProps, type PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import { Markdown, SettingsAction } from "@getpaseo/plugin/client/ui";
-import { askuserObserve, askuserRead, askuserCardSchema, askuserConditionHint, type AskuserCardData } from "../shared/askuser.js";
+import { askuserObserve, askuserRead, askuserReopen, askuserSkip, askuserCardSchema, askuserConditionHint, type AskuserCardData } from "../shared/askuser.js";
 import { collectText } from "./chunked-text.js";
 import { formatTime } from "./format.js";
 
@@ -15,6 +15,7 @@ export function AskuserContents({ data, theme }: { data: AskuserCardData; theme:
   return <View style={{ gap: 8 }}>
     <Text style={{ color: theme.colors.foreground, fontWeight: "600" }}>{data.title}</Text>
     <Text style={muted}>{status[data.status]}{data.readOnly ? " · 只读" : ""}{data.offline ? " · 离线缓存" : ""}</Text>
+    {data.collapsed && data.status === "pending" ? <Text style={muted}>已在本地收起，远端仍待答。</Text> : null}
     {data.description ? <Markdown>{data.description}</Markdown> : null}
     {data.questions.map((question, index) => <View key={`${index}:${question.id}`} style={{ gap: 4 }}>
       <Text style={{ color: theme.colors.foreground }}>{index + 1}. {question.title}</Text>
@@ -51,15 +52,19 @@ export function AskuserCard(props: Props & { openManagement?: () => void }) {
     const timer = setInterval(() => { void refresh(); }, 10_000);
     return () => { active = false; clearInterval(timer); };
   }, [observe, connectionKey, issueId, commentId, attachmentId, revision]);
-  return <AskuserBody key={data.revision} data={data} theme={props.theme} openManagement={props.openManagement} />;
+  return <AskuserBody key={data.revision} data={data} theme={props.theme} onChanged={setData} openManagement={props.openManagement} />;
 }
 
-function AskuserBody({ data, theme, openManagement }: { data: AskuserCardData; theme: PluginSurfaceProps["theme"]; openManagement?: () => void }) {
+function AskuserBody({ data, theme, onChanged, openManagement }: { data: AskuserCardData; theme: PluginSurfaceProps["theme"]; onChanged: (card: AskuserCardData) => void; openManagement?: () => void }) {
   const read = useRpc(askuserRead);
+  const reopen = useRpc(askuserReopen);
+  const skip = useRpc(askuserSkip);
   const [full, setFull] = useState<AskuserCardData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [scope] = useState({ active: true });
+  const [confirmSkip, setConfirmSkip] = useState(false);
+  const [acting, setActing] = useState(false);
+  const [scope] = useState({ active: true, busy: false });
   useEffect(() => { scope.active = true; return () => { scope.active = false; }; }, [scope]);
   async function load() {
     if (loading) return;
@@ -70,8 +75,25 @@ function AskuserBody({ data, theme, openManagement }: { data: AskuserCardData; t
     } catch { if (scope.active) setError("卡片已更新或详情暂不可用，请重新读取。"); }
     finally { if (scope.active) setLoading(false); }
   }
+  async function act(kind: "reopen" | "skip") {
+    if (scope.busy || data.status !== "pending" || data.readOnly || data.offline) return;
+    scope.busy = true; setActing(true); setError(null); setConfirmSkip(false);
+    const address = { connectionKey: data.connectionKey, issueId: data.issueId, commentId: data.commentId, attachmentId: data.attachmentId };
+    try {
+      const updated = kind === "reopen" ? await reopen(address) : await skip({ ...address, confirmed: true });
+      if (scope.active) onChanged(updated);
+    } catch (failure) { if (scope.active) setError(failure instanceof Error ? failure.message : "卡片操作失败，请核对后重试。"); }
+    finally { scope.busy = false; if (scope.active) setActing(false); }
+  }
+  const actionable = data.status === "pending" && !data.readOnly && !data.offline;
   return <View style={{ gap: 8 }}>
     <AskuserContents data={full ?? data} theme={theme} />
+    {actionable && data.collapsed ? <Pressable accessibilityRole="button" accessibilityLabel="重新展开作答" disabled={acting} onPress={() => { void act("reopen"); }}><Text style={{ color: theme.colors.foreground }}>重新展开作答</Text></Pressable> : null}
+    {actionable ? confirmSkip ? <View style={{ gap: 8 }}>
+      <Text style={{ color: theme.colors.statusDanger }}>此操作会在 Multica 跳过此卡，所有成员都会看到已跳过状态。确认继续？</Text>
+      <Pressable accessibilityRole="button" accessibilityLabel="确认远端跳过" disabled={acting} onPress={() => { void act("skip"); }}><Text style={{ color: theme.colors.statusDanger }}>确认远端跳过</Text></Pressable>
+      <Pressable accessibilityRole="button" accessibilityLabel="取消" disabled={acting} onPress={() => setConfirmSkip(false)}><Text style={{ color: theme.colors.foreground }}>取消</Text></Pressable>
+    </View> : <Pressable accessibilityRole="button" accessibilityLabel="跳过此卡" disabled={acting} onPress={() => setConfirmSkip(true)}><Text style={{ color: theme.colors.foreground }}>跳过此卡</Text></Pressable> : null}
     {data.delivery && ["received", "pending_verification", "failed"].includes(data.delivery.status) && openManagement ? <Pressable accessibilityRole="button" onPress={openManagement}><Text style={{ color: theme.colors.foreground }}>在管理页核实 / 重新发送</Text></Pressable> : null}
     {data.truncated && !full ? <SettingsAction label="内容较长，当前仅显示标题、警示和题目摘要。" actionLabel={loading ? "正在读取…" : "读取完整提问"} disabled={loading} onPress={() => { void load(); }} /> : null}
     {error ? <Text accessibilityRole="alert" style={{ color: theme.colors.statusDanger }}>{error}</Text> : null}

@@ -25,7 +25,7 @@ import { CommentDelivery } from "./delivery.js";
 import { deliveryList, deliveryRead, deliveryTargets, deliveryMentions, deliveryVerify, deliveryResend } from "../shared/delivery.js";
 import { issueHistoryList, issueHistoryRead } from "../shared/access.js";
 import { AskUsers } from "./askuser.js";
-import { askuserObserve, askuserRead } from "../shared/askuser.js";
+import { askuserObserve, askuserRead, askuserReopen, askuserSkip } from "../shared/askuser.js";
 import { IssueHistory } from "./access.js";
 
 export interface ServerDependencies extends ConnectionDependencies {
@@ -86,6 +86,7 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     server.handle(issueHistoryList, () => history.list());
     server.handle(issueHistoryRead, input => history.read(input));
     const lifecycle = new DiscussionLifecycle();
+    server.handle(askuserReopen, input => askusers.reopen(input, lifecycle));
     const hiding = new ManualHiding(store, lifecycle);
     server.addHook("agent.archive.after", async ({ agent }) => { await hiding.archivedAgent(agent); });
     server.addHook("workspace.archive.after", async ({ workspace }) => { await hiding.archivedWorkspace(workspace.id); });
@@ -93,6 +94,7 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     const runs = new RunSynchronizer(store);
     const runDetails = new RunDetails(store, connection);
     const stops = new StopCoordinator(store, connection, runs);
+    server.handle(askuserSkip, input => askusers.skip(input, stops, lifecycle));
     const deliveries = new CommentDelivery(store, connection, stops, () => synchronizer.reconcile(), dependencies.now, record => askusers.deliveryChanged(record));
     threads.coordinateDeliveries(() => deliveries.waitForPosts());
     server.handle(deliveryVerify, async input => deliveries.verify(input));
