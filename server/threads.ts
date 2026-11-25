@@ -212,9 +212,9 @@ export class ThreadSynchronizer {
       }
       const [members, agents] = await Promise.all([
         [...comments.values()].some(comment => comment.type === "comment" && comment.author_type === "member" && comment.author_id !== connection.userId)
-          ? remoteJson(connection, `/api/workspaces/${encodeURIComponent(workspace.id)}/members`, z.array(z.object({ user_id: z.string(), name: z.string() })), workspace) : [],
+          ? (workspace.members ??= remoteJson(connection, `/api/workspaces/${encodeURIComponent(workspace.id)}/members`, z.array(z.object({ user_id: z.string(), name: z.string() })), workspace) as Promise<Array<{ user_id: string; name: string }>>) : [],
         [...comments.values()].some(comment => comment.type === "comment" && comment.author_type === "agent")
-          ? remoteJson(connection, `/api/agents?workspace_id=${encodeURIComponent(workspace.id)}&include_archived=true`, z.array(z.object({ id: z.string(), name: z.string() })), workspace) : [],
+          ? (workspace.agents ??= remoteJson(connection, `/api/agents?workspace_id=${encodeURIComponent(workspace.id)}&include_archived=true`, z.array(z.object({ id: z.string(), name: z.string() })), workspace) as Promise<Array<{ id: string; name: string }>>) : [],
       ]) as [Array<{ user_id: string; name: string }>, Array<{ id: string; name: string }>];
       const newRows: StoredRow[] = [];
       // A WS invalidation can beat the HTTP receipt. Wait for active POSTs so

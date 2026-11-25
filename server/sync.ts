@@ -17,7 +17,11 @@ export const workspaceSchema = z.object({ id: z.string().min(1), name: z.string(
 const issueSchema = z.object({ id: z.string().min(1), workspace_id: z.string(), identifier: z.string().optional(), title: z.string(),
   description: z.string().nullish(), status: z.string(), status_category: z.string().optional(), updated_at: z.string().optional() });
 const pageSchema = z.object({ issues: z.array(issueSchema), total: z.number().int().nonnegative() });
-export type RemoteWorkspace = z.infer<typeof workspaceSchema>;
+// These requests live only for this snapshot (or an explicit Thread open).
+export type RemoteWorkspace = z.infer<typeof workspaceSchema> & {
+  agents?: Promise<Array<{ id: string; name: string }>>;
+  members?: Promise<Array<{ user_id: string; name: string }>>;
+};
 export const defaultStatusCategories = ["unstarted", "started"];
 export const providerId = "multica";
 export function mainPersistence(connectionKey: string, issueId: string) {

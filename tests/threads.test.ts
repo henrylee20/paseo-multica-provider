@@ -783,3 +783,17 @@ it("never treats a failed older native page as proof that cached originals are m
   expect(await resync(restarted.server, f.paseo, "remote-workspace")).toMatchObject({ status: "ready" });
   expect(f.timelines.get(thread.id)?.filter(row => row.type !== "plugin")).toEqual(before);
 });
+
+it("shares agent and member reads across an opened Thread and Run summaries in one sync only", async () => {
+  const f = await fixture([{ id: "run", issue_id: "issue", agent_id: "owned-agent", status: "running", trigger_comment_id: "root" }]);
+  const address = JSON.parse(f.native.agents[1].handle.slice(7)).data;
+  await f.server.rpc(threadOpen, address, f.paseo);
+  const before = f.requests.length;
+  await resync(f.server, f.paseo, "remote-workspace");
+  const round = f.requests.slice(before);
+  expect(round.filter(request => request.url.startsWith("/api/agents?"))).toHaveLength(1);
+  expect(round.filter(request => request.url.endsWith("/members"))).toHaveLength(1);
+  const next = f.requests.length;
+  await f.server.rpc(threadOpen, address, f.paseo);
+  expect(f.requests.slice(next).filter(request => request.url.startsWith("/api/agents?"))).toHaveLength(1);
+});
