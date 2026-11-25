@@ -11,6 +11,7 @@ import { archiveClosedDiscussion, ensureWorkspaceActive, findActiveWorkspace, fi
 import { StateStore, connectionState } from "./state.js";
 import { hiddenAgent, restoreWorkspacePreservingHidden } from "./hiding.js";
 import { discussionKeys } from "../shared/discussion.js";
+import type { DiscussionMetadata } from "./discussion-metadata.js";
 import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
 
 export const workspaceSchema = z.object({ id: z.string().min(1), name: z.string(), slug: z.string().min(1) });
@@ -69,7 +70,7 @@ export class SidebarSynchronizer {
     this.eventTimer.unref?.();
   }
   constructor(private readonly options: {
-    store: StateStore; connection: () => Promise<AuthenticatedConnection>; lifecycle: DiscussionLifecycle;
+    store: StateStore; connection: () => Promise<AuthenticatedConnection>; lifecycle: DiscussionLifecycle; metadata: DiscussionMetadata;
     connectHost: () => Promise<NativeHost>; intervalMs: number; onRemoteEvent?: (event: WorkspaceEvent) => void;
     onCached?: (host: NativeHost) => Promise<void>;
     onIssue?: (connection: AuthenticatedConnection, workspace: RemoteWorkspace, issueId: string, host: NativeHost) => Promise<void>;
@@ -312,6 +313,7 @@ export class SidebarSynchronizer {
           for (const agentId of mapping.ruleArchivedAgentIds) {
             if (hiddenAgent(mapping, agentId)) continue;
             await restoreMappedDiscussion(this.host, this.options.lifecycle, agentId, mapping, { connectionKey: connection.connectionKey, issueId: issue.id });
+            await this.options.metadata.write(agentId, connection.connectionKey, issue.id);
           }
           await this.options.store.update(state => {
             const saved = state.connections[connection.connectionKey].issues[issue.id];
@@ -328,6 +330,7 @@ export class SidebarSynchronizer {
           if (!mainAgentId) {
             mainAgentId = (await this.host.importAgent({ providerId, providerHandleId: `plugin:${JSON.stringify(mainPersistence(connection.connectionKey, issue.id))}`,
               cwd, workspaceId: mapping.workspaceId, labels })).id;
+            await this.options.metadata.write(mainAgentId, connection.connectionKey, issue.id);
           }
           await this.options.store.update(state => { state.connections[connection.connectionKey].issues[issue.id].mainAgentId = mainAgentId; });
         }

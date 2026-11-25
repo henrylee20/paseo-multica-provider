@@ -6,6 +6,7 @@ import { remoteFetch, type AuthenticatedConnection } from "./connection.js";
 import { findNativeDiscussion, type NativeHost } from "./native-host.js";
 import { StateStore } from "./state.js";
 import type { IssueMapping } from "./state.js";
+import type { DiscussionMetadata } from "./discussion-metadata.js";
 import type { StoredRow } from "./thread-state.js";
 import { remoteJson, type RemoteWorkspace } from "./sync.js";
 import { discussionKeys } from "../shared/discussion.js";
@@ -76,7 +77,7 @@ export class ThreadSynchronizer {
   private readonly opened = new Set<string>();
   private readonly pending = new Map<string, Promise<void>>();
   private waitForDeliveries: () => Promise<void> = async () => {};
-  constructor(private readonly store: StateStore, private readonly connection: () => Promise<AuthenticatedConnection>, private readonly askusers: AskUsers) {}
+  constructor(private readonly store: StateStore, private readonly connection: () => Promise<AuthenticatedConnection>, private readonly metadata: DiscussionMetadata, private readonly askusers: AskUsers) {}
   coordinateDeliveries(wait: () => Promise<void>) { this.waitForDeliveries = wait; }
   subscribe(address: Address, deliver: (row: StoredRow, includeOriginal?: boolean) => void, recovery = false) {
     const listener = { deliver, recovery };
@@ -175,6 +176,7 @@ export class ThreadSynchronizer {
         agentId = (await findNativeDiscussion(host, { workspaceId: issue.workspaceId, provider: "multica", labels }))?.id;
         agentId ??= (await host.importAgent({ providerId: "multica", providerHandleId: `plugin:${JSON.stringify(threadPersistence(connection.connectionKey, issueId, root.id))}`,
           cwd: issue.cwd, workspaceId: issue.workspaceId, labels })).id;
+        await this.metadata.write(agentId, connection.connectionKey, issueId);
         await this.store.update(state => { state.connections[connection.connectionKey].issues[issueId].threads[root.id].agentId = agentId; });
       }
       await host.updateAgent(agentId, { name: mapping.title });

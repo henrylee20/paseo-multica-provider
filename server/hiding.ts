@@ -1,6 +1,7 @@
 import type { PluginHookAgent } from "@getpaseo/plugin/server";
 import { StateStore, type IssueMapping } from "./state.js";
 import { archiveClosedDiscussion, ensureWorkspaceActive, restoreMappedDiscussion, type NativeHost } from "./native-host.js";
+import type { DiscussionMetadata } from "./discussion-metadata.js";
 import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
 
 export function discussionAgent(issue: IssueMapping, rootId: string) {
@@ -38,7 +39,7 @@ export async function restoreWorkspacePreservingHidden(host: NativeHost, lifecyc
 /** Native hooks carry no bulk-archive cause. Preserve every explicit tab hide;
  * a workspace restore therefore leaves its discussions available for separate restore. */
 export class ManualHiding {
-  constructor(private readonly store: StateStore, private readonly lifecycle: DiscussionLifecycle) {}
+  constructor(private readonly store: StateStore, private readonly lifecycle: DiscussionLifecycle, private readonly metadata: DiscussionMetadata) {}
   async archivedAgent(agent: PluginHookAgent) {
     if (agent.provider !== "multica") return;
     await this.store.update(state => {
@@ -76,6 +77,7 @@ export class ManualHiding {
     await restoreWorkspacePreservingHidden(host, this.lifecycle, issue, input, input.rootId);
     if (agentId) {
       await restoreMappedDiscussion(host, this.lifecycle, agentId, issue, input);
+      await this.metadata.write(agentId, input.connectionKey, input.issueId);
     }
     await this.store.update(state => {
       const saved = state.connections[input.connectionKey].issues[input.issueId];

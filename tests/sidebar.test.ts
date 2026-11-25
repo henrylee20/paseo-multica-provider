@@ -189,7 +189,8 @@ it("client bootstrap copies each discussion's task from agent labels into metada
   // Only this connection's discussions are read, archived ones included; a matching copy is left alone.
   expect(host.listings).toEqual([{ labels: { "multica.connection": first.labels["multica.connection"] }, includeArchived: true }]);
   expect(await f.server.rpc(bootstrap, {}, host.paseo)).toEqual({ status: "ready" });
-  await vi.waitFor(() => expect(host.listings).toHaveLength(2));
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect(host.listings).toHaveLength(1);
   expect(host.writes).toEqual([task(first), task(second)]);
 
 });
@@ -201,13 +202,16 @@ it("the metadata copy follows directory pages, and a cursor that repeats stops i
   expect(await f.server.rpc(bootstrap, {}, paged.paseo)).toEqual({ status: "ready" });
   await vi.waitFor(() => expect(paged.writes).toHaveLength(2));
   expect(paged.listings).toHaveLength(2);
+  await f.dispose();
+  const restarted = f.start();
   const looping = metadataHost(f.native.agents, { pageSize: 1, repeatingCursor: true });
-  expect(await f.server.rpc(bootstrap, {}, looping.paseo)).toEqual({ status: "ready" });
+  expect(await restarted.server.rpc(bootstrap, {}, looping.paseo)).toEqual({ status: "ready" });
   await vi.waitFor(() => expect(looping.listings).toHaveLength(2));
   // The same cursor comes back, so the directory cannot be proven complete: nothing loops, and the
   // discussions after it wait for a readable directory.
   await new Promise(resolve => setTimeout(resolve, 20));
-  expect(looping.writes).toHaveLength(1);
+  expect(looping.writes).toHaveLength(2);
+  expect(new Set(looping.writes.map(write => write.agentId)).size).toBe(1);
 });
 
 it("a host without agent metadata is read once, and bootstrap stays ready", async () => {
@@ -223,7 +227,7 @@ it("a host without agent metadata is read once, and bootstrap stays ready", asyn
   expect(host.writes).toEqual([]);
 });
 
-it("a failed metadata copy leaves bootstrap ready and is retried; disposal waits for a copy in flight", async () => {
+it("a failed backfill is attempted once per process and disposal waits for an in-flight copy", async () => {
   const f = await fixture();
   await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   const host = metadataHost(f.native.agents);
@@ -233,7 +237,8 @@ it("a failed metadata copy leaves bootstrap ready and is retried; disposal waits
   await new Promise(resolve => setTimeout(resolve, 20));
   expect(host.writes).toEqual([]);
   expect(await f.server.rpc(bootstrap, {}, host.paseo)).toEqual({ status: "ready" });
-  await vi.waitFor(() => expect(host.writes).toHaveLength(2));
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect(host.attempts()).toBe(1);
   await f.dispose();
   // Bootstrap answers while the copy is still pending; shutdown does not overtake it.
   host.stored.clear();
@@ -241,14 +246,14 @@ it("a failed metadata copy leaves bootstrap ready and is retried; disposal waits
   host.control.holdWrites = new Promise<void>(resolve => { release = resolve; });
   const restarted = f.start();
   expect(await restarted.server.rpc(bootstrap, {}, host.paseo)).toEqual({ status: "ready" });
-  await vi.waitFor(() => expect(host.attempts()).toBe(3));
+  await vi.waitFor(() => expect(host.attempts()).toBe(2));
   let disposed = false;
   const disposing = Promise.resolve(restarted.dispose()).then(() => { disposed = true; });
   await new Promise(resolve => setTimeout(resolve, 20));
   expect(disposed).toBe(false);
   release();
   await disposing;
-  expect(host.writes).toHaveLength(4);
+  expect(host.writes).toHaveLength(1);
 });
 
 it("disabling a rule removes its empty Project and reenabling preserves tasks, discussion IDs and directories", async () => {
@@ -879,4 +884,17 @@ it("repeated successful bootstrap checks the daemon without requesting another r
   const before = f.requests.length;
   await Promise.all([f.server.rpc(bootstrap, {}, f.paseo), f.server.rpc(bootstrap, {}, f.paseo)]);
   expect(f.requests).toHaveLength(before);
+});
+
+it("writes imported discussion metadata without scanning the directory again", async () => {
+  const f = await fixture();
+  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const host = metadataHost(f.native.agents);
+  await f.server.rpc(bootstrap, {}, host.paseo);
+  await vi.waitFor(() => expect(host.writes).toHaveLength(2));
+  f.issues.push({ ...f.issues[0], id: "new-issue", identifier: "PRD-3" });
+  await resync(f.server, f.paseo, "remote-workspace");
+  const agent = f.native.agents.find(agent => agent.labels["multica.issue"] === "new-issue")!;
+  expect(host.writes).toContainEqual({ agentId: agent.id, patch: { "multica.connection": agent.labels["multica.connection"], "multica.issue": "new-issue" } });
+  expect(host.listings).toHaveLength(1);
 });

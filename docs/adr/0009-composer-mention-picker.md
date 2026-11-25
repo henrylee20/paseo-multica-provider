@@ -13,3 +13,7 @@ composer 只向插件暴露 agent 的 metadata，不暴露 agent ID 或 labels�
 ## 修订：合并设置入口（OPT-03）
 
 只保留设置页的连接、筛选规则和人工隐藏恢复，删除管理页与复制提及引用兜底；delivery.mentions 和 composer 选择器继续保留，0.15 宿主不提供提及选择器，manifest 最低版本不变。
+
+## 修订：只补齐一次 metadata（OPT-15）
+
+进程内首次 bootstrap 只扫描一次存量讨论；之后导入主讨论或 Thread 时写入对应 metadata，不再由每次 bootstrap 全量扫描。初次复制失败不阻塞 bootstrap，也不增加周期重试；重启后重新补齐。

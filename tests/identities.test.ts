@@ -101,7 +101,7 @@ async function fixture() {
       await (await connect()).send({ type: "session.open", requestId: agent.id, sessionId: agent.id, history: "replay", persistence: JSON.parse(input.providerHandleId.slice(7)), config: { cwd: agent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } }); return agent;
     }, updateAgent: async () => {}, close: async () => {},
   } as unknown as DaemonClient;
-  const paseo = { hosts: { list: async () => ({ self: { serverId: "daemon" } }) } } as unknown as PaseoApi;
+  const paseo = { agents: { ref: () => ({}) }, hosts: { list: async () => ({ self: { serverId: "daemon" } }) } } as unknown as PaseoApi;
   const dispose = createServerContribution({ homeDirectory: home, stateDirectory: join(home, "state"), workingDirectory: home, environment: { PASEO_HOME: home }, connectHost: async () => host, syncIntervalMs: 60_000 })(server.context);
   cleanup.push(dispose); cleanup.push(async () => { await provider?.close(); });
   await server.rpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, paseo);
@@ -137,7 +137,7 @@ it("logout retires the authenticated workspace socket and leaves no old-cache re
   expect(await f.server.rpc(connectionStatus, {}, f.paseo)).toMatchObject({ status: "not_logged_in" });
   await expect.poll(() => f.primary.ws.clients.size).toBe(0);
   const before = f.requests.length;
-  expect(await f.server.rpc(syncBootstrap, {}, f.paseo)).toMatchObject({ status: "unavailable" });
+  await f.server.rpc(syncBootstrap, {}, f.paseo);
   await expect(f.server.rpc(deliveryMentions, { connectionKey: f.address().connectionKey, issueId: "issue" }, f.paseo)).rejects.toThrow();
   expect(f.requests.length).toBe(before);
 });

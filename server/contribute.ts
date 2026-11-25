@@ -87,8 +87,8 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     const askusers = new AskUsers(store, connection, lifecycle);
     server.handle(askuserObserve, input => askusers.observe(input));
     server.handle(askuserRead, input => askusers.read(input));
-    const threads = new ThreadSynchronizer(store, connection, askusers);
     const metadata = new DiscussionMetadata(store);
+    const threads = new ThreadSynchronizer(store, connection, metadata, askusers);
     const wakeups = new AskuserWakeups(store, askusers, lifecycle, dependencies.now);
     server.handle(askuserReopen, async (input, context) => {
       const card = await askusers.reopen(input, lifecycle);
@@ -99,7 +99,7 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       });
       return card;
     });
-    const hiding = new ManualHiding(store, lifecycle);
+    const hiding = new ManualHiding(store, lifecycle, metadata);
     server.addHook("agent.archive.after", async ({ agent }) => { await hiding.archivedAgent(agent); });
     server.addHook("workspace.archive.after", async ({ workspace }) => { await hiding.archivedWorkspace(workspace.id); });
     server.handle(hiddenList, async () => hiding.list());
@@ -141,7 +141,7 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       if (!row) throw new Error("Comment event unavailable");
       return { text: row.text };
     });
-    const synchronizer = new SidebarSynchronizer({ store, connection, lifecycle,
+    const synchronizer = new SidebarSynchronizer({ store, connection, lifecycle, metadata,
       onCached: host => threads.reconcile(host),
       onIssue: async (connection, workspace, issueId, host) => {
         await descriptions.observe({ connectionKey: connection.connectionKey, issueId });
@@ -156,8 +156,7 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     });
     server.handle(syncStatus, async () => synchronizer.status());
     server.handle(syncBootstrap, async (_, context) => {
-      // The composer's agent picker reads a discussion's task from agent metadata. A connected client
-      // bootstraps every ten seconds, which also reaches discussions imported since.
+      // Backfill existing discussions once; imports write their own metadata.
       void metadata.mirror(context.paseo);
       try { await synchronizer.bootstrap(context.paseo); return { status: "ready" as const }; }
       catch { return { status: "unavailable" as const, message: "Multica 同步暂不可用，请检查 CLI 连接和 daemon。" }; }
