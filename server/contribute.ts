@@ -62,12 +62,14 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     const watchedConnections = new WeakSet<AbortSignal>();
     const identityRefreshes = new Set<Promise<unknown>>();
     let resolvingIdentity = 0;
+    let reconciledIdentity = 0;
     let shuttingDown = false;
     async function resolveStatus(profile: string, authenticated?: (connection: AuthenticatedConnection) => void) {
       const generation = ++resolvingIdentity;
       let context: AuthenticatedConnection | undefined;
       const status = await resolve(profile, value => { context = value; authenticated?.(value); });
-      if (generation !== resolvingIdentity || shuttingDown) return status;
+      if (generation < reconciledIdentity || shuttingDown) return status;
+      reconciledIdentity = generation;
       if (context?.signal && !watchedConnections.has(context.signal)) {
         const signal = context.signal;
         watchedConnections.add(signal);

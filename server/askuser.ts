@@ -131,7 +131,7 @@ export class AskUsers {
         if (!cached && (issue.manualHidden.workspace || issue.manualHidden.discussions.includes(rootId) || issue.archiveReason || issue.access?.status === "inaccessible")) continue;
         if (!cached) {
           try { cached = { document: await this.download(connection, workspace, issueId, attachment.download_url, rootId) }; }
-          catch (error) { if (error instanceof DeferredAttachment) continue; if (connection.signal?.aborted) this.online.delete(connection.connectionKey); cached = { error: error instanceof Error ? error.message.slice(0, 1000) : "附件下载或解析失败。" }; }
+          catch (error) { if (error instanceof DeferredAttachment) continue; if (connection.signal?.aborted) await this.checkConnection(connection.connectionKey); cached = { error: error instanceof Error ? error.message.slice(0, 1000) : "附件下载或解析失败。" }; }
           await this.store.update(state => { (state.connections[connection.connectionKey].issues[issueId].askuserAttachments ??= {})[attachment.id!] = cached!; });
         }
         await this.store.update(state => {
@@ -182,7 +182,7 @@ export class AskUsers {
       });
       return true;
     } catch {
-      if (connection.signal?.aborted) this.online.delete(connection.connectionKey);
+      if (connection.signal?.aborted) await this.checkConnection(connection.connectionKey);
       await this.store.update(state => {
         for (const [key] of unresolved) state.connections[connection.connectionKey].issues[issueId].askuserCards![key].statusError = "无法核对完整时间线，显示最后已知状态。";
       });
@@ -195,10 +195,7 @@ export class AskUsers {
     try { url = new URL(source, `${connection.apiUrl}/`); } catch { throw new Error("附件 download_url 无效。"); }
     if (url.origin !== new URL(connection.apiUrl).origin || url.username || url.password) throw new Error("拒绝跨源或含凭据的附件地址。");
     await this.assertDownloadAvailable(connection.connectionKey, issueId, rootId);
-    const accessible = await remoteFetch(connection, `/api/issues/${encodeURIComponent(issueId)}`, { headers: { "X-Workspace-Slug": workspace.slug } });
-    if (!accessible.ok) { await accessible.body?.cancel(); throw new Error(`任务访问核对失败（HTTP ${accessible.status}），未下载附件。`); }
-    const object = z.object({ id: z.string(), workspace_id: z.string() }).parse(await accessible.json());
-    await connection.assertCurrent?.();
+    const object = await this.issueObject(connection, workspace, issueId);
     if (object.id !== issueId || object.workspace_id !== workspace.id) throw new Error("任务访问核对返回了其他任务，未下载附件。");
     let response: Response;
     try {
@@ -233,6 +230,34 @@ export class AskUsers {
       await this.assertDownloadAvailable(connection.connectionKey, issueId, rootId);
       return parsed.data;
     } finally { await response.body?.cancel().catch(() => {}); }
+  }
+  private async issueObject(connection: AuthenticatedConnection, workspace: RemoteWorkspace, issueId: string) {
+    const response = await remoteFetch(connection, `/api/issues/${encodeURIComponent(issueId)}`, { headers: { "X-Workspace-Slug": workspace.slug } });
+    if (!response.ok) {
+      let error = "";
+      try { error = z.object({ error: z.string() }).parse(await response.json()).error; } catch { /* Generic route errors are not object-access evidence. */ }
+      await connection.assertCurrent?.();
+      const issue = (await this.store.read()).connections[connection.connectionKey]?.issues[issueId];
+      const explicit = /\bissue\b/i.test(error) && /not found|forbidden|denied|permission/i.test(error);
+      if ([403, 404].includes(response.status) && error && (issue?.access?.objectVerifiedAt || explicit)) {
+        // A global credential/workspace failure must not retire cached Issues.
+        const current = await this.connection();
+        if (current.connectionKey === connection.connectionKey) {
+          const workspaces = await remoteJson(current, "/api/workspaces", z.array(workspaceSchema)) as RemoteWorkspace[];
+          if (workspaces.some(item => item.id === workspace.id && item.slug === workspace.slug)) {
+            await current.assertCurrent?.();
+            await this.store.update(state => {
+              const local = state.connections[connection.connectionKey]?.issues[issueId];
+              if (local) local.access = { ...local.access, status: "inaccessible", reason: response.status === 403 ? "forbidden" : "not_found", checkedAt: new Date().toISOString() };
+            });
+          }
+        }
+      }
+      throw new Error(`任务访问核对失败（HTTP ${response.status}）。`);
+    }
+    const object = z.object({ id: z.string(), workspace_id: z.string() }).parse(await response.json());
+    await connection.assertCurrent?.();
+    return object;
   }
   private async assertDownloadAvailable(connectionKey: string, issueId: string, rootId = "main") {
     const issue = (await this.store.read()).connections[connectionKey]?.issues[issueId];
@@ -300,7 +325,7 @@ export class AskUsers {
     const workspaces = await remoteJson(connection, "/api/workspaces", z.array(workspaceSchema)) as RemoteWorkspace[];
     const workspace = workspaces.find(workspace => workspace.id === issue!.remoteWorkspaceId);
     if (!workspace) throw new Error("原 Multica 工作区不可用。");
-    const object = await remoteJson(connection, `/api/issues/${encodeURIComponent(address.issueId)}`, z.object({ id: z.string(), workspace_id: z.string() }), workspace) as { id: string; workspace_id: string };
+    const object = await this.issueObject(connection, workspace, address.issueId);
     if (object.id !== address.issueId || object.workspace_id !== workspace.id) throw new Error("任务访问核对返回了其他任务。");
     const verified = await this.resolveStatuses(connection, workspace, address.issueId);
     await this.publish(address.connectionKey, address.issueId);

@@ -24,7 +24,7 @@ export function AskuserContents({ data, theme }: { data: AskuserCardData; theme:
       {question.type !== "text" ? <Text style={muted}>{question.options.map(option => option.label).join(" · ")}{question.other?.enabled ? ` · ${question.other.label || "其他（自定义）"}` : ""}</Text> : question.required_when ? <Text style={muted}>{askuserConditionHint(data.questions, question)}</Text> : null}
     </View>)}
     {data.answer ? <View style={{ gap: 4 }}><Text style={muted}>答复者：{data.answer.actorId ?? "未知"}{data.answer.delegatedBy ? ` · 代理委托：${data.answer.delegatedBy}` : ""}</Text><Markdown>{data.answer.content}</Markdown></View> : null}
-    {data.skippedAt ? <Text style={muted}>跳过时间：{formatTime(data.skippedAt) ?? data.skippedAt} · 操作者：{data.skippedBy ?? "未知"}</Text> : null}
+    {data.skippedAt || data.skippedBy ? <Text style={muted}>跳过时间：{data.skippedAt ? formatTime(data.skippedAt) ?? data.skippedAt : "未知"} · 操作者：{data.skippedBy ?? "未知"}</Text> : null}
     {data.readOnlyReason ? <Text style={muted}>{data.readOnlyReason}</Text> : null}
     {data.delivery?.status === "pending_verification" || data.delivery?.status === "received" ? <Text style={muted}>回答保存结果待核实：请在 Multica 管理页「评论投递」核实原投递，或核实远端后明确重新发送；请勿重复提交。{data.delivery.message}</Text> : null}
     {data.statusError ? <Text style={muted}>{data.statusError}</Text> : null}
