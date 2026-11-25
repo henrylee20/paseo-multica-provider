@@ -495,17 +495,24 @@ it("a CLI credential change during receipt lookup cannot authorize an old recove
   const f = await fixture(false, true);
   await f.send("root", "Positive receipt proof", "identity-proof");
   await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[0]?.status).toBe("saved");
+  // Finish the anchor's post-save synchronization before creating the input
+  // whose recovery lookup will change credentials.
+  await f.server.rpc(syncBootstrap, {}, f.paseo);
   f.post(async () => ({ status: 503 }));
   await f.send("root", "Original identity only", "identity-recovery");
   await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[1]?.status).toBe("pending_verification");
   const original = (await f.server.rpc(deliveryList, {}, f.paseo)).records[1];
+  expect(f.posts).toHaveLength(2);
+  let changedCredentials = false;
   f.beforeLookup(async key => {
     if (key !== original.idempotencyKey) return;
     const path = join(f.home, ".multica/config.json");
     const config = JSON.parse(await readFile(path, "utf8"));
     await writeFile(path, JSON.stringify({ ...config, token: "replacement-cli-credential" }));
+    changedCredentials = true;
   });
   await f.server.rpc(syncBootstrap, {}, f.paseo);
+  expect(changedCredentials).toBe(true);
   expect(f.posts).toHaveLength(2);
   expect((await f.server.rpc(deliveryList, {}, f.paseo)).records[1]).toMatchObject({ body: original.body, idempotencyKey: original.idempotencyKey, status: "pending_verification" });
 });
