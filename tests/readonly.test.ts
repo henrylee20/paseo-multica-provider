@@ -271,17 +271,19 @@ it.each(["all", "one"])("reconciles %s host-reopened readonly discussions withou
   expect(await f.server.rpc(hiddenList, {}, f.paseo)).toEqual(hidden);
 });
 
-it("a list row without verified access recovery cannot leave a retired native discussion reopened", async () => {
+it("a successful list row restores access without another object read", async () => {
   const f = await fixture();
   const main = f.agents.find(agent => agent.labels["multica.discussion"] === "main")!;
   f.remote.visible = false; f.remote.objectStatus = 404;
   await f.server.rpc(syncBootstrap, {}, f.paseo);
   main.archivedAt = null;
   f.remote.visible = true; f.remote.objectStatus = 200; f.remote.invalidObject = true;
+  const reads = f.requests.filter(path => path === "/api/issues/issue").length;
   await f.server.rpc(syncBootstrap, {}, f.paseo);
-  expect(main.archivedAt).toBeTruthy();
-  expect(f.native.archived).toBe(true);
-  expect((await f.server.rpc(historyList, {}, f.paseo)).issues[0].status).toBe("inaccessible");
+  expect(main.archivedAt).toBeNull();
+  expect(f.native.archived).toBe(false);
+  expect((await f.server.rpc(historyList, {}, f.paseo)).issues[0].status).toBe("available");
+  expect(f.requests.filter(path => path === "/api/issues/issue")).toHaveLength(reads);
   expect(f.posts).toEqual([]);
 });
 
@@ -447,7 +449,7 @@ it("object permission loss keeps cached Run output, failed stops and manual hidi
   await f.send("main", "Unknown result", "pending");
   await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[0]?.status).toBe("pending_verification");
   const pending = (await f.server.rpc(deliveryList, {}, f.paseo)).records[0];
-  f.remote.visible = false; f.remote.objectStatus = 403; f.remote.denial = "forbidden";
+  f.remote.visible = false; f.remote.objectStatus = 403; f.remote.denial = "issue forbidden";
   await f.server.rpc(syncBootstrap, {}, f.paseo);
   expect((await f.server.rpc(historyList, {}, f.paseo)).issues[0]).toMatchObject({ status: "inaccessible", reason: "forbidden" });
   const count = f.posts.length;

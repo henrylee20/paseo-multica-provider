@@ -310,16 +310,6 @@ export class SidebarSynchronizer {
       await this.options.store.update(state => { connectionState(state, connection.connectionKey).projects[workspaceId] = { cwd: projectDirectory, projectId, name: workspace.name }; });
       for (const issue of issues) {
         const previous = (await this.options.store.read()).connections[connection.connectionKey]?.issues[issue.id];
-        // A returned list row alone does not undo a confirmed object denial.
-        const access = await this.objectAccess(connection, workspace, issue.id);
-        if (access === "forbidden" || access === "not_found") {
-          if (previous) await this.inaccessible(connection.connectionKey, issue.id, access);
-          continue;
-        }
-        if (previous?.access?.status === "inaccessible" && access !== "available") {
-          await this.archive(connection.connectionKey, issue.id, "inaccessible");
-          continue;
-        }
         const title = [issue.identifier, issue.title].filter(Boolean).join(" ");
         const oldProjectId = previous?.projectId ?? local?.projects[workspaceId]?.projectId;
         const rebuild = previous?.workspaceCreated && oldProjectId && oldProjectId !== projectId;
@@ -329,8 +319,7 @@ export class SidebarSynchronizer {
         await this.options.store.update(state => {
           const local = connectionState(state, connection.connectionKey);
           local.issues[issue.id] = { ...local.issues[issue.id], remoteWorkspaceId: workspaceId,
-            access: { ...local.issues[issue.id]?.access, status: "available", reason: undefined, checkedAt: new Date().toISOString(),
-              ...(access === "available" ? { objectVerifiedAt: new Date().toISOString() } : {}) },
+            access: { ...local.issues[issue.id]?.access, status: "available", reason: undefined, checkedAt: new Date().toISOString() },
             projectId,
             workspaceId: rebuild ? `wks_${stableId(connection.connectionKey, issue.id, projectId).slice(0, 16)}`
               : local.issues[issue.id]?.workspaceId ?? `wks_${stableId(connection.connectionKey, issue.id).slice(0, 16)}`,
