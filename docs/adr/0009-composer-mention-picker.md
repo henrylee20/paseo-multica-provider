@@ -9,3 +9,15 @@ composer 只向插件暴露 agent 的 metadata，不暴露 agent ID 或 labels�
 引用必须是 `[@名称](mention://agent/<id>)`，裸 `@名字` 不能确定同名身份，因此选择器同时显示 agent ID。引用是普通 Markdown 文本，用户编辑后可能不再触发执行；评论保存与 Run 启动仍分别报告。选择器不是 `@` 弹出菜单，宿主文件候选保持不变；已在用户主 daemon 的 0.17.4 宿主上完成真实选择、插入与发送，评论保存并触发 Run，随后 Stop（见 [交付验收记录](../acceptance.md)）；移动布局与原生溢出面板仍未验证。
 
 考虑过的替代方案：修改 Paseo 核心增加 mention source（需要用户长期维护宿主分支）；把最低版本提高到 0.16.0（0.15 仍可回退复制引用，没有必要放弃兼容）；在占位目录放 agent 文件让宿主 `@` 列出（插入的是带引号的文件路径、污染工作区，且不显示 agent 身份）。
+
+## 修订：合并设置入口（OPT-03）
+
+只保留设置页的连接、筛选规则和人工隐藏恢复，删除管理页与复制提及引用兜底；delivery.mentions 和 composer 选择器继续保留，0.15 宿主不提供提及选择器，manifest 最低版本不变。
+
+## 修订：只补齐一次 metadata（OPT-15）
+
+进程内首次 bootstrap 只扫描一次存量讨论；之后导入主讨论或 Thread 时写入对应 metadata，不再由每次 bootstrap 全量扫描。初次复制失败不阻塞 bootstrap，也不增加周期重试；重启后重新补齐。
+
+## 修订：首次补齐失败后重试
+
+存量 metadata 扫描成功后不再重复扫描；扫描失败则清空本次 promise，由客户端每 10 秒的 bootstrap 在下次连接机会重试。重连后 contribution 继续存活，因此客户端持续 bootstrap，服务端就绪时仍直接返回。

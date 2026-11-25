@@ -30,7 +30,7 @@ export type AskuserDocument = z.infer<typeof askuserDocumentSchema>;
 export const askuserAddress = z.object({ connectionKey: z.string(), issueId: z.string(), commentId: z.string(), attachmentId: z.string() });
 export const askuserAnswerSchema = z.object({ commentId: z.string(), content: z.string(), actorId: z.string().optional(), actorType: z.string().optional(), delegatedBy: z.string().optional() });
 export const askuserCardSchema = askuserAddress.extend({ rootId: z.string(), revision: z.string(), title: z.string(), description: z.string().optional(),
-  delivery: z.object({ status: z.enum(["received", "saved", "failed", "pending_verification"]), clientMessageId: z.string(), message: z.string().optional() }).optional(),
+  delivery: z.object({ status: z.enum(["received", "saved", "failed"]), clientMessageId: z.string(), message: z.string().optional() }).optional(),
   questions: z.array(askuserQuestionSchema), status: z.enum(["pending", "answered", "skipped", "invalid"]), collapsed: z.boolean().optional(),
   readOnly: z.boolean(), readOnlyReason: z.string().optional(), offline: z.boolean(), truncated: z.boolean(), error: z.string().optional(), statusError: z.string().optional(), answer: askuserAnswerSchema.optional(), skippedAt: z.string().optional(), skippedBy: z.string().optional(),
 });

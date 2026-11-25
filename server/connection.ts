@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { z } from "zod";
 import type { ConnectionStatus } from "../shared/contracts.js";
@@ -20,14 +20,18 @@ export interface AuthenticatedConnection {
   /** Recheck the effective CLI pair before using this resolved context. */
   assertCurrent?: () => Promise<void>;
   signal?: AbortSignal;
+  identity?: { user: z.infer<typeof remoteUser>; expiresAt: number };
 }
 
 const cliConfig = z.object({ server_url: z.string().nullish(), app_url: z.string().nullish(), token: z.string().nullish() });
 const remoteUser = z.object({ id: z.string().min(1), name: z.string().nullish(), email: z.string().nullish() });
+const identityTtlMs = 60_000;
 
-/** Every resolution reads the effective CLI file anew; credentials never enter an RPC result. */
+/** File metadata is checked on every use; parsed credentials stay in daemon memory. */
 export function createConnectionResolver(dependencies: ConnectionDependencies) {
-  let active: { fingerprint: string; controller: AbortController } | undefined;
+  let active: { fingerprint: string; controller: AbortController; identity?: AuthenticatedConnection["identity"] } | undefined;
+  let cachedConfig: { path: string; mtime: number; size: number; value: z.infer<typeof cliConfig> } | undefined;
+  let taskMarker: Promise<boolean> | undefined;
   const invalidate = () => { active?.controller.abort(); active = undefined; };
   async function effective(profile: string): Promise<{ status: ConnectionStatus; token?: string }> {
     const env = dependencies.environment;
@@ -39,7 +43,7 @@ export function createConnectionResolver(dependencies: ConnectionDependencies) {
     };
     const fail = (status: ConnectionStatus["status"], message: string) => ({ status: { ...base, status, message } });
     const taskContext = !!(env.MULTICA_AGENT_ID || env.MULTICA_TASK_ID || env.MULTICA_DAEMON_PORT)
-      || await hasTaskMarker(dependencies.workingDirectory);
+      || await (taskMarker ??= hasTaskMarker(dependencies.workingDirectory));
     const taskRoot = env.MULTICA_TASK_CONFIG_ROOT?.trim();
     if (taskContext && !taskRoot) return fail("isolated_context", "任务上下文缺少 MULTICA_TASK_CONFIG_ROOT，不能读取拥有者登录。");
     if (taskRoot && !isAbsolute(taskRoot)) return fail("isolated_context", "MULTICA_TASK_CONFIG_ROOT 必须是绝对路径。");
@@ -48,9 +52,18 @@ export function createConnectionResolver(dependencies: ConnectionDependencies) {
     let config: z.output<typeof cliConfig> = {};
     let configError: "missing_config" | "unreadable_config" | "invalid_config" | undefined;
     try {
-      const text = await readFile(base.configPath, "utf8");
-      try { config = cliConfig.parse(JSON.parse(text)); } catch { configError = "invalid_config"; }
+      const file = await stat(base.configPath);
+      if (cachedConfig?.path === base.configPath && cachedConfig.mtime === file.mtimeMs && cachedConfig.size === file.size) config = cachedConfig.value;
+      else {
+        if (active) active.identity = undefined;
+        const text = await readFile(base.configPath, "utf8");
+        try {
+          config = cliConfig.parse(JSON.parse(text));
+          cachedConfig = { path: base.configPath, mtime: file.mtimeMs, size: file.size, value: config };
+        } catch { configError = "invalid_config"; }
+      }
     } catch (error) {
+      if (cachedConfig) { cachedConfig = undefined; if (active) active.identity = undefined; }
       configError = (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing_config" : "unreadable_config";
     }
     const apiOverride = env.MULTICA_SERVER_URL?.trim();
@@ -88,7 +101,8 @@ export function createConnectionResolver(dependencies: ConnectionDependencies) {
     // Only daemon memory contains the opaque credential or this fingerprint.
     const fingerprint = JSON.stringify([profile, base.apiUrl, token]);
     if (active?.fingerprint !== fingerprint) { invalidate(); active = { fingerprint, controller: new AbortController() }; }
-    const controller = active.controller;
+    const current = active;
+    const controller = current.controller;
     const assertCurrent = async () => {
       const selected = dependencies.currentProfile ? await dependencies.currentProfile() : profile;
       const latest = selected === profile ? await effective(profile) : undefined;
@@ -99,23 +113,27 @@ export function createConnectionResolver(dependencies: ConnectionDependencies) {
     };
     const fail = (status: ConnectionStatus["status"], message: string): ConnectionStatus => ({ ...base, status, message });
     try {
-      await assertCurrent();
-      const response = await fetch(`${base.apiUrl}/api/me`, {
-        headers: { Authorization: `Bearer ${token}` }, redirect: "error", signal: AbortSignal.any([AbortSignal.timeout(10_000), controller.signal]),
-      });
-      if (response.status === 401 || response.status === 403) {
-        await response.body?.cancel();
-        if (active?.controller === controller) invalidate();
-        return fail("authentication_failed", "CLI 凭据已失效或无权访问，请在 daemon 主机重新运行 CLI 登录。");
+      let identity = current.identity;
+      if (!identity || identity.expiresAt <= Date.now()) {
+        const response = await fetch(`${base.apiUrl}/api/me`, {
+          headers: { Authorization: `Bearer ${token}` }, redirect: "error", signal: AbortSignal.any([AbortSignal.timeout(10_000), controller.signal]),
+        });
+        if (response.status === 401 || response.status === 403) {
+          await response.body?.cancel();
+          if (active?.controller === controller) invalidate();
+          return fail("authentication_failed", "CLI 凭据已失效或无权访问，请在 daemon 主机重新运行 CLI 登录。");
+        }
+        if (!response.ok) {
+          await response.body?.cancel();
+          return fail("offline", `Multica 身份验证暂不可用（HTTP ${response.status}）。`);
+        }
+        const user = remoteUser.parse(await response.json());
+        await assertCurrent();
+        current.identity = identity = { user, expiresAt: Date.now() + identityTtlMs };
       }
-      if (!response.ok) {
-        await response.body?.cancel();
-        return fail("offline", `Multica 身份验证暂不可用（HTTP ${response.status}）。`);
-      }
-      const user = remoteUser.parse(await response.json());
-      await assertCurrent();
+      const { user } = identity;
       const connectionKey = createHash("sha256").update(JSON.stringify([base.apiUrl, user.id])).digest("hex");
-      authenticated?.({ apiUrl: base.apiUrl!, token, connectionKey, userId: user.id, assertCurrent, signal: controller.signal });
+      authenticated?.({ apiUrl: base.apiUrl!, token, connectionKey, userId: user.id, assertCurrent, signal: controller.signal, identity });
       return { ...base, status: "ready", user: { id: user.id, name: user.name ?? "", email: user.email ?? "" },
         connectionKey,
         message: "已验证 CLI 连接。" };
@@ -131,8 +149,7 @@ export async function remoteFetch(connection: AuthenticatedConnection, path: str
   headers.set("Authorization", `Bearer ${connection.token}`);
   const signals = [AbortSignal.timeout(10_000), ...(connection.signal ? [connection.signal] : []), ...(init.signal ? [init.signal] : [])];
   const response = await fetch(`${connection.apiUrl}${path}`, { ...init, headers, redirect: "error", signal: AbortSignal.any(signals) });
-  try { await connection.assertCurrent?.(); }
-  catch (error) { await response.body?.cancel(); throw error; }
+  if ((response.status === 401 || response.status === 403) && connection.identity) connection.identity.expiresAt = 0;
   return response;
 }
 

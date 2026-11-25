@@ -72,7 +72,8 @@ export async function restoreMappedDiscussion(host: NativeHost, lifecycle: Discu
   if (agent.workspaceId !== expected.workspaceId) {
     const rootId = agent.labels[discussionKeys.discussion];
     if (agent.provider !== "multica" || !agent.workspaceId || !rootId || agent.labels[discussionKeys.connection] !== address.connectionKey ||
-      agent.labels[discussionKeys.issue] !== address.issueId || !agent.persistence?.sessionId.startsWith("plugin:")) throw new Error("Mapped native discussion cannot be moved");
+      agent.labels[discussionKeys.issue] !== address.issueId || !agent.persistence?.sessionId.startsWith("plugin:"))
+      throw new Error("Mapped native discussion cannot be moved");
     // A native history query may have reopened the retired agent. Close its
     // local activity before archiving, so migration cannot interrupt a remote Run.
     const release = await lifecycle.hold([{ ...address, rootId }]);

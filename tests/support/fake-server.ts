@@ -1,4 +1,5 @@
 import type { PaseoApi } from "@getpaseo/client";
+import { workspaceList, workspaceRule, connectionStatus } from "../../shared/contracts.js";
 import type { PluginRpcContract, SettingsDefinition } from "@getpaseo/plugin";
 import type {
   PluginHookContext, PluginHookPayload, PluginHookResult, PluginHooks,
@@ -59,3 +60,14 @@ export class FakeServer {
     return result as PluginHookResult<Name>;
   }
 }
+
+/** Reapplying the current rule explicitly requests a fresh snapshot after bootstrap becomes idempotent. */
+export async function resync(server: FakeServer, paseo: PaseoApi, workspaceId: string) {
+  try {
+    const workspace = (await server.rpc(workspaceList, {}, paseo)).workspaces.find(item => item.id === workspaceId);
+    if (!workspace) return { status: "unavailable" as const };
+    return await server.rpc(workspaceRule, { workspaceId, rule: workspace.rule }, paseo);
+  } catch { return { status: "unavailable" as const }; }
+}
+
+export async function hiddenObjects(server: FakeServer, paseo: PaseoApi) { return (await server.rpc(connectionStatus, {}, paseo)).hidden; }

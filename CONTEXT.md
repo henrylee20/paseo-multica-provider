@@ -1,151 +1,67 @@
-# Issue #1 实现上下文
+# Paseo–Multica 实现上下文
 
-## 宿主版本约定
+本文件描述 2026-11-25 精简后的当前实现。原 Issue [#1](https://github.com/henrylee20/paseo-multica-provider/issues/1) 的切片已完成；当前行为以 [规格](docs/spec.md) 及各 ADR 末尾修订为准，原始运行证据保存在 [历史验收记录](docs/acceptance.md)。安装见 [README](README.md)，术语见 [GLOSSARY](GLOSSARY.md)，固定接口证据见 [设计依据](docs/design.md)。
 
-用户明确要求：没有强烈的实际不兼容证据时，不设置 Paseo 最高版本。manifest 仅声明 `>=0.15.3`；开发 SDK 固定为 `0.15.4`。实际原生验收先运行于 `0.15.3`，应用更新后在独立 `0.17.4` daemon 继续验证；两个版本的证据分别记录，不构成安装上限。原 Issue #1 交付验收未重启或 reload 用户主 daemon；合并后修复的本机应用记录见下文。
+## 宿主与验证边界
 
-## 合并后的 Project 生命周期修复
+manifest 仅声明 Paseo `>=0.15.3`，不设最高版本；开发 SDK 固定 `0.15.4`。原生验收先在实际 `0.15.3`，后在独立及用户主 `0.17.4` daemon 执行，证据分别记录。提及选择器使用 0.16 起的 composer item，0.15 不显示选择器；没有修改 Paseo 核心。
 
-PR #17 已合入 `main`（`2285008`）。用户要求直接在主干补齐停用规则后的空 Project 清理，并明确选择只修改插件、允许重建 Project，但任务、讨论和历史必须保留。当前 0.17.4 无公开项目隐藏接口；移除注册记录后原工作区无法直接恢复，原工作区 ID 也不能重新创建。因此重新启用允许重建本地 Project／Paseo 工作区外壳，使用原 cwd 和 provider handle 迁回原讨论，保留 agent ID、Issue／Thread 身份及全部缓存；人工隐藏不自动撤销。完整决定见 ADR 0002。删除前核对项目身份、目录、类型及全部活跃工作区分页，有用户自建子工作区时保留项目。该修复不提高或限制宿主最高版本。
+既有真实云服务验收仅使用授权 Issue HENR-2，包括 CLI 复用、筛选导入、主讨论新 Thread、有效提及和原生 Stop。真实自部署、命名 profile 轮换、原生 queue 控件及移动布局仍未完整验证；当前精简回归使用公开入口、临时 CLI、隔离 HTTP/WebSocket 和宿主契约，不能当成新一轮真实宿主验收。
 
-独立真实 0.17.4 daemon 配合只允许 GET 的合成 Multica 服务验证：停用清空原生项目注册，重启保持停用，重新启用生成新 Project／工作区外壳，4 个讨论 ID、评论内容、来源元数据、Run／停止／投递缓存保持；隐藏讨论仅在明确选择后迁回，远端写入为 0。原生重放的投影行 envelope 时间可能重新生成，原评论来源时间保存在缓存及来源行；不把此时间当作远端历史。此项证据位于 `/tmp/paseo-multica-project-rebuild-probe/plugin-acceptance-evidence.json`，与真实云服务验收分开记录。
+## 保留的核心路径
 
-最终类型检查、154 项回归及构建通过。本机确认所有规则停用、Multica 讨论均关闭后，备份状态并只重载 Multica 插件，已清理遗留空 Project；原 2 项任务的缓存、工作区映射及 3 个原生讨论 ID／provider handle 均保留，同步 ready。删除父 Project 后，宿主的讨论目录即使 includeArchived 也可能省略这些记录，必须用原 agent ID 逐项读取核对，不能把列表缺席视为历史删除。只读核对未恢复讨论或改变远端任务；证据及备份位于 `/tmp/paseo-multica-main-project-lifecycle/`。本机未为验收重新启用真实规则。
+- Multica 工作区 → Paseo 项目，Issue → Paseo 工作区，Thread → agent tab；主讨论展示描述、系统事件和首次完全无关联的 Run。
+- daemon 只读复用 CLI 配置，保留环境覆盖和任务隔离。凭据不写入插件状态或 RPC；服务地址和真实用户 ID 组成连接键，同账号 Token 轮换续用映射，换身份使用独立空规则。
+- 每次远端请求发送前核对 profile 和有效服务／凭据。旧连接不能借新登录写入。CLI 文件按 mtime／大小缓存；同凭据 `/api/me` 结果最多缓存 60 秒，配置变化或 401／403 失效。
+- 原生评论保留初次读取内容；后续编辑、删除追加事件。成功评论只保存 clientMessageId → commentId／rootId 关联，用于同步回声去重；新 Thread 是独立原生会话。
+- `session.prompt` 先校验文本、附件、空正文、outputSchema 与任务／Thread 映射，在 prompt_result 前直接 emit 原生输入。仅网络发送异步；steer 保留接收时捕获的 turnId，失败追加一个原生错误。
+- Run 优先触发评论、再按真实来源时间选最早关联评论，缺父链或时间时等待，只有确实零关联才归 main；owner 首次固定后不迁移。五类关联及 RFC3339Nano 比较保留，见 ADR 0003。
+- 原生 Stop 固定当前 root 的活跃 Run 集合并逐项取消；成功结束捕获的宿主 turn，新出现 Run 使用新周期，失败返回 request.failed。纯 session.close、整工作区归档与贡献清理不取消远端。
 
-2026-11-25 当前集成已包含 #2–#15，#16 提供可安装源码插件产物、完整使用说明与分层组合验收记录。入口见 [README](README.md) 与 [docs/acceptance.md](docs/acceptance.md)。下文按切片记录实现过程，早期的“待实现／待验收”描述应结合后续记录与最新验收矩阵阅读。
+## Project 生命周期与隐藏
 
-## 规格与决定
+`main` 的 `f48de10` 是用户明确要求的行为：停用规则后移除没有活跃子工作区的插件 Project。移除前核对项目 ID、目录、非 Git 类型及完整活跃目录分页；有用户自建活跃工作区则保留。
 
-实现目标是 [Issue #1](https://github.com/henrylee20/paseo-multica-provider/issues/1) 的完整规格；已发布正文的仓库副本是 [docs/github-spec.md](docs/github-spec.md)。确认用户可见行为时读取该规格；查对象名称时读取 [GLOSSARY.md](GLOSSARY.md)。
+重新注册 Project 会改变 ID；原工作区无法在父项目删除后直接恢复，旧 workspaceId 也不能用原创建凭据重建。因此保留 `project.removed`、旧父项目记录、新外壳 ID 与原 provider handle 导入迁移，保留 agent ID、cwd、评论及执行历史。隐藏讨论仅在明确恢复时迁移；宿主目录可能省略已删父项目下的 agent，不能据缺席判断历史丢失，需按原 agent ID 核对。
 
-改动会话、目录、Run 归属、停止、历史、身份、投递或鉴权时，读取 [docs/adr](docs/adr) 中相应 ADR。接口证据与产品决定见 [docs/design.md](docs/design.md)，职责与验证安排见 [docs/implementation-plan.md](docs/implementation-plan.md)。
+`archiveReason` 区分自动归档 hook 与人工隐藏，`ruleArchivedAgentIds` 保存最初活跃讨论集；两者继续支持丢失回执和原生状态漂移恢复。只删除未用于决策的 `archivePending`，旧字段由 Zod strip 忽略。旧原因值 inaccessible 仅为读取历史 state 保留。
 
-## 工单依赖
+Paseo 0.17.4 恢复工作区可能以 60 秒时间戳回退唤醒其他隐藏讨论。自动／手动恢复都先 `hold()` 关闭这些本地投影、拒绝竞争打开，等待已接收 Stop 完成，再核对空闲并重新归档；不借此取消远端 Run。分别恢复 Paseo 工作区与单个讨论，其他隐藏意愿保持，见 ADR 0002。
 
-集成分支为 `feat/issue-1-multica-provider`，基线为 `49d9587`。每项工单通过独立分支及 worktree 实现，合入集成分支；最终通过同一 PR 关闭母规格与完成的子工单。
+## 后台与按需读取
 
-| 工单 | 交付 | 前置工单 |
-| --- | --- | --- |
-| [#2](https://github.com/henrylee20/paseo-multica-provider/issues/2) | CLI 登录与连接状态 | 无 |
-| [#3](https://github.com/henrylee20/paseo-multica-provider/issues/3) | 原生侧栏及主讨论 | #2 |
-| [#4](https://github.com/henrylee20/paseo-multica-provider/issues/4) | 动态组合筛选 | #3 |
-| [#5](https://github.com/henrylee20/paseo-multica-provider/issues/5) | Thread 消息及历史更正 | #3 |
-| [#6](https://github.com/henrylee20/paseo-multica-provider/issues/6) | 人工隐藏与恢复 | #4、#5 |
-| [#7](https://github.com/henrylee20/paseo-multica-provider/issues/7) | Run 唯一归属及聚合活动状态 | #5 |
-| [#8](https://github.com/henrylee20/paseo-multica-provider/issues/8) | Run 输出按需加载 | #7 |
-| [#9](https://github.com/henrylee20/paseo-multica-provider/issues/9) | 原生停止及关闭 tab | #6、#7 |
-| [#10](https://github.com/henrylee20/paseo-multica-provider/issues/10) | 普通评论投递 | #9 |
-| [#11](https://github.com/henrylee20/paseo-multica-provider/issues/11) | 幂等投递恢复 | #10 |
-| [#12](https://github.com/henrylee20/paseo-multica-provider/issues/12) | 原生中断及排队模式 | #10 |
-| [#13](https://github.com/henrylee20/paseo-multica-provider/issues/13) | 登录变化后的历史隔离 | #10 |
-| [#14](https://github.com/henrylee20/paseo-multica-provider/issues/14) | 后台同步及断线恢复 | #6、#8 |
-| [#15](https://github.com/henrylee20/paseo-multica-provider/issues/15) | 失权后的只读历史 | #10 |
-| [#16](https://github.com/henrylee20/paseo-multica-provider/issues/16) | 可安装交付及端到端验收 | #11、#12、#13、#14、#15 |
+客户端 contribution 会跨宿主重连存活，因此始终每 10 秒 bootstrap；服务端就绪时短路，只核对 serverId 并启动定时器。daemon 每 15 秒及工作区事件后同步；客户端退出不终止同步，进程重启后仍需客户端引导。规则变更显式强制核对。
 
-## 验证与当前状态
+每轮同步按 Multica 工作区复用 agents／members promise；Thread 显式打开时使用该次请求的目录，不另设 TTL。metadata 存量扫描在进程内成功一次后停止，失败由后续 bootstrap 重试；导入和恢复单独补写。
 
-测试边界已由母规格的 Testing Decisions 确认：从公开贡献入口驱动 RPC、provider 与生命周期，以临时 CLI 配置、模拟 Multica HTTP/WebSocket 和 Paseo 宿主契约观察行为。按 TDD 逐个行为实现。
+Thread renderer 挂载仍调用 thread.open，正常不显示说明卡；主讨论也保留不可见的加载条目。仅本进程实际打开的 Thread 继续补读正文；描述由 provider 订阅推送。展开活跃 Run 每两秒更新，终态只读一次。
 
-2026-11-24 已实现 #2 CLI 连接与 #3 默认规则／原生侧栏／主讨论描述。#3 从公开贡献入口验证分页、自定义状态类别、持久身份、原生创建响应丢失后的核对、规则归档恢复、客户端引导与 daemon 后台工作；Paseo 适配层直接包装实际低层 SDK 方法，并在写入前核对拥有者 daemon 身份。主讨论描述用稳定插件行展示，长描述按需读取缓存全文；重放与缓存读取约束见 [ADR 0005](docs/adr/0005-preserve-native-comment-history.md)。长描述按版本读取；#14 已增加打开主讨论时的缓存观测和稳定描述行刷新，读取中版本变化仍明确报错。
+描述与 Run 缓存读取共用 revision／offset 校验及有界切片。run.read 通过 kind 区分 messages／metadata，分别保留 revision；评论事件保持 thread.event 单次读取。缓存读取不依赖当前 CLI 登录，远端刷新仍核对原连接与 Run 归属。
 
-真实宿主加载及目标 Multica 服务验收单独记录证据。SDK 静态核查结果见设计文档；模拟宿主测试通过不能替代真实服务验收。完整评论、人工隐藏、执行过程及故障恢复已由后续切片实现，最终结果与未验证边界统一见 [交付验收记录](docs/acceptance.md)。
+恢复 history:skip 会话仍完整分页读回原生时间线，再按来源 messageId／自身 clientMessageId、角色及全文确认缺失原文。Paseo 0.17.4 的普通消息 item ID 去重仅在 provider 会话内存中，不能跨重启信任；失败、gap 或 epoch 改变时不盲目重放，见 ADR 0005。
 
-#4 已加入成员／agent／squad 负责人、状态类别／精确状态、标签及 Multica 项目组合规则与管理页目录选择。规则字段取交集，字段内与标签取并集；成员使用 user_id。已启用工作区的 WebSocket 事件触发完整分页核对，认证握手与重连都重新读取快照；失败或不完整快照不产生空权威结果。退出采用 workspace 级自动归档，持久化原因、未完成意图及此前活跃 tab 集合；重返恢复相同身份，且只 refresh 明确已归档的自动恢复对象。正常插件清理等待同步器完成，避免重启时并发写入。人工隐藏的主动管理由 #6 继续交付。
+StateStore 首次读取校验后缓存，只返回只读约定的共享快照；所有修改走 update，成功原子落盘后替换缓存，失败保留原状态。加载失败清空 promise，允许下次重试；不新增旧 state 迁移。
 
-2026-11-24 #5 增加持久 Thread tab、递归回复关联与按需历史。后台使用 `recent=100&summary=true` 和活动时间／根 ID 组合游标发现概要；原生导入只重放已缓存记录。实际时间线渲染 Thread 概要时调用 `thread.open`，以 `thread=<root>&tail=100` 及回复时间／ID 组合游标读取全部可用历史。根以普通评论为准，Issue 级系统／状态记录留在主讨论；缺失父链保持未解析，删除根保留 tombstone。`X-Comments-Truncated`、正文截断、失败分页与缺失游标均不得当作完整快照推断删除。
+## 精简界面与取消的保证
 
-评论角色由连接用户 ID 与 `author_type` 共同决定；成员名称使用成员的 `user_id`，agent 即使由本人拥有也保留带署名 assistant。首次可获取快照形成不可变原生消息；之后的编辑、删除和系统变化使用独立且稳定的插件行，超长事件通过 `thread.event` 按需读取完整正文。每条原生评论另有稳定的“评论来源”记录，公开显示首次快照的发言和更新时间；来源时间也发送给 provider，但宿主实时追加路径仍可能以本地时间记录原生时钟。已有历史可离线重放；跨断线恢复仍由 #14 验收。
+只有设置页：连接、Multica 工作区与筛选规则、有隐藏项时的人工恢复。工作区按已启用优先分组，编辑与启用走带固定底栏的弹窗；默认选择未开始／进行中整类，编辑器保留整类与部分具体状态的选择，目录按连接缓存并由只读 `workspace.preview` 预览匹配与移出项（不写状态、不进同步队列），`workspace.list` 的 `importedCount` 与预览均按未归档映射计数。提及只走 composer 选择器。主讨论发送成功仅提示可在侧栏打开新 Thread；Thread 内成功不显示额外内容。
 
-用户已明确要求 ADR 和本文件随实现提交到集成分支。
+- **取消保证 A**：删除持久投递原文、核实／显式重发与 7 天保证。网络或 5xx 用相同 Idempotency-Key 最多三次，失败只追加错误；不由插件跨重启恢复失败输入。
+- **取消保证 B**：删除停止记录、清理四态、跨 tab 单 Run 重试及 Stop epoch 栅栏；Stop 只处理当前活跃 Run。
+- **取消保证 C**：删除独立只读快照和失权二次取证，完整列表缺失统一按 filter_exit 归档，写入 403／404 直接透传。原生历史与已读缓存保留。
 
-2026-11-25 #12 核对原生发送层次并增加公开贡献／provider／RPC 回归。公开 prompt 仅有 `auto | steer`；显式 interrupt 由宿主先调用原生停止，成功后才交给 provider 普通输入，失败不得投递。原生 queue 在客户端持有，tab 的全部未结束 Run 终结后释放队首，以 SDK steer 避免释放瞬间新活动被取消；空闲到 provider 时仍是普通 auto。插件不新增队列、不发送远端强制 steering，也不把 Multica queued Run 当作原生待发输入。依赖 #9／#10 已具备该行为，此切片保留其实现并锁定多 Run、固定取消集合、部分失败、重复同 ID 输入、Thread 目标与释放后新周期竞态；没有为获得测试 RED 改造既有正确实现。原生“立即发送”遵循当前 composer 设置，可能先中断。
+## AskUser（#20–#27）
 
-母任务在宿主更新前已取得实际 0.15.3 SDK 的普通发送与显式 interrupt 证据；原生 queue 控件和视觉体验仍未验证。工作中 `/opt/Paseo` 原地更新到 0.17.4，而母任务拥有的旧 daemon 暂仍是 0.15.3；不得把更新后 reload 失败当作本插件 SDK 不兼容，亦不得把旧版本验收标记为新版本通过。manifest 继续只声明 `>=0.15.3`，无最高版本。实际运行环境重启与最终验收由母任务负责。
+保留 main 的 askuser.json version "1" 安全下载与持久卡片缓存、完整 timeline 终态校验、原生问题映射、精确中文回答、本地收起／重展、两步跳过和受保护的主动加载。父评论与 askuser_answer_to 均指向卡片评论，rootId 仍为原 Thread／Run／Stop 归属；指定 answer_user_id、require_answer、卡片终态、隐藏、归档和 hold 检查保留。新卡片仍可出现在独立 Thread，不迁移已固定的 Run owner。
 
-2026-11-24 #6 增加按连接持久化的 workspace／本地主讨论／Thread 人工隐藏。公开 `agent.archive.after` 与 `workspace.archive.after` 捕获原生关闭和归档；自动归档原因先于宿主事件保存，因此不误记成人工选择。新 Thread 发现、评论 WebSocket 失效、规则退出重返、多个客户端引导及正常重启都保留隐藏；普通 session.close 和贡献清理只释放资源。
+原生权限 ID 仍为 multica:askuser:<cardCommentId>:<attachmentId>，按 provider session、连接与 Issue 隔离。权限、订阅随 SessionContext 释放；DiscussionLifecycle.loaded 与 NativeHost.listCommands 继续用于无中断加载。StateStore 的成功更新在缓存替换后通知订阅，失败更新不通知；CLI 撤销与身份刷新继续清理原连接权限，同账号轮换不丢收起状态。
 
-管理页独立读取所有连接的本地隐藏对象，CLI 离线时仍可列出与恢复缓存历史。恢复操作绑定原 workspace、agent 与 cwd，不 resume 新身份、不重复 import，也不 refresh 活跃 agent。因宿主归档事件没有 bulk cause，workspace 归档关闭的讨论同样分别列出：仅恢复工作区不恢复 tab；恢复某个讨论先恢复原 workspace，再恢复选定且已归档的 agent。失败或回执丢失保留隐藏，重试不会 refresh 已恢复的活跃 tab。具体取舍与原生证据见 ADR 0002。真实宿主/真实 Multica 验收继续由母工单负责。
+全选填文本表单继续增加非空「提交确认」，Dismiss、模糊 allow 或全空原题仅本地收起；条件必填和精确答案格式保持 main 行为。首次新权限在 listCommands 完成原生注册后才 live 公布，已加载会话新卡片直接 live，重启历史在 ready 前静默回放；首次发现标记仅在实际发出权限后清除，不持久化。宿主注意力和系统通知仍需真实验收。
 
-真实 0.15.3 验收发现人工隐藏的 Thread 经筛选退出重返后，所属 workspace 已活跃，重复调用 `restoreWorkspace` 会被宿主拒绝。#6／#4 的恢复现先逐页读取原生活跃 workspace 目录并比对完整 ID；SDK 接受但忽略 `idPrefix`，目录没有可判断归档的 `archivedAt` 字段。人工恢复、自动恢复与创建回执丢失核对共用该适配边界，回执丢失和重启后可继续恢复原身份，且仍只 refresh 确认已归档的 agent。公开 RPC 测试按真实宿主行为拒绝活跃 workspace 的重复恢复，并覆盖后续页与 workspace 恢复回执丢失。
+回答改用 CommentDelivery.send 并等待成功／失败，parent_id 与 askuser_answer_to 回执均校验；发送中／保存／失败状态仅留本进程，成功答案保存在卡片，失败正文不另行持久化。核实／显式重发、receivedEpoch／Stop 栅栏及只读快照集成随 A／B／C 取消；纯 AskUser 可用性规则仍在 askuser-policy。原生卡片与缓存读取保留，远端 403／404 直接返回错误。
 
-2026-11-24 #7 加入 Run 的持久首次展示归属、稳定执行摘要与原生活动聚合。后台准确读取 `GET /api/issues/{id}/task-runs?view=timeline`，与成功的评论概要祖先／创建时间缓存组合确定唯一 owner；远端输入关联与生成评论 provenance 分开保存，后补关联、跨 Thread 合并和正常重启不迁移 owner。未知父链、读取失败与跨 Thread 创建时间缺失均不等于零关联。首次确实无关联的 Run 固定留在主讨论。
+用户要求仅 Mock 测试，真实 daemon、原生表单、通知和目标自部署验收仍由用户执行；本次 rebase 也没有安装、reload 或访问真实服务。真实 skip HTTP 响应、timeline 的 askuser_skipped_at／askuser_skipped_by 及专用 WebSocket 事件尚未采样，不补造远端时间或操作者，202 仍需 timeline 终态证据。证据与手动步骤见 [AskUser 验收](docs/askuser-acceptance.md) 和 [唤醒契约](docs/askuser-wakeup.md)，历史 #1 实机记录不代表 AskUser 已验收。
 
-执行摘要以稳定插件行展示 agent 与真实状态，状态更新替换同一 Run，不生成日志 assistant 消息，也不读取执行消息正文。一个 tab 的所有未结束 Run 共享一个原生 turn；全部终结才结束，每个后续活动周期生成新 UUID。缓存 replay 先输出摘要，原生导入返回后的后台同步及 renderer 挂载后的只读 `run.observe` 负责在宿主注册后发布活动。实际 0.15.3 导入前活动事件会丢失、复用已完成 turn ID 会卡住活动状态，这两项已由母任务独立实测；执行正文与原生取消仍分别由 #8、#9 交付。
+## 开发与交付
 
-2026-11-24 #8 为 Run 摘要加入执行段展开。未展开时不读取消息正文；展开后通过 `run.open` 读取真实 `GET /api/tasks/{id}/messages`，按 Run 与序号持久去重并排序。后续使用连续序号的 `since` 增量补读，遇缺口不跳到最大已见序号；renderer 每两秒刷新已展开段，收起或卸载即停止。完整历史无最近条数上限，大结果通过带版本的 `run.read` 每次最多 8192 个 UTF-16 字符读取，原生摘要仍只含有界身份与状态。
-
-执行文本、思考、工具输入／输出和错误保持源序号顺序；只有 Run 内唯一且非空的同一 `call_id` 才显示可靠输入／结果关联。缺输入、输出或调用 ID、来源截断与来源完整性未知均单独显示，不补造缺失内容。最终 agent 评论仍由普通 Thread 评论通道导入。已读全文与首次固定的归属独立保存，重启、CLI 离线、退出或切换身份后可继续读取旧缓存；每次新远端明细读取先重新验证当前 CLI 身份必须匹配原连接。模拟 HTTP／WS 与编译 renderer 验证已通过；真实宿主展开与目标服务验收仍由母任务记录。
-
-2026-11-24 #9 接入 provider 原生 `session.interrupt`，在网络等待前持久固定本次 tab 归属的所有未结束 Run，并按精确 Issue／Run 取消接口逐项请求。其他 tab、终态历史和停止后新发现的 Run 不扩大进集合；跨 Thread Run 整体处理。实际返回 completed／failed／cancelled 按原样保存；HTTP 200 不自动记为取消，进程清理证据与任务状态分列。停止回执和缓存 Run 状态原子保存，旧活动快照不得重新打开已终结 Run 的原生活动周期。
-
-管理页独立列出所有连接的本地停止记录；部分失败使原生停止返回失败，并持续提供单 Run 重试，tab 随后关闭、CLI 离线和正常重启仍可看到。重试不恢复 workspace 或讨论，不改变人工隐藏。整 workspace 归档、规则退出、单纯 session.archive／unarchive／close、连接关闭和贡献清理均不发起远端取消；清理等待已接受的停止请求。`StopCoordinator.epoch`／`guardDelivery` 为 #10／#11 提供持久停止栅栏，旧待投递必须在发送或重试领取前检查同一讨论的 epoch。真实宿主及真实服务验证仍由母工单负责。
-
-真实 0.15.3 验收发现：Stop 固定集合终结时，若同 tab 后来又有新 Run，继续保留原聚合 turn 会触发宿主两秒后的强制取消，导致后来 Run 仍在远端运行而原生永久空闲。provider 现捕获操作开始时的 turn；停止成功后先完成仍匹配的原 turn，再以全新 UUID 展示剩余活动 Run，最后确认请求。若原 turn 已自然结束则不动后续 turn；部分失败保留失败及活动。公开贡献／provider／RPC 回归覆盖延迟取消中发现新 Run、固定集合不扩张、后续 observe／bootstrap 及终态、部分失败持续活动和原 turn 提前自然结束竞态。真实宿主重复验收由母工单独立执行，宿主版本约定不变。
-
-2026-11-24 #10 加入文本普通评论投递。原生输入先持久保存 clientMessageId、随机稳定 Idempotency-Key、不变正文、连接／Issue／讨论目标、时间、宿主原 delivery 选择及停止 epoch，再报告插件已接收。主讨论每次 POST 顶层评论；真实 Thread 的 parent_id 始终是根评论。管理页提供按当前目录真实 agent ID 生成的 canonical mention 引用，同名身份逐项列出，不按裸 @名字推断路由。普通发送始终只有 content/type/parent_id，不向 Multica 添加 steering 指令，也不创建 Issue。
-
-运行中在等待持久化前捕获当前唯一聚合 turn UUID，以该缓存 ID 回答宿主 steer admission；远端 POST 在 admission 后独立进行。接收、保存、失败、待核实使用稳定 comment-delivery 插件行，保存评论不生成虚构 Run。网络／回执丢失及 5xx 保留待核实，确定拒绝与发送前错误保留失败；没有自动重发。存储写入失败时运行中仍使用匹配的缓存 turn 防止宿主 failed fallback 意外取消，同时追加明确“未能持久接收、未发送远端评论”的原生错误；全局磁盘故障下不承诺任何一侧记录一定可持久化。此特殊路径不伪造保存回执。
-
-首次 POST 前通过 StopCoordinator.guardDelivery 原子领取原 epoch 的记录，中途 Stop 会阻止旧未发送输入。收到回执后以 commentId 映射同一讨论的 clientMessageId，协调原生乐观输入及远端 echo；新 Thread 是另一个会话，不借主讨论 client ID 跳过其根评论。HTTP 回执未定时先等待在途请求再投影；仍未知的同正文自身评论不能靠正文猜为本次回执，暂缓该候选原生 echo。完整输入留在本地，可分块读取。重启恢复通过 #14 原生 canonical 历史逐页检查 client ID、角色及全文，仅补缺失输入，不发送评论。管理页的继续 Thread 入口绑定回执根及对应 native agent，只在用户点击时导航。真实 Paseo 0.15.3 的生产 provider 回显／steer 竞态及目标服务验收由母工单单独记录，公共边界模拟通过不替代真实验收。
-
-
-真实 0.15.3 重启验收发现已保存回复从评论缓存和投递记录各 replay 一次。provider 现为两条投影路径共用每个原生会话的原文身份集合，按来源 commentId 与自身 clientMessageId 去重；`history:skip` 已存在及本轮补回的评论也共享该集合，不依赖新追加事件立即进入原生可读历史。公开重启回归覆盖 replay、延迟原生写入的 skip 恢复、缺失的已保存／失败／待核实输入、未知同正文回执，以及主讨论与新 Thread 独立身份。正常实时回执 echo、来源插件行、Stop 聚合 turn 与宿主版本约定保持原行为。真实宿主重复验收由母工单执行。
-
-2026-11-24 #14 补齐 daemon 恢复循环与缓存投影核对。客户端仍立即并每十秒调用 `sync.bootstrap`；第一次客户端连接验证所属 daemon 后即建立唯一后台定时器，首次 Multica 读取失败也继续重试，多个客户端与定时机会共享同一次进行中的核对。客户端退出不停止后台同步；daemon/plugin 重启后仍需至少一次客户端连接，不声称无人连接时自启。`sync.status` 为管理页和原生讨论提供同一同步阶段、工作区进度、上次完成时间和保留缓存提示；WebSocket 握手只触发分页快照核对，不代表缺口已补齐。
-
-#14 在远端鉴权前先核对已挂载会话的缓存投影。新贡献实例恢复 `history:skip` 时读取所属 agent 的完整原生时间线，依据真正的 user/assistant `messageId`（来源评论 ID）、角色和文本确认已有原始消息；相邻的“评论来源”插件行不能证明原文已保存。请求 canonical，兼容实际 0.15.3 返回的 projected 分页，检查 epoch、gap、游标与所有旧页后才发布缺失原文；已有更正、删除及来源行使用稳定插件 ID。确认状态只在本次会话内保存，不把原生读回当成可永久跳过后续重启核对的持久回执。失败、半页或来源文本冲突不做盲目 replay。
-
-打开主讨论的 `description.observe` 仅观察既有连接缓存，更新稳定描述行和当前 renderer，不生成 assistant 消息；离线分页全文仍可读，版本不符仍拒绝拼接。daemon 重启仅恢复摘要与已有缓存，不因 `historyLoaded` 将所有历史正文重读；只有本次进程内实际 `thread.open` 的讨论才继续补读正文，Run 明细仍仅由展开操作按连续序号补缺口。恢复不 refresh 活动 agent，不取消远端、不重算 Run owner、不改变人工隐藏、原始作者或来源时间。失权分类与投递重试仍由各自切片负责。
-
-
-2026-11-25 #11 增加回执优先的幂等恢复。后台在发现评论投影前先查询原 key；真实 GET 成功回执及 Idempotent-Replayed:true、原作者／目标／正文／已知评论 ID 才构成当前服务能力的正面证据，首个 keyed POST 或 404 都不足够。每轮重新检查同连接／工作区内已保存的 anchor，只有查无原回执、能力仍可核实、原始时间未满 7 天且原 Stop epoch 未变化时，才沿用不变输入做一次安全自动 POST；之后只再核实，不无限重发。255 字节 key 上限与不包含正文的服务指纹由插件额外约束。
-
-不支持、读取失败、过期、删除／目标冲突和仍无法确认的结果原子保存为待核实并停止自动恢复。管理页能只读核实；用户看到可能重复触发执行的提示并明确确认后，才能另建带 retryOf 的独立新请求，旧记录不被覆盖。相同重发决定在 RPC 响应丢失后仍保持新请求唯一。CLI 最后使用检查和撤销 signal 覆盖每次回执读取与 POST；重试仍使用原 Stop 栅栏，不改投新连接或工作区。公共入口与可控 HTTP 服务测试已覆盖恢复、边界和竞态；真实 daemon／真实服务能力验收仍由母任务独立执行。
-
-2026-11-25 #13 补齐 CLI 登录变化后的请求栅栏与管理页连接历史。相同服务和 `/api/me` 用户 ID 继续原映射，凭据原子轮换及同账号 profile 切换不会重复建立原生项目；新服务或用户从各自空规则开始。规则管理操作携带所展示的连接键，旧页面点击不能修改新账号规则。原始评论角色、Run 首次 owner、隐藏意愿、待核实输入和停止告警继续绑定原连接，切回旧身份续用原 ID。
-
-每次远端读取与分页在发出和读取响应后核对有效 CLI 服务／凭据对及当前 profile；解析上下文仅在 daemon 内保存撤销 signal。检测移除或变更后旧认证 socket 关闭，重连和发送 auth 前也重新读 CLI。停止请求逐项使用同一栅栏；已经发出的请求不能撤回，未知结果保留原告警。评论最终检查必须在 Stop 持久领取前完成，随后立即发送；#11 将在其投递恢复路径采用该共享接口。`connection.history` 只读缓存中的已验证服务／用户、曾用 profile 和历史对象数量，登出或重启后仍可读，早期无摘要映射不猜测身份。真实 daemon 与目标服务演示由母工单单独记录，公共测试通过不替代真实验收。
-
-2026-11-25 #15 增加对象失权后的只读历史。完整筛选快照缺少既有 Issue 时，按原连接和原工作区直接核对该 Issue；HTTP 403／404 还需应用层错误、既有成功对象路由或明确 Issue 错误，以及失败后新成功的同用户 `/api/me` 与原工作区读取，才可记为不可访问。HTML／不明路由错误不形成删除证据；列表、分页、网络、服务和连接级鉴权失败只报告同步异常，保留原映射。原 workspace 自动归档前仍保存此前活跃讨论，状态先落盘以阻止新写入；不取消远端 Run，不删除评论、原始身份、执行缓存、投递问题或停止告警。
-
-管理页“只读历史”跨连接列出缓存任务、不可访问原因、最后完整同步与最近核对时间；只读分页读取完整缓存描述、各讨论、Run 明细、原输入和停止记录，离线与重启均可用，不恢复原生 workspace 或 tab。失权讨论的历史读取明确标注只读；新投递、待投递 POST 领取、显式重发、取消重试和远端明细读取受同一状态限制。已接受输入与未知回执保持原身份；用户仍可只读核实原回执，不能因此自动重发。正在等待工作区读取的发送，在最终持久领取前再次检查对象状态；活动输入保留宿主原 turn，并给出准确的失权错误，不触发失败 fallback 的额外停止。
-
-访问恢复需直接对象成功与当前筛选重新匹配，才恢复原 workspace／讨论身份；只是恢复可读但尚未匹配时仍保持归档，人工隐藏不被撤销。公开贡献／provider／RPC 与编译管理页覆盖删除、403 失权、401、断网、503、核对中登录失效、发送竞态、缓存执行正文、未知输入、停止失败及隐藏后的恢复。真实宿主与可控测试 Issue 的完整演示由母任务验收，隔离 HTTP 测试不代替真实服务证据。manifest 继续仅设 `>=0.15.3`，没有最高版本。
-
-真实 0.17.4 的只读发送拒绝发生在宿主解除 agent 归档之后，因此成功的自动归档回执不再视为永久完成。同步继续核对规则停用、筛选退出与不可访问记录的原生状态；发现已归档 workspace 内有活跃讨论时，仅恢复原 workspace 再整 workspace 归档，保留最初的讨论恢复集合，不创建新身份、不取消远端。新宿主的 workspace 恢复还可能按时间戳恢复人工隐藏记录，因此自动重返时先关闭这些讨论的 provider 资源并暂时拒绝重开，等待已接受的 Stop 结果完成、原生快照确认无活动后再归档隐藏记录，最后恢复原可见集合。完整理由见 ADR 0002；实际宿主与完整插件流程由母任务继续独立验收。
-
-2026-11-25 #16 增加 `npm run build`：输出 `dist/paseo-multica-provider-0.1.0/`、`.tar.gz` 与 SHA-256 校验文件，带 manifest、锁文件、两端源码、文档及开发检查配置，不打包依赖、Git 或运行状态。Paseo 本地目录安装不执行 manifest build，README 因此先运行 `npm ci --omit=dev --ignore-scripts` 并要求保留安装目录；托管 Git 安装才执行 build。类型检查和 Vitest 明确排除 dist，避免生成产物后重复检查／运行测试。使用独立真实 npm-ci 依赖及解压后的全新生产依赖目录验证，未改用户原 node_modules 符号链接。
-
-实际云端仅在用户授权 HENR-2 完成默认 CLI、空规则、project-only 导入、普通评论新 Thread 无 Run、typed mention 回复产生唯一 Run、权威 GET＋同 key 原样 POST 去重与原生 Stop。服务端最终 cancelled、原生 idle，进程清理证据 UNKNOWN。真实自部署、CLI Token／命名 profile 的真实轮换、原生 queue／视觉、丰富真实输出及真实权限撤销仍未验证；不能用 loopback、静态契约或 SDK 测试替代这些结果。独立 0.17.4 daemon 的响应丢失、Stop 栅栏、身份切换和重启证据保持单列。完整可复验说明与证据索引见交付验收记录。
-
-2026-11-25 最终评审修复保留任务快照的错误、失败原因及远端执行路径，完整可选元数据独立于消息缓存；`run.open` 返回 `metadataRevision`，新增有界版本化 `run.metadata.read`，原 `run.read` 继续为消息 JSON 数组。执行段与只读历史原样显示来源字段，REMOTE 路径不作为本地 cwd 或链接；空／不可用消息不再遮蔽任务失败。省略、null、空字符串、长值、版本变化和离线重启有公开边界回归。原生讨论身份查找共用带 provider／完整标签／Paseo 工作区 ID 校验与循环游标检查的适配器；客户端分块正文读取共用前进检查与取消处理，调用者继续决定版本及 JSON 解析。管理界面与 README 区分 Multica 工作区和 Paseo 工作区。
-
-同轮实际 0.17.4 自动重新归档修复在 `3f5b940` 通过精确时间戳、全部可见讨论重开后的回退及活动隐藏缓存投影测试，保留原恢复集合且 0 远端 cancel。后续手动恢复用例确认同一回退会意外重开其他隐藏讨论，本轮将已有保护共用于手动与自动恢复，仅明确选定的讨论解除隐藏；公开 hook／RPC 测试覆盖两类手动恢复和已接受 Stop 的等待。实际手动入口复验由集成任务继续记录。保护结束后的单独显式原生历史查询可能再开 provider，不声称任意查询后始终无本地活动；管理页只读缓存读取无需重开原生讨论。细节见 ADR 0002／0003 及最新验收记录。
-
-最终代码 `7474cbad` 通过类型检查、149 项测试、构建及两路评审定向复核，原 Standards 1 项术语违规／2 项重复与 Spec 3 项 P2 均已解决。实际 0.17.4 最终组合复测精确读取 43,549 字符元数据及离线缓存，保留原消息数组接口；仅恢复 Paseo 工作区和恢复选定讨论均保留其他隐藏，活动隐藏投影关闭／重新归档而远端 Run 不变，全程 0 POST。完整结果、证据和仍未验证的范围见交付验收记录；本段取代前文手动入口“继续验收”的过程状态。
-
-2026-11-25 配置页布局整理：设置页只保留 Multica 连接与筛选规则，侧栏管理页另含需要处理的投递和停止记录，并在其后列出恢复与历史；没有记录的区块不显示。区块说明改用宿主 `SettingsSection` 的 `info` 提示，刷新放在标题栏，卡片内自由文本统一加内边距。刷新与规则修改不再清空已显示的连接和规则（换主机或 profile 仍清空），打开的筛选编辑器不会因开关工作区而丢失修改。状态筛选改为类别与具体状态二选一，长目录折叠，时间显示为本地时间。管理页测试改用按组件位置保存 state 与 effect 的渲染器，条件挂载的子组件不会错位后续组件的 state。
-
-2026-11-25 补修管理页滚动：宿主给插件页面的容器只有 `flex: 1`，不滚动也不留白，管理页超过窗口高度后下半部分无法到达。管理页改由插件自己的宿主 `ScrollView` 提供滚动，并按插件指南以 `layout.compact ? 16 : 24` 留白；设置页是宿主设置视图的一页，仍由宿主滚动。标题栏的刷新标签加 4px 右边距，与标题左侧的内缩对称。工作区列表读回前显示“正在读取 Multica 工作区…”，不再先报没有可用工作区。在已安装的 0.17.4 桌面宿主上，用独立配置目录的无头客户端查看主 daemon 的真实数据，以滚轮事件确认可滚到底，并核对了设置页、从设置页进入管理页、筛选编辑器、缓存历史弹窗、任务下拉、深色主题和 760px 宽度；运行验证仅覆盖 0.17.4。
-
-2026-11-25 输入框提及选择器：Paseo 的 `@` 候选由宿主固定为工作区文件引用，`useAgentAutocomplete` 的 file 分支只读 `getDirectorySuggestions`，0.17.4 的 `PluginClientContext` 没有 mention source，插件无法替换；原生 `@` 选择 agent 只能修改 Paseo 核心。实现改用 Paseo 0.16 起的 composer item：新增 `client/mention-picker.tsx`，在讨论输入框注册「提及 Agent」`Combobox`，调用既有 `delivery.mentions` 读取当前任务的 agent，选中后 `insertText` 带 ID 的 canonical 引用并 `focus`；发送仍走原投递路径，由 Multica 决定是否启动 Run。composer item、`useComposer`、`Combobox` 与 agent `setMetadata` 同属 Paseo 0.16 首个插件 API（`28c18851`），选择器只在 `addComposerItem` 存在时注册；开发 SDK 仍固定 0.15.4，manifest 只声明 `>=0.15.3`，0.15 宿主不显示选择器，管理页据能力提示选择器或复制引用。`shared/discussion.ts` 统一 `multica.connection`/`issue`/`discussion` 标签键，既有标签产生处沿用同一常量。
-
-宿主 composer 只暴露 agent metadata，不暴露 agent ID 或 labels。daemon 新增 `DiscussionMetadata`：每次 `sync.bootstrap` 后台把各 tab 的 `multica.connection` 与 `multica.issue` 标签镜像进 agent metadata，按连接分页读取宿主能返回的目录（含归档 agent；归档 workspace 的 agent 会被目录省略，恢复后下一次 bootstrap 补齐），只补缺失或与标签不一致的副本；失败不阻塞、不使 bootstrap 失败，下一次 bootstrap 重试；0.15 宿主没有 `setMetadata` 时本进程停止尝试。选择器只在该 metadata 存在时出现，评论保存与 Run 启动仍分别报告。完整取舍见 [ADR 0009](docs/adr/0009-composer-mention-picker.md)。
-
-验证：类型检查与 172 项测试通过；用 npm 发布的真实 0.17.4 SDK 声明（61 个 `.d.ts`）检查新客户端与服务端代码零错误；用未修改的实际 0.17.4 宿主编译器源码编译两端 bundle，并分别以真实 0.17.4、0.15.3 共享 SDK 加载（宿主 UI 模块以替身提供）：0.17.4 注册 `multica-mention`，0.15.3 正常加载且不注册，两者均注册既有 8 项贡献，服务端 provider／settings 正常。
-
-2026-11-25 已在用户主 daemon（`srv_k4Tm0x9H1FtO`，0.17.4，listener `127.0.0.1:6767`）完成真实安装与验收：只 reload `multica`，编译约 5 秒，daemon PID `4116328` 不变；真实 daemon 提供 97,666 字节 client bundle（hash `67cb5fbd314a61f98657865dc5f904a7552fdef22851d85b1fdcdeef259705cf`，含 `multica-mention`）。启用现有 henrylee 规则后，HENR-1 主讨论、HENR-2 主讨论与已有 Thread 三个 agent 的 metadata 与 labels 一致；`delivery.mentions` 返回真实 agent 拉车的🫏（`5505d430-fd5c-416a-9455-2af92d34b67d`）。SDK 与 UI 各发送一条真实评论（`01a2114f-7f2b-776b-b5cc-c27e4c9153fe`、`01a21152-da7b-7cc4-afb7-9349a0a27879`），均触发该 agent 的 Run（`01a2114f-7f59-73ea-b55a-f8732a1cb38d`、`01a21152-da8b-74cb-a604-717a146eafdc`），原生 Stop 后服务端 cancelled、原生 idle（1401ms、667ms）。UI 使用独立 Electron user-data 的第二客户端连同一主 daemon，通过 CDP 打开已有 Thread、点击「提及 Agent」、搜索选择并发送；截图与状态见验收记录。隔离客户端已关闭，主 daemon／主窗口未重启；验收后规则保持启用、讨论保持活跃。剩余边界：Run cleanup UNKNOWN（未证明物理退出）、移动布局／原生溢出面板未验证、自部署服务未验证。
-
-2026-11-25 Multica 工作区与筛选规则界面分两阶段整理：设置页与管理页共用启用优先的 Multica 工作区列表，筛选改为带固定底栏的弹窗、可搜索多选与负责人分组；目录按连接缓存，轮询和规则保存复用。状态以整类与具体状态共同编辑，整类保存类别，存在部分选择时将整类展开后一并保存具体状态，旧混合规则按交集载入。启用先保存规则再启用，停用与筛选移出均需确认。新增只读 `workspace.preview`，复用同步的完整分页读取，不进入同步队列、不记录身份验证时间、不写状态或操作原生对象；客户端防抖并忽略过期响应。`workspace.list` 的 `importedCount` 与预览统一以该 Multica 工作区没有 `archiveReason` 的映射计数，未新增持久化字段。
-
-## Issue #20：askuser（#21–#26）
-
-2026-11-25 集成基线 `7d45a7b027c80ecd4b60addd662eb82258d737ae` 已合入 #21–#25：自部署 `askuser.json` version `"1"` 的安全附件下载与持久缓存、完整 timeline 终态校验、稳定时间线及离线只读卡片、原生问题映射、精确中文回答与子回复目标、7 天投递核实、本地收起／重展、两步跳过、受保护的后台主动加载，以及 Stop／访问／归档／CLI 身份变化下的权限对齐。首次无关联 Run 仍属于本地主讨论；它生成的根卡片在新 Thread，不迁移 Run 展示归属。完整模拟结果与后续步骤见 [askuser 验收记录](docs/askuser-acceptance.md)，主动加载／限流／回放契约见 [askuser-wakeup](docs/askuser-wakeup.md)。
-
-用户明确要求“就Mock测试即可，之后的真实测试我手动执行。”因此本轮只完成 #26 的自动化、构建与手动清单，没有安装或 reload、没有真实 daemon／Multica 请求和原生界面操作，#26 的真实验收保持未完成。前文 #1、提及选择器等实机结果是历史记录，不能用于宣称新 askuser 功能已在用户主 daemon 部署或验收。manifest 仍为 `>=0.15.3`、无最高版本，不修改 Paseo 核心；后续由用户更新已安装源目录，在当前 `0.17.4` daemon 与受控自部署 Issue 上手动验证。
-
-原生权限 ID 精确使用 `multica:askuser:<cardCommentId>:<attachmentId>`；通过 provider session 与连接／Issue 地址隔离，账号切换不能借用相同远端 ID。回答的 `parent_id` 与 `askuser_answer_to` 指向卡片评论本身，讨论根保留为 Run 与 Stop 归属。Stop epoch 必须在等待身份或工作区核实前捕获；最终写入及显式重发继续检查隐藏、归档、hold、访问与原身份。投递保存／失败终态不得被较早恢复快照覆盖。
-
-代码审查五项发现已整改：仅全选填文本原表单追加一题含非空选项的「提交确认」，使固定宿主 Dismiss 即使已填写／选中确认也明确走 deny；缺少已知确认的模糊 allow 或原题全空仍只本地收起，真实 Submit 仅生成原题的精确远端正文。dismissLabel 移到每道原题及确认题。条件必填共用一个基于规范化答案的判断，卡片投影／主动加载／写入共用 Issue 可用性策略。条件失败仍保留权限，原生内联为通用错误，细节由题目／时间线提示。当前进程首次发现标记不持久化：打开期间的新权限延迟到 listCommands 完成原生注册后公布，auto-import 已打开也保留确认，ready 后其他更新不能提前释放；已加载会话新卡片直接 live，旧缓存在 ready 前静默回放。首次发现标记只在权限实际发出后清除。OS 通知标题固定，正文携带可读卡片标题／说明；真实注意力和系统通知均未执行，仍由用户手动验收。
-
-真实 skip HTTP 状态／正文、已跳过 timeline 的 `askuser_skipped_at`／`askuser_skipped_by` 与专用 WebSocket 事件仍未采样。模拟覆盖成功空响应、正文无关处理、202 未确认、失败及 Stop 竞态；没有远端元数据时不补造时间或操作者，失败不自动重发。真实差异必须在 #26 手动采样后修正实现与回归。最终类型检查、330 项测试／12 文件、构建、97 文件归档的校验和／清单／源码一致性及独立解压后的离线生产依赖安装通过。首次检查暴露既有凭据恢复测试的准备时序竞态，已通过公开同步入口等待 anchor 完成并断言凭据变化 hook 确实触发；该测试准备修正的全量及 3 次定向复验通过，未改投递生产代码、未新增测试边界。详细结果见上述验收文档。
+每个 OPT 单独提交，提交前 npm run check，阶段结束 npm run build。构建输出源码插件目录、压缩包及校验文件；不打包依赖、Git 或运行状态，dist 不参加检查。历史验收数字仅属于其记录版本，不替代当前检查结果。

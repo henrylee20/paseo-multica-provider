@@ -1,5 +1,6 @@
 import { defineRpc, defineSettings } from "@getpaseo/plugin";
 import { z } from "zod";
+import { hiddenObjectsSchema } from "./hiding.js";
 
 export const multicaSettings = defineSettings({
   id: "multica", scope: "host", version: 1,
@@ -19,18 +20,6 @@ export const connectionStatusSchema = z.object({
   loginCommand: z.string(),
 });
 export type ConnectionStatus = z.output<typeof connectionStatusSchema>;
-export const connectionStatus = defineRpc({ name: "connection.status", input: z.object({}), output: connectionStatusSchema });
-
-export const connectionIdentitySchema = z.object({
-  apiUrl: z.string(), appUrl: z.string().optional(), user: z.object({ id: z.string(), name: z.string(), email: z.string() }),
-  profiles: z.array(z.string()), lastVerifiedAt: z.string(),
-});
-export const connectionHistory = defineRpc({ name: "connection.history", input: z.object({}), output: z.object({
-  connections: z.array(connectionIdentitySchema.partial().extend({
-    connectionKey: z.string(), profiles: z.array(z.string()), projectCount: z.number().int().nonnegative(), issueCount: z.number().int().nonnegative(),
-    hiddenCount: z.number().int().nonnegative(), pendingDeliveryCount: z.number().int().nonnegative(), stopWarningCount: z.number().int().nonnegative(),
-  })),
-}) });
 
 export const syncBootstrap = defineRpc({ name: "sync.bootstrap", input: z.object({}), output: z.object({
   status: z.enum(["ready", "unavailable"]), message: z.string().optional(),
@@ -67,4 +56,5 @@ export const syncStatusSchema = z.object({
   message: z.string().optional(),
 });
 export type SyncStatus = z.output<typeof syncStatusSchema>;
-export const syncStatus = defineRpc({ name: "sync.status", input: z.object({}), output: syncStatusSchema });
+
+export const connectionStatus = defineRpc({ name: "connection.status", input: z.object({}), output: connectionStatusSchema.extend({ sync: syncStatusSchema, hidden: hiddenObjectsSchema }) });

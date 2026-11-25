@@ -9,13 +9,12 @@ import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { ProviderConnection, ProviderTimelineItem, ProviderEvent } from "@getpaseo/plugin/server/provider";
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
-import { workspaceEnable, syncBootstrap, connectionStatus } from "../shared/contracts.js";
-import { issueHistoryList, issueHistoryRead, cachedIssueSnapshot } from "../shared/access.js";
-import { deliveryList, deliveryVerify, deliveryResend } from "../shared/delivery.js";
+import { workspaceEnable, connectionStatus } from "../shared/contracts.js";
+import { askuserRead, askuserObserve } from "../shared/askuser.js";
 import { hiddenRestore } from "../shared/hiding.js";
 import { threadOpen } from "../shared/threads.js";
 import { createServerContribution } from "../server/contribute.js";
-import { FakeServer } from "./support/fake-server.js";
+import { FakeServer, resync } from "./support/fake-server.js";
 
 const cleanup: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const dispose of cleanup.splice(0).reverse()) await dispose(); });
@@ -37,7 +36,7 @@ async function fixture() {
   let clock = new Date(stamp);
   const documents = new Map<string, unknown>();
   const requests: Array<{ path: string; slug?: string; authorization?: string }> = [];
-  const remote = { visible: true, status: 200, contentType: "application/json", redirect: false, chunked: false, issueStatus: 200, meStatus: 200, userId: "me", objectChecksUntilDeny: -1, postStatus: 200, loseResponse: false, skipStatus: 204, loseSkipResponse: false, beforeTimeline: undefined as (() => Promise<void>) | undefined, beforeWorkspaces: undefined as (() => Promise<void>) | undefined, beforeMe: undefined as (() => Promise<void>) | undefined, beforeSkip: undefined as (() => Promise<void>) | undefined, beforeIssueCheck: undefined as (() => Promise<void>) | undefined, beforePost: undefined as (() => Promise<void>) | undefined, beforeDownload: undefined as (() => Promise<void>) | undefined };
+  const remote = { receiptMismatch: "", visible: true, status: 200, contentType: "application/json", redirect: false, chunked: false, issueStatus: 200, meStatus: 200, userId: "me", objectChecksUntilDeny: -1, postStatus: 200, loseResponse: false, skipStatus: 204, loseSkipResponse: false, beforeTimeline: undefined as (() => Promise<void>) | undefined, beforeWorkspaces: undefined as (() => Promise<void>) | undefined, beforeMe: undefined as (() => Promise<void>) | undefined, beforeSkip: undefined as (() => Promise<void>) | undefined, beforeIssueCheck: undefined as (() => Promise<void>) | undefined, beforePost: undefined as (() => Promise<void>) | undefined, beforeDownload: undefined as (() => Promise<void>) | undefined };
   const http = createServer(async (request, response) => {
     requests.push({ path: request.url!, slug: request.headers["x-workspace-slug"] as string, authorization: request.headers.authorization });
     const url = new URL(request.url!, "http://localhost");
@@ -54,7 +53,7 @@ async function fixture() {
       await remote.beforePost?.(); response.statusCode = remote.postStatus;
       if (remote.postStatus === 200) {
         const saved = { ...comment(`saved-${posts.length}`, input.parent_id ?? null), content: input.content, askuser_answer_to: input.askuser_answer_to };
-        receipts.set(key, saved); comments.push(saved); body = saved;
+        receipts.set(key, saved); comments.push(saved); body = remote.receiptMismatch ? { ...saved, [remote.receiptMismatch]: "another-card" } : saved;
         if (remote.loseResponse) { response.destroy(); return; }
       } else body = {};
     }
@@ -90,6 +89,11 @@ async function fixture() {
   const configPath = join(home, ".multica/config.json");
   await mkdir(join(home, ".multica"));
   await writeFile(configPath, JSON.stringify({ server_url: `http://127.0.0.1:${(http.address() as { port: number }).port}`, token: "synthetic" }));
+  let credentialVersion = 0;
+  const refreshLogin = async () => {
+    const config = JSON.parse(await readFile(configPath, "utf8"));
+    await writeFile(configPath, JSON.stringify({ ...config, token: `synthetic-${++credentialVersion}` }));
+  };
   const agents: Array<{ id: string; workspaceId: string; cwd: string; labels: Record<string, string>; handle: string }> = [];
   const workspaces: Array<{ id: string }> = [];
   const rows = new Map<string, ProviderTimelineItem[]>();
@@ -140,8 +144,8 @@ async function fixture() {
   await server!.rpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, paseo);
   const address = () => ({ connectionKey: agents[1].labels["multica.connection"], issueId: "issue", rootId: "root" });
   const cards = () => (rows.get(agents[1].id) ?? []).filter(row => row.type === "plugin" && row.kind === "askuser") as Array<Extract<ProviderTimelineItem, { type: "plugin" }> & { data: Record<string, any> }>;
-  return { ...started, start, connect, events, posts, skips, receipts, setClock: (value: Date) => { clock = value; }, comments, timeline, runs, documents, requests, remote, rows, agents, cards, address, open, home, configPath, paseo,
-    disconnect: async () => { await provider?.close(); provider = undefined; }, signal: (type: string) => { for (const socket of websocket.clients) socket.send(JSON.stringify({ type })); }, eventsReady: () => expect.poll(() => websocket.clients.size).toBeGreaterThan(0), sync: () => server.rpc(syncBootstrap, {}, paseo) };
+  return { ...started, start, connect, events, posts, skips, receipts, setClock: (value: Date) => { clock = value; }, comments, timeline, runs, documents, requests, remote, rows, agents, cards, address, open, home, configPath, paseo, refreshLogin,
+    disconnect: async () => { await provider?.close(); provider = undefined; }, signal: (type: string) => { for (const socket of websocket.clients) socket.send(JSON.stringify({ type })); }, eventsReady: () => expect.poll(() => websocket.clients.size).toBeGreaterThan(0), sync: () => resync(server, paseo, "workspace") };
 }
 
 it("discovers root and descendant cards on their owning Thread and downloads each attachment only once across restart", async () => {
@@ -157,7 +161,7 @@ it("discovers root and descendant cards on their owning Thread and downloads eac
     ["/api/attachments/root-file/download", "product", "Bearer synthetic"], ["/api/attachments/child-file/download", "product", "Bearer synthetic"],
   ]);
   await f.dispose(); await f.disconnect(); const restarted = f.start(); await f.open("skip");
-  await restarted.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(restarted.server, f.paseo, "workspace");
   expect(f.cards().map(row => row.id)).toEqual(ids);
   expect(f.requests.filter(r => r.path.startsWith("/api/attachments/"))).toHaveLength(2);
 });
@@ -318,17 +322,17 @@ it("keeps attachment discovery once-only when background sync and Thread opening
   expect(f.requests.filter(r => r.path.startsWith("/api/attachments/"))).toHaveLength(1);
 });
 
-it("preserves complete read-only card history after its source comment is removed and the daemon restarts", async () => {
+it("preserves complete cached cards after its source comment is removed and the daemon restarts", async () => {
   const f = await fixture(); f.comments[0].attachments = [attachment("cached")]; f.documents.set("cached", card); await f.sync();
   f.comments.length = 0; await f.sync();
   expect(f.cards()[0]?.data).toMatchObject({ readOnly: true, readOnlyReason: expect.stringContaining("删除") });
   await f.dispose(); await f.disconnect(); const restarted = f.start();
   await writeFile(f.configPath, "{}");
-  const summary = (await restarted.server.rpc(issueHistoryList, {}, f.paseo)).issues[0];
+  const target = { ...f.address(), commentId: "root", attachmentId: "cached" };
+  const summary = await restarted.server.rpc(observeCard, target, f.paseo);
   let text = ""; let offset: number | null = 0;
-  while (offset !== null) { const result: { text: string; nextOffset: number | null } = await restarted.server.rpc(issueHistoryRead, { ...f.address(), revision: summary.revision, offset }, f.paseo); text += result.text; offset = result.nextOffset; }
-  const snapshot = cachedIssueSnapshot.parse(JSON.parse(text));
-  expect(snapshot).toMatchObject({ askuserCards: [{ title: card.title, description: card.description, questions: card.questions, readOnly: true, offline: true }] });
+  while (offset !== null) { const page: { text: string; nextOffset: number | null } = await restarted.server.rpc(askuserRead, { ...target, revision: summary.revision, offset }, f.paseo); text += page.text; offset = page.nextOffset; }
+  expect(JSON.parse(text)).toMatchObject({ title: card.title, description: card.description, questions: card.questions, readOnly: true, offline: true });
 });
 
 it("enforces the attachment byte limit while streaming a chunked response", async () => {
@@ -337,7 +341,7 @@ it("enforces the attachment byte limit while streaming a chunked response", asyn
 });
 
 it("rechecks Issue access immediately before attachment downloading", async () => {
-  const f = await fixture(); f.comments[0].attachments = [attachment("denied")]; f.documents.set("denied", card); f.remote.objectChecksUntilDeny = 1; await f.sync();
+  const f = await fixture(); f.comments[0].attachments = [attachment("denied")]; f.documents.set("denied", card); f.remote.objectChecksUntilDeny = 0; await f.sync();
   expect(f.cards()[0]?.data).toMatchObject({ status: "invalid", error: expect.stringContaining("HTTP 403") });
   expect(f.requests.some(request => request.path.startsWith("/api/attachments/"))).toBe(false);
 });
@@ -363,7 +367,7 @@ it("places a generated root card in its new Thread while its unanchored Run stay
 
 it("keeps a prior connection's cached card read-only after the CLI resolves another account", async () => {
   const f = await fixture(); f.comments[0].attachments = [attachment("account")]; f.documents.set("account", { ...card, answer_user_id: "me" }); await f.sync();
-  f.remote.userId = "other";
+  f.remote.userId = "other"; await f.refreshLogin();
   const data = await f.server.rpc(observeCard, { ...f.address(), commentId: "root", attachmentId: "account" }, f.paseo);
   expect(data).toMatchObject({ title: card.title, readOnly: true, offline: true });
   await f.sync();
@@ -429,15 +433,15 @@ it("restores pending native permissions between opened and ready while new cards
   expect(opening.map(event => event.type).indexOf("session.permission")).toBeGreaterThan(opening.map(event => event.type).indexOf("session.opened"));
   expect(opening.map(event => event.type).indexOf("session.permission")).toBeLessThan(opening.map(event => event.type).indexOf("session.ready"));
   f.comments.push(comment("child", "root", [attachment("live")])); f.documents.set("live", card);
-  await restarted.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(restarted.server, f.paseo, "workspace");
   const live = f.events.map(event => event.type === "session.permission" && event.request.id === "multica:askuser:child:live").lastIndexOf(true);
   expect(live).toBeGreaterThan(f.events.map(event => event.type).lastIndexOf("session.ready"));
   f.timeline.push({ id: "answer", type: "comment", parent_id: "root", content: "**确认结果**\n\n1. **理由**：网页回答", actor_type: "member", actor_id: "me" },
     { id: "child", type: "comment", askuser_skipped_at: stamp });
-  await restarted.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(restarted.server, f.paseo, "workspace");
   expect(f.events.filter(event => event.type === "session.permission_resolved").map(event => event.permissionId)).toEqual(["multica:askuser:root:replayed", "multica:askuser:child:live"]);
   f.comments.push(comment("removed", "root", [attachment("deleted")])); f.documents.set("deleted", card);
-  await restarted.server.rpc(syncBootstrap, {}, f.paseo); f.comments.pop(); await restarted.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(restarted.server, f.paseo, "workspace"); f.comments.pop(); await resync(restarted.server, f.paseo, "workspace");
   expect(f.events).toContainEqual({ type: "session.permission_resolved", sessionId: native, permissionId: "multica:askuser:removed:deleted" });
 });
 
@@ -594,11 +598,11 @@ it.each([403, 503, "network"])("reports %s skip failure without claiming a termi
   expect(f.skips).toHaveLength(1); expect(f.posts).toHaveLength(0);
 });
 
-it.each(["designated user", "different account", "logged out", "inaccessible", "hidden", "unconfirmed"])("rejects reopen and skip for %s before any remote POST", async reason => {
+it.each(["designated user", "different account", "logged out", "remote forbidden", "hidden", "unconfirmed"])("rejects reopen and skip for %s before any remote POST", async reason => {
   const f = await fixture(); f.comments[0].attachments = [attachment("action-auth")]; f.documents.set("action-auth", { ...card, ...(reason === "designated user" ? { answer_user_id: "other" } : {}) }); await f.sync();
-  if (reason === "different account") f.remote.userId = "other";
+  if (reason === "different account") { f.remote.userId = "other"; await f.refreshLogin(); }
   if (reason === "logged out") await writeFile(f.configPath, "{}");
-  if (reason === "inaccessible") f.remote.issueStatus = 403;
+  if (reason === "remote forbidden") f.remote.issueStatus = 403;
   if (reason === "hidden") await f.server.hook("agent.archive.after", { agent: { ...f.agents[1], provider: "multica" } } as never, f.paseo);
   const target = { ...f.address(), commentId: "root", attachmentId: "action-auth", confirmed: reason !== "unconfirmed" };
   await expect(f.server.rpc(skipCard, target, f.paseo)).rejects.toThrow();
@@ -606,19 +610,6 @@ it.each(["designated user", "different account", "logged out", "inaccessible", "
   expect(f.skips).toEqual([]); expect(f.posts).toEqual([]);
 });
 
-it("honors the original Stop fence when a skip preflight is waiting on remote access verification", async () => {
-  const f = await fixture(); f.comments[0].attachments = [attachment("stopped-skip")]; f.documents.set("stopped-skip", card); await f.sync();
-  let entered!: () => void; let release!: () => void;
-  const arrived = new Promise<void>(resolve => { entered = resolve; }); const blocked = new Promise<void>(resolve => { release = resolve; });
-  f.remote.beforeIssueCheck = async () => { entered(); await blocked; };
-  const action = f.server.rpc(skipCard, { ...f.address(), commentId: "root", attachmentId: "stopped-skip", confirmed: true }, f.paseo);
-  const settled = action.then(value => ({ value }), error => ({ error }));
-  await arrived;
-  await (await f.connect()).send({ type: "session.interrupt", requestId: "stop-skip", sessionId: f.agents[1].id });
-  release();
-  expect(await settled).toMatchObject({ error: expect.objectContaining({ message: "Delivery was stopped" }) });
-  expect(f.skips).toEqual([]); expect(f.posts).toEqual([]);
-});
 
 it.each([200, 202, 204])("reads skip timestamp and operator only from confirmed timeline metadata after HTTP %s", async status => {
   const f = await fixture(); f.comments[0].attachments = [attachment("skip-metadata")]; f.documents.set("skip-metadata", card); await f.sync();
@@ -645,7 +636,7 @@ it("submits a child card once in canonical Chinese format, keeping its Thread ro
   await Promise.all([answer(f, ["灰度", "", "", "Z, A, B,  自定义, 含逗号  ", "第一行\n\n第三行"]), answer(f, ["灰度", "", "", "Z, A, B,  自定义, 含逗号  ", "第一行\n\n第三行"])]);
   expect(f.posts).toHaveLength(1);
   expect(f.posts[0].body).toEqual({ content: "**确认结果**\n\n1. **发布范围**：灰度\n2. **说明**：\n3. **备注**：\n4. **检查**：A, B、Z、自定义, 含逗号\n5. **多行**：第一行\n>\n> 第三行", type: "comment", parent_id: "child", askuser_answer_to: "child" });
-  expect((await f.server.rpc(deliveryList, {}, f.paseo)).records[0]).toMatchObject({ rootId: "root", parentCommentId: "child", askuserAnswerTo: "child", status: "saved" });
+  expect(f.cards()[0].data).toMatchObject({ rootId: "root", delivery: { status: "saved" } });
   expect(f.events).toContainEqual({ type: "session.permission_resolved", sessionId: f.agents[1].id, permissionId: "multica:askuser:child:submit" });
   expect(f.cards()[0].data).toMatchObject({ status: "answered", answer: { content: f.posts[0].body.content } });
   await f.server.rpc(threadOpen, f.address(), f.paseo); await f.sync();
@@ -670,47 +661,22 @@ it("keeps native answers on conditional validation and deterministic rejection, 
   expect(f.events.filter(event => event.type === "session.permission_resolved")).toHaveLength(1);
 });
 
-it.each(["lost response", "server error"])("resolves native forms after %s and exposes durable verification status without repeated submits or restart replay", async failure => {
+it.each(["lost response", "server error"])("waits for bounded answer retries after %s and leaves failure available for a new answer", async failure => {
   const f = await fixture(); f.comments.push(comment("child", "root", [attachment("uncertain")])); f.documents.set("uncertain", card); await f.sync();
   f.remote.loseResponse = failure === "lost response"; f.remote.postStatus = failure === "server error" ? 503 : 200;
-  await answer(f, ["已确认"]);
-  expect(f.posts).toHaveLength(1);
-  const record = (await f.server.rpc(deliveryList, {}, f.paseo)).records[0];
-  expect(record).toMatchObject({ rootId: "root", parentCommentId: "child", askuserAnswerTo: "child", status: "pending_verification" });
-  expect(f.events).toContainEqual({ type: "session.permission_resolved", sessionId: f.agents[1].id, permissionId: "multica:askuser:child:uncertain" });
-  expect(f.cards()[0].data).toMatchObject({ status: "pending", readOnly: true, delivery: { status: "pending_verification", clientMessageId: record.clientMessageId, message: expect.stringContaining("核实") } });
-  await expect(answer(f, ["重复点击"])).rejects.toThrow(); expect(f.posts).toHaveLength(1);
-  await f.dispose(); await f.disconnect(); f.events.length = 0; const restarted = f.start(); await f.open("skip");
-  expect(f.events.some(event => event.type === "session.permission")).toBe(false);
-  if (failure === "lost response") {
-    // Older receipts may omit askuser_answer_to; an omitted field does not disprove the saved answer.
-    delete f.receipts.get(record.idempotencyKey)!.askuser_answer_to;
-    expect(await restarted.server.rpc(deliveryVerify, record, f.paseo)).toMatchObject({ status: "saved" });
-    expect(f.requests.some(request => request.path.includes("/comments/idempotent?type=comment&parent_id=child&askuser_answer_to=child"))).toBe(true);
-    expect(f.posts).toHaveLength(1);
-  }
-});
-
-it("retains child targets through seven-day receipt verification and explicit resend, rejecting conflicting echoed answer targets", async () => {
-  const f = await fixture(); f.comments.push(comment("child", "root", [attachment("resend")])); f.documents.set("resend", card); await f.sync();
-  f.remote.postStatus = 503; await answer(f, ["保留原回答"]);
-  const original = (await f.server.rpc(deliveryList, {}, f.paseo)).records[0];
-  f.setClock(new Date("2026-12-01T10:00:00Z"));
-  expect(await f.server.rpc(deliveryVerify, original, f.paseo)).toMatchObject({ status: "pending_verification", message: expect.stringContaining("7 天") });
-  await f.sync(); expect(f.posts).toHaveLength(1);
-  f.remote.postStatus = 200;
-  const decision = { ...original, requestId: "explicit-resend", acknowledgeDuplicateRisk: true as const };
-  const resent = await f.server.rpc(deliveryResend, decision, f.paseo);
-  expect(await f.server.rpc(deliveryResend, decision, f.paseo)).toEqual(resent);
-  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records.find(record => record.clientMessageId === resent.clientMessageId)?.status).toBe("saved");
-  expect(f.posts).toHaveLength(2); expect(f.posts[1].body).toEqual(f.posts[0].body); expect(f.posts[1].key).not.toBe(original.idempotencyKey);
-  const record = (await f.server.rpc(deliveryList, {}, f.paseo)).records[1];
-  expect(record).toMatchObject({ rootId: "root", parentCommentId: "child", askuserAnswerTo: "child", retryOf: original.idempotencyKey });
-  // A present but incorrect marker is evidence of a conflicting receipt, unlike an omitted marker.
-  f.receipts.set(original.idempotencyKey, { ...f.receipts.get(record.idempotencyKey)!, askuser_answer_to: "another-card" });
-  expect(await f.server.rpc(deliveryVerify, original, f.paseo)).toMatchObject({ status: "pending_verification" });
-  expect(f.posts).toHaveLength(2);
-  expect(f.requests.filter(request => request.path.includes("comments/idempotent")).every(request => request.path.includes("parent_id=child") && request.path.includes("askuser_answer_to=child"))).toBe(true);
+  await expect(answer(f, ["已确认"])).rejects.toThrow();
+  expect(f.posts).toHaveLength(3);
+  expect(new Set(f.posts.map(post => post.key)).size).toBe(1);
+  expect(f.cards()[0].data).toMatchObject({ status: "pending", readOnly: false, delivery: { status: "failed" } });
+  expect(f.events.some(event => event.type === "session.permission_resolved")).toBe(false);
+  const before = f.posts.length;
+  await f.dispose(); await f.disconnect(); f.events.length = 0; f.start(); await f.open("skip");
+  expect(f.posts).toHaveLength(before);
+  expect(f.events.some(event => event.type === "session.permission")).toBe(true);
+  f.remote.loseResponse = false; f.remote.postStatus = 200;
+  await answer(f, ["重新回答"]);
+  expect(f.posts.at(-1)!.key).not.toBe(f.posts[0].key);
+  expect(f.cards()[0].data).toMatchObject({ status: "answered", delivery: { status: "saved" } });
 });
 
 it("maps complete native questionnaires even when the timeline card must be bounded", async () => {
@@ -724,28 +690,6 @@ it("maps complete native questionnaires even when the timeline card must be boun
   expect(f.posts[0].body.content).toContain("6. **同名问题**：六");
 });
 
-it("reuses the child answer's immutable key for a receipt-proven retry inside seven days", async () => {
-  const f = await fixture(); f.comments[0].attachments = [attachment("anchor")]; f.documents.set("anchor", card); await f.sync(); await answer(f, ["已保存的能力证明"]);
-  f.comments.push(comment("child", "root", [attachment("retry")])); f.documents.set("retry", card); await f.sync();
-  f.remote.postStatus = 503; await answer(f, ["需要安全恢复的回答"], "multica:askuser:child:retry");
-  expect(f.posts).toHaveLength(2);
-  f.remote.postStatus = 200; await f.sync();
-  expect(f.posts).toHaveLength(3); expect(f.posts[2]).toEqual(f.posts[1]);
-  expect((await f.server.rpc(deliveryList, {}, f.paseo)).records[1]).toMatchObject({ rootId: "root", parentCommentId: "child", askuserAnswerTo: "child", status: "saved" });
-  expect(f.cards()[1].data).toMatchObject({ status: "answered", readOnly: true });
-  expect(f.events.filter(event => event.type === "session.permission" && event.request.id === "multica:askuser:child:retry")).toHaveLength(1);
-});
-
-it("clears a retained form when an explicit answer resend becomes uncertain, without waiting for periodic synchronization", async () => {
-  const f = await fixture(); f.comments[0].attachments = [attachment("resend-uncertain")]; f.documents.set("resend-uncertain", card); await f.sync();
-  f.remote.postStatus = 403; await expect(answer(f, ["原回答"])).rejects.toThrow();
-  expect(f.events.filter(event => event.type === "session.permission_resolved")).toHaveLength(0);
-  const original = (await f.server.rpc(deliveryList, {}, f.paseo)).records[0];
-  f.remote.postStatus = 503;
-  await f.server.rpc(deliveryResend, { ...original, requestId: "uncertain-explicit", acknowledgeDuplicateRisk: true }, f.paseo);
-  await expect.poll(() => f.events.filter(event => event.type === "session.permission_resolved")).toHaveLength(1);
-  expect(f.cards()[0].data).toMatchObject({ delivery: { status: "pending_verification" }, readOnly: true });
-});
 
 
 it("Stop resolves pending native cards locally and preserves a reopen entry without remote skip", async () => {
@@ -762,28 +706,13 @@ it("Stop resolves pending native cards locally and preserves a reopen entry with
 });
 
 
-it("fences an answer received before Stop while its identity preflight is still waiting", async () => {
-  const f = await fixture(); f.comments[0].attachments = [attachment("stopped-answer")]; f.documents.set("stopped-answer", card); await f.sync();
-  let entered!: () => void; let release!: () => void;
-  const arrived = new Promise<void>(resolve => { entered = resolve; }); const blocked = new Promise<void>(resolve => { release = resolve; });
-  f.remote.beforeMe = async () => { entered(); await blocked; };
-  const submitted = answer(f, ["停止前收到的回答"]).then(value => ({ value }), error => ({ error }));
-  await arrived;
-  await (await f.connect()).send({ type: "session.interrupt", requestId: "stop-answer", sessionId: f.agents[1].id });
-  release();
-  expect(await submitted).toMatchObject({ error: expect.objectContaining({ message: "Delivery was stopped" }) });
-  expect(f.posts).toEqual([]); expect(f.skips).toEqual([]);
-  expect((await f.server.rpc(deliveryList, {}, f.paseo)).records).toMatchObject([{ status: "failed", body: expect.stringContaining("停止前收到的回答") }]);
-});
 
-
-it.each(["thread hide", "workspace hide", "forbidden", "not found", "rule disabled", "filter exit"])("immediately resolves every live permission after %s while preserving cached cards", async reason => {
+it.each(["thread hide", "workspace hide", "rule disabled", "filter exit"])("immediately resolves every live permission after %s while preserving cached cards", async reason => {
   const f = await fixture(); f.comments[0].attachments = [attachment("unavailable")]; f.documents.set("unavailable", card); await f.sync();
   const agent = f.agents[1];
   await (await f.connect()).send({ type: "session.open", requestId: "second", sessionId: "second", history: "replay", persistence: JSON.parse(agent.handle.slice(7)), config: { cwd: agent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
   if (reason === "thread hide") await f.server.hook("agent.archive.after", { agent: { ...agent, provider: "multica" } } as never, f.paseo);
   if (reason === "workspace hide") await f.server.hook("workspace.archive.after", { workspace: { id: agent.workspaceId } } as never, f.paseo);
-  if (reason === "forbidden" || reason === "not found") { f.remote.issueStatus = reason === "forbidden" ? 403 : 404; await f.sync(); }
   if (reason === "filter exit") { f.remote.visible = false; await f.sync(); }
   if (reason === "rule disabled") await f.server.rpc(workspaceEnable, { workspaceId: "workspace", enabled: false }, f.paseo);
   expect(f.events.filter(event => event.type === "session.permission_resolved").map(event => event.sessionId).sort()).toEqual([agent.id, "second"].sort());
@@ -795,10 +724,10 @@ it.each(["thread hide", "workspace hide", "forbidden", "not found", "rule disabl
 it.each(["account switch", "logout", "global auth failure", "offline"])("resolves previous connection permissions immediately on %s without touching cached attachments", async reason => {
   const f = await fixture(); f.comments[0].attachments = [attachment("identity")]; f.documents.set("identity", { ...card, answer_user_id: "me" }); await f.sync();
   const before = f.requests.filter(request => request.path.startsWith("/api/attachments/")).length;
-  if (reason === "account switch") f.remote.userId = "other";
+  if (reason === "account switch") { f.remote.userId = "other"; await f.refreshLogin(); }
   if (reason === "logout") await writeFile(f.configPath, "{}");
-  if (reason === "global auth failure") f.remote.meStatus = 401;
-  if (reason === "offline") f.remote.meStatus = 503;
+  if (reason === "global auth failure") { f.remote.meStatus = 401; await f.refreshLogin(); }
+  if (reason === "offline") { f.remote.meStatus = 503; await f.refreshLogin(); }
   await f.server.rpc(connectionStatus, {}, f.paseo);
   expect(f.events).toContainEqual({ type: "session.permission_resolved", sessionId: f.agents[1].id, permissionId: "multica:askuser:root:identity" });
   expect(f.cards()[0].data).toMatchObject({ title: card.title, questions: card.questions, readOnly: true, offline: true });
@@ -822,7 +751,7 @@ it("does not download a newly discovered attachment if the Thread is hidden duri
   const f = await fixture(); f.comments[0].attachments = [attachment("hidden-preflight")]; f.documents.set("hidden-preflight", card);
   let entered!: () => void; let release!: () => void; let checks = 0;
   const arrived = new Promise<void>(resolve => { entered = resolve; }); const blocked = new Promise<void>(resolve => { release = resolve; });
-  f.remote.beforeIssueCheck = async () => { if (++checks === 2) { entered(); await blocked; } };
+  f.remote.beforeIssueCheck = async () => { if (++checks === 1) { entered(); await blocked; } };
   const sync = f.sync(); await arrived;
   await f.server.hook("agent.archive.after", { agent: { ...f.agents[1], provider: "multica" } } as never, f.paseo);
   release(); await sync;
@@ -833,18 +762,19 @@ it("does not download a newly discovered attachment if the Thread is hidden duri
 });
 
 
-it("rejects an answer hidden during workspace preflight and preserves its immutable input", async () => {
+it("rejects an answer hidden during identity preflight without posting", async () => {
   const f = await fixture(); f.comments[0].attachments = [attachment("hide-answer")]; f.documents.set("hide-answer", card); await f.sync();
   let entered!: () => void; let release!: () => void;
   const arrived = new Promise<void>(resolve => { entered = resolve; }); const blocked = new Promise<void>(resolve => { release = resolve; });
-  f.remote.beforeWorkspaces = async () => { entered(); await blocked; };
+  await f.refreshLogin();
+  f.remote.beforeMe = async () => { entered(); await blocked; };
   const submitted = answer(f, ["保留原始回答"]).then(value => ({ value }), error => ({ error }));
   await arrived;
   await f.server.hook("agent.archive.after", { agent: { ...f.agents[1], provider: "multica" } } as never, f.paseo);
   release();
   expect(await submitted).toMatchObject({ error: expect.objectContaining({ message: expect.stringContaining("归档") }) });
   expect(f.posts).toEqual([]);
-  expect((await f.server.rpc(deliveryList, {}, f.paseo)).records).toMatchObject([{ status: "failed", body: expect.stringContaining("保留原始回答") }]);
+  expect(f.cards()[0].data).toMatchObject({ readOnly: true });
 });
 
 
@@ -852,7 +782,7 @@ it.each([false, true])("ordinary chat remains a normal comment when host clearPe
   const f = await fixture(); f.comments[0].attachments = [attachment("chat")]; f.documents.set("chat", card); await f.sync();
   const prompt = { clientMessageId: "ordinary-chat", delivery: "auto" as const, input: { type: "message" as const, content: [{ type: "text" as const, text: "这是独立的普通讨论评论" }] }, clearPendingPermissions };
   await (await f.connect()).send({ type: "session.prompt", sessionId: f.agents[1].id, prompt });
-  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[0]?.status).toBe("saved");
+  await expect.poll(() => f.comments.some(item => item.content === "这是独立的普通讨论评论")).toBe(true);
   expect(f.posts.map(post => post.body)).toEqual([{ type: "comment", content: "这是独立的普通讨论评论", parent_id: "root" }]);
   expect(f.skips).toEqual([]);
   expect(f.events.filter(event => event.type === "session.permission_resolved")).toHaveLength(clearPendingPermissions ? 1 : 0);
@@ -864,7 +794,7 @@ it.each([false, true])("ordinary chat remains a normal comment when host clearPe
 it("isolates the specified stable permission ID by provider session and connection when remote card IDs match", async () => {
   const f = await fixture(); f.comments[0].attachments = [attachment("same-id")]; f.documents.set("same-id", card); await f.sync();
   const original = pendingQuestion(f);
-  f.remote.userId = "another-account";
+  f.remote.userId = "another-account"; await f.refreshLogin();
   await f.server.rpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, f.paseo);
   const next = pendingQuestion(f);
   expect(next.sessionId).not.toBe(original.sessionId);
@@ -896,20 +826,6 @@ it("same-account credential rotation during an action preserves cached cards, co
   expect(f.posts).toEqual([]); expect(f.skips).toEqual([]);
 });
 
-it.each(["hidden", "rule archived"])("prevents answer recovery and explicit resend after %s without losing the unknown original", async reason => {
-  const f = await fixture(); f.comments[0].attachments = [attachment("proof")]; f.documents.set("proof", card); await f.sync(); await answer(f, ["已保存的能力证明"]);
-  f.comments.push(comment("child", "root", [attachment("archived-retry")])); f.documents.set("archived-retry", card); await f.sync();
-  f.remote.postStatus = 503; await answer(f, ["原始待核实回答"], "multica:askuser:child:archived-retry");
-  const original = (await f.server.rpc(deliveryList, {}, f.paseo)).records[1];
-  if (reason === "hidden") await f.server.hook("agent.archive.after", { agent: { ...f.agents[1], provider: "multica" } } as never, f.paseo);
-  else await f.server.rpc(workspaceEnable, { workspaceId: "workspace", enabled: false }, f.paseo);
-  f.remote.postStatus = 200; await f.sync();
-  await expect(f.server.rpc(deliveryResend, { ...original, requestId: "blocked-resend", acknowledgeDuplicateRisk: true }, f.paseo)).rejects.toThrow("归档");
-  const retained = (await f.server.rpc(deliveryList, {}, f.paseo)).records[1];
-  expect(retained).toMatchObject({ idempotencyKey: original.idempotencyKey, clientMessageId: original.clientMessageId, body: original.body, status: "pending_verification" });
-  expect(f.posts).toHaveLength(2); expect(f.skips).toEqual([]);
-});
-
 
 it("keeps the original live form across same-account token revocation detected by timeline synchronization", async () => {
   const f = await fixture(); f.comments[0].attachments = [attachment("timeline-rotation")]; f.documents.set("timeline-rotation", card); await f.sync();
@@ -935,14 +851,18 @@ it("reads complete pending, answered and skipped questionnaires from cache after
   f.timeline.push({ id: "historical-answer", type: "comment", parent_id: "answered-card", content, actor_type: "member", actor_id: "me" }, { id: "skipped-card", type: "comment", askuser_skipped_at: stamp, askuser_skipped_by: "operator" });
   await f.sync();
   await (await f.connect()).send({ type: "session.permission", sessionId: f.agents[1].id, permissionId: "multica:askuser:root:history-pending", response: { behavior: "deny" } });
-  f.remote.meStatus = 503; await f.server.rpc(connectionStatus, {}, f.paseo);
+  f.remote.meStatus = 503; await f.refreshLogin(); await f.server.rpc(connectionStatus, {}, f.paseo);
   async function readHistory(server: FakeServer) {
+    const entries = await Promise.all(["history-pending", "history-answered", "history-skipped"].map((attachmentId, index) => server.rpc(askuserObserve,
+      { ...f.address(), commentId: ["root", "answered-card", "skipped-card"][index], attachmentId }, f.paseo)));
     const count = f.requests.length, nativeCount = f.agents.length;
-    const entry = (await server.rpc(issueHistoryList, {}, f.paseo)).issues[0];
-    let text = ""; let offset: number | null = 0;
-    while (offset !== null) { const page: { text: string; nextOffset: number | null } = await server.rpc(issueHistoryRead, { ...f.address(), revision: entry.revision, offset }, f.paseo); text += page.text; offset = page.nextOffset; }
-    const snapshot = cachedIssueSnapshot.parse(JSON.parse(text));
-    expect(snapshot.askuserCards).toMatchObject([
+    const cards = [];
+    for (const entry of entries) {
+      let text = ""; let offset: number | null = 0;
+      while (offset !== null) { const page: { text: string; nextOffset: number | null } = await server.rpc(askuserRead, { ...entry, offset }, f.paseo); text += page.text; offset = page.nextOffset; }
+      cards.push(JSON.parse(text));
+    }
+    expect(cards).toMatchObject([
       { title: card.title, description: warning, questions, status: "pending", collapsed: true, readOnly: true, offline: true },
       { title: card.title, description: warning, questions, status: "answered", answer: { content, actorId: "me" }, readOnly: true, offline: true },
       { title: card.title, description: warning, questions, status: "skipped", skippedAt: stamp, skippedBy: "operator", readOnly: true, offline: true },
@@ -956,12 +876,12 @@ it("reads complete pending, answered and skipped questionnaires from cache after
 });
 
 
-it.each([403, 404])("immediately resolves native input when an action preflight confirms object HTTP %s", async status => {
+it.each([403, 404])("reports object HTTP %s without creating a local inaccessible state", async status => {
   const f = await fixture(); f.comments[0].attachments = [attachment("denied-action")]; f.documents.set("denied-action", card); await f.sync();
   f.remote.issueStatus = status;
   await expect(f.server.rpc(skipCard, { ...f.address(), commentId: "root", attachmentId: "denied-action", confirmed: true }, f.paseo)).rejects.toThrow(`HTTP ${status}`);
-  expect(f.events.filter(event => event.type === "session.permission_resolved")).toMatchObject([{ sessionId: f.agents[1].id, permissionId: "multica:askuser:root:denied-action" }]);
-  expect(f.cards()[0].data).toMatchObject({ readOnly: true, readOnlyReason: expect.stringContaining("不可访问") });
+  expect(f.events.filter(event => event.type === "session.permission_resolved")).toEqual([]);
+  expect(f.cards()[0].data).toMatchObject({ status: "pending", readOnly: false });
   expect(f.posts).toEqual([]); expect(f.skips).toEqual([]);
 });
 
@@ -982,18 +902,25 @@ it("clears old-service permissions and never borrows a newly selected service to
 });
 
 
-it("fences an explicit answer resend received before Stop while its workspace preflight waits", async () => {
-  const f = await fixture(); f.comments[0].attachments = [attachment("stop-resend")]; f.documents.set("stop-resend", card); await f.sync();
-  f.remote.postStatus = 403; await expect(answer(f, ["原始回答"])).rejects.toThrow();
-  const original = (await f.server.rpc(deliveryList, {}, f.paseo)).records[0];
+
+it.each([200, 403])("waits for the answer POST result before settling native permission HTTP %s", async status => {
+  const f = await fixture(); f.comments[0].attachments = [attachment("awaited")]; f.documents.set("awaited", card); await f.sync();
   let entered!: () => void; let release!: () => void;
   const arrived = new Promise<void>(resolve => { entered = resolve; }); const blocked = new Promise<void>(resolve => { release = resolve; });
-  f.remote.beforeWorkspaces = async () => { entered(); await blocked; };
-  const decision = f.server.rpc(deliveryResend, { ...original, requestId: "stopped-resend", acknowledgeDuplicateRisk: true }, f.paseo);
+  f.remote.postStatus = status; f.remote.beforePost = async () => { entered(); await blocked; };
+  let settled = false;
+  const operation = answer(f, ["等待结果"]).then(() => ({ ok: true }), () => ({ ok: false })).finally(() => { settled = true; });
   await arrived;
-  await (await f.connect()).send({ type: "session.interrupt", requestId: "stop-resend", sessionId: f.agents[1].id });
-  f.remote.postStatus = 200; release(); await decision;
-  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[1]?.status).toBe("failed");
-  expect((await f.server.rpc(deliveryList, {}, f.paseo)).records[1]).toMatchObject({ body: original.body, message: "Delivery was stopped" });
-  expect(f.posts).toHaveLength(1); expect(f.skips).toEqual([]);
+  expect(settled).toBe(false);
+  expect((await f.server.rpc(observeCard, { ...f.address(), commentId: "root", attachmentId: "awaited" }, f.paseo)).delivery?.status).toBe("received");
+  expect(f.events.some(event => event.type === "session.permission_resolved")).toBe(false);
+  release(); expect(await operation).toEqual({ ok: status === 200 });
+  expect(f.cards()[0].data.delivery.status).toBe(status === 200 ? "saved" : "failed");
+});
+
+it.each(["parent_id", "askuser_answer_to"])("rejects an answer receipt with mismatched %s", async field => {
+  const f = await fixture(); f.comments[0].attachments = [attachment("mismatch")]; f.documents.set("mismatch", card); await f.sync();
+  f.remote.beforePost = async () => { f.remote.receiptMismatch = field; };
+  await expect(answer(f, ["检查回执目标"])).rejects.toThrow("不匹配");
+  expect(f.cards()[0].data).toMatchObject({ status: "pending", delivery: { status: "failed" } });
 });

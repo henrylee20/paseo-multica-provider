@@ -8,14 +8,11 @@ import { afterEach, expect, it } from "vitest";
 import type { PaseoApi } from "@getpaseo/client";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { ProviderConnection, ProviderEvent } from "@getpaseo/plugin/server/provider";
-import { workspaceEnable, syncBootstrap, connectionStatus, connectionHistory as historyRpc, multicaSettings, workspaceList } from "../shared/contracts.js";
-import { deliveryList, deliveryMentions } from "../shared/delivery.js";
-import { stopList, stopRetry } from "../shared/stops.js";
-import { hiddenList } from "../shared/hiding.js";
+import { workspaceEnable, syncBootstrap, connectionStatus, multicaSettings, workspaceList } from "../shared/contracts.js";
+import { deliveryMentions } from "../shared/delivery.js";
 import { threadOpen } from "../shared/threads.js";
 import { createServerContribution } from "../server/contribute.js";
-import type { LocalState } from "../server/state.js";
-import { FakeServer } from "./support/fake-server.js";
+import { FakeServer, hiddenObjects } from "./support/fake-server.js";
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 
@@ -36,7 +33,7 @@ async function fixture() {
   const credentials = [randomUUID(), randomUUID(), randomUUID()];
   const requests: Array<{ path: string; actor: string; method: string }> = [];
   const posts: Array<{ actor: string; path: string }> = [];
-  let beforeWorkspaces: (() => Promise<void>) | undefined;
+  let beforeIdentity: (() => Promise<void>) | undefined;
   const remote = async () => {
     const http = createServer(async (request, response) => {
       const actor = request.headers.authorization === `Bearer ${credentials[2]}` ? "other" : "me";
@@ -48,11 +45,14 @@ async function fixture() {
         for await (const _chunk of request) { /* Consume ordinary comment body. */ }
         posts.push({ actor, path: url.pathname });
         response.statusCode = 503; body = {};
-      } else if (url.pathname === "/api/me") body = { id: actor, name: actor === "me" ? "Lin" : "Kai" };
-      else if (url.pathname === "/api/workspaces") { await beforeWorkspaces?.(); body = [{ id: "workspace", name: "Product", slug: "product" }]; }
-      else if (url.pathname === "/api/issues") body = { issues: [{ id: "issue", workspace_id: "workspace", title: "Task", description: "Description", status: "todo" }], total: 1 };
-      else if (url.pathname === "/api/issues/issue/task-runs") body = [{ id: "run", issue_id: "issue", agent_id: "agent", status: "running", trigger_comment_id: "root" }];
-      else if (url.pathname === "/api/issues/issue/comments") body = [{ id: "root", issue_id: "issue", parent_id: null, content: "Original Lin comment", author_id: "me", author_type: "member", type: "comment", created_at: "2026-11-24T10:00:00Z", updated_at: "2026-11-24T10:00:00Z", attachments: [] }];
+      } else if (url.pathname === "/api/me") { await beforeIdentity?.(); body = { id: actor, name: actor === "me" ? "Lin" : "Kai" }; }
+      else if (url.pathname === "/api/workspaces") { body = [{ id: "workspace", name: "Product", slug: "product" }]; }
+      else if (url.pathname === "/api/issues")
+        body = { issues: [{ id: "issue", workspace_id: "workspace", title: "Task", description: "Description", status: "todo" }], total: 1 };
+      else if (url.pathname === "/api/issues/issue/task-runs")
+        body = [{ id: "run", issue_id: "issue", agent_id: "agent", status: "running", trigger_comment_id: "root" }];
+      else if (url.pathname === "/api/issues/issue/comments")
+        body = [{ id: "root", issue_id: "issue", parent_id: null, content: "Original Lin comment", author_id: "me", author_type: "member", type: "comment", created_at: "2026-11-24T10:00:00Z", updated_at: "2026-11-24T10:00:00Z", attachments: [] }];
       else if (url.pathname === "/api/agents") body = [{ id: "agent", name: "Agent" }];
       else if (url.pathname.endsWith("/members")) body = [{ user_id: "me", name: "Lin" }];
       else { response.statusCode = 404; body = {}; }
@@ -85,24 +85,41 @@ async function fixture() {
   let provider: ProviderConnection | undefined;
   const server = new FakeServer();
   const connect = async () => {
-    if (!provider) { provider = await server.providers.get("multica")!.connect({ versions: [1], capabilities: ["session.persistence", "prompt.message", "prompt.steer", "timeline.plugin"] }); provider.onEvent(event => { events.push(event); }); }
+    if (!provider) {
+      provider = await server.providers.get("multica")!.connect({ versions: [1], capabilities: ["session.persistence", "prompt.message", "prompt.steer", "timeline.plugin"] });
+      provider.onEvent(event => {
+        events.push(event);
+      });
+    }
     return provider;
   };
   const host = {
     listHosts: async () => ({ self: { serverId: "daemon" } }),
     listProjects: async () => ({ projects: [] }),
-    addProject: async (cwd: string) => { let project = projects.find(value => value.cwd === cwd); if (!project) { project = { projectId: `project-${projects.length}`, cwd }; projects.push(project); } return { project: { ...project, projectKind: "non_git" } }; },
+    addProject: async (cwd: string) => {
+      let project = projects.find(value => value.cwd === cwd);
+      if (!project) {
+        project = { projectId: `project-${projects.length}`, cwd };
+        projects.push(project);
+      }
+      return { project: { ...project, projectKind: "non_git" } };
+    },
     renameProject: async () => {}, fetchWorkspaces: async () => ({ entries: workspaces, pageInfo: { hasMore: false } }),
-    createWorkspace: async (input: { workspaceId: string }) => { const workspace = { id: input.workspaceId }; workspaces.push(workspace); return { workspace }; }, setWorkspaceTitle: async () => {},
+    createWorkspace: async (input: { workspaceId: string }) => {
+      const workspace = { id: input.workspaceId };
+      workspaces.push(workspace);
+      return { workspace };
+    }, setWorkspaceTitle: async () => {},
     fetchAgents: async () => ({ entries: agents.map(agent => ({ agent: { provider: "multica", ...agent } })), pageInfo: { hasMore: false } }),
     fetchAgent: async (id: string) => ({ agent: agents.find(agent => agent.id === id)! }),
     fetchAgentTimeline: async (agentId: string) => ({ agentId, epoch: "epoch", entries: [], hasOlder: false, hasNewer: false }),
     importAgent: async (input: { workspaceId: string; cwd: string; labels: Record<string, string>; providerHandleId: string }) => {
       const agent = { id: `native-${agents.length}`, workspaceId: input.workspaceId, cwd: input.cwd, labels: input.labels }; agents.push(agent);
-      await (await connect()).send({ type: "session.open", requestId: agent.id, sessionId: agent.id, history: "replay", persistence: JSON.parse(input.providerHandleId.slice(7)), config: { cwd: agent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } }); return agent;
+      await (await connect()).send({ type: "session.open", requestId: agent.id, sessionId: agent.id, history: "replay", persistence: JSON.parse(input.providerHandleId.slice(7)), config: { cwd: agent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
+      return agent;
     }, updateAgent: async () => {}, close: async () => {},
   } as unknown as DaemonClient;
-  const paseo = { hosts: { list: async () => ({ self: { serverId: "daemon" } }) } } as unknown as PaseoApi;
+  const paseo = { agents: { ref: () => ({}) }, hosts: { list: async () => ({ self: { serverId: "daemon" } }) } } as unknown as PaseoApi;
   const dispose = createServerContribution({ homeDirectory: home, stateDirectory: join(home, "state"), workingDirectory: home, environment: { PASEO_HOME: home }, connectHost: async () => host, syncIntervalMs: 60_000 })(server.context);
   cleanup.push(dispose); cleanup.push(async () => { await provider?.close(); });
   await server.rpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, paseo);
@@ -117,19 +134,19 @@ async function fixture() {
       cleanup.push(createServerContribution({ homeDirectory: home, stateDirectory: join(home, "state"), workingDirectory: home, environment: { PASEO_HOME: home } })(server.context));
       return server;
     },
-    blockWorkspaces: (handler?: () => Promise<void>) => { beforeWorkspaces = handler; },
+    blockIdentity: (handler?: () => Promise<void>) => { beforeIdentity = handler; },
     secretAbsent: (value: unknown) => credentials.every(credential => !JSON.stringify(value).includes(credential)),
     persisted: () => readFile(join(home, "state/state.json"), "utf8") };
 }
 
 it("logout during connection setup prevents an accepted old input from reaching the remote service", async () => {
   const f = await fixture();
-  const gate = pause(); f.blockWorkspaces(gate.handler);
+  await f.login(1);
+  const gate = pause(); f.blockIdentity(gate.handler);
   await f.send("logout-input"); await gate.waiting;
   await f.login(null); gate.release();
-  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[0]?.status).toBe("failed");
+  await expect.poll(() => f.events.some(event => event.type === "timeline.item" && event.item.type === "error")).toBe(true);
   expect(f.posts).toEqual([]);
-  expect((await f.server.rpc(deliveryList, {}, f.paseo)).records[0]).toMatchObject({ connectionKey: f.address().connectionKey, body: "Preserve original input" });
 });
 
 it("logout retires the authenticated workspace socket and leaves no old-cache requests", async () => {
@@ -139,30 +156,9 @@ it("logout retires the authenticated workspace socket and leaves no old-cache re
   expect(await f.server.rpc(connectionStatus, {}, f.paseo)).toMatchObject({ status: "not_logged_in" });
   await expect.poll(() => f.primary.ws.clients.size).toBe(0);
   const before = f.requests.length;
-  expect(await f.server.rpc(syncBootstrap, {}, f.paseo)).toMatchObject({ status: "unavailable" });
+  await f.server.rpc(syncBootstrap, {}, f.paseo);
   await expect(f.server.rpc(deliveryMentions, { connectionKey: f.address().connectionKey, issueId: "issue" }, f.paseo)).rejects.toThrow();
   expect(f.requests.length).toBe(before);
-});
-
-it("management retains verified service and account history after logout without storing credentials", async () => {
-  const f = await fixture();
-  const original = await f.server.rpc(connectionStatus, {}, f.paseo);
-  await f.login(2);
-  const switched = await f.server.rpc(connectionStatus, {}, f.paseo);
-  await f.login(null);
-  await f.server.rpc(connectionStatus, {}, f.paseo);
-  const history = defineRpc({ name: "connection.history", input: z.object({}), output: z.object({ connections: z.array(z.object({
-    connectionKey: z.string(), apiUrl: z.string().optional(), user: z.object({ id: z.string(), name: z.string(), email: z.string() }).optional(), profiles: z.array(z.string()),
-    projectCount: z.number(), issueCount: z.number(), hiddenCount: z.number(), pendingDeliveryCount: z.number(), stopWarningCount: z.number(),
-  })) }) });
-  const result = await f.server.rpc(history, {}, f.paseo);
-  expect(result.connections).toEqual(expect.arrayContaining([
-    expect.objectContaining({ connectionKey: original.connectionKey, apiUrl: f.primary.apiUrl, user: { id: "me", name: "Lin", email: "" }, profiles: [""], projectCount: 1, issueCount: 1 }),
-    expect.objectContaining({ connectionKey: switched.connectionKey, apiUrl: f.primary.apiUrl, user: { id: "other", name: "Kai", email: "" }, projectCount: 0, issueCount: 0 }),
-  ]));
-  expect(f.secretAbsent(result)).toBe(true);
-  expect(f.secretAbsent(await f.persisted())).toBe(true);
-  expect(await f.historyReader().rpc(history, {}, f.paseo)).toEqual(result);
 });
 
 it("credential rotation reuses history while account and service switches isolate mappings, roles, hiding and pending work", async () => {
@@ -170,25 +166,17 @@ it("credential rotation reuses history while account and service switches isolat
   const original = f.address();
   const originalThread = f.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
   await f.server.rpc(threadOpen, original, f.paseo);
-  await f.send("pending-input");
-  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[0]?.status).toBe("pending_verification");
-  const delivery = (await f.server.rpc(deliveryList, {}, f.paseo)).records[0];
-  const immutableDelivery = { connectionKey: delivery.connectionKey, issueId: delivery.issueId, rootId: delivery.rootId,
-    clientMessageId: delivery.clientMessageId, idempotencyKey: delivery.idempotencyKey, body: delivery.body, createdAt: delivery.createdAt };
-  const originalIntent = Object.values((JSON.parse(await f.persisted()) as LocalState).connections[original.connectionKey].issues.issue.deliveries)[0];
   await (await f.connect()).send({ type: "session.interrupt", requestId: "stop-original", sessionId: originalThread.id });
   originalThread.archivedAt = "2026-11-24T10:05:00Z";
   await f.server.hook("agent.archive.after", { agent: { id: originalThread.id, provider: "multica", workspaceId: originalThread.workspaceId, cwd: originalThread.cwd, parentAgentId: null, title: null }, archivedAt: originalThread.archivedAt }, f.paseo);
-  const hidden = await f.server.rpc(hiddenList, {}, f.paseo);
-  const warnings = await f.server.rpc(stopList, {}, f.paseo);
-  expect(warnings.records).toEqual([expect.objectContaining({ ...original, runId: "run", retryable: true })]);
+  const hidden = await hiddenObjects(f.server, f.paseo);
   const originalIds = { projects: f.projects.map(value => value.projectId), workspaces: f.workspaces.map(value => value.id), agents: f.agents.map(value => value.id) };
 
   await f.login(1);
   expect(await f.server.rpc(connectionStatus, {}, f.paseo)).toMatchObject({ connectionKey: original.connectionKey });
   await f.server.rpc(syncBootstrap, {}, f.paseo);
   expect({ projects: f.projects.map(value => value.projectId), workspaces: f.workspaces.map(value => value.id), agents: f.agents.map(value => value.id) }).toEqual(originalIds);
-  expect(await f.server.rpc(hiddenList, {}, f.paseo)).toEqual(hidden);
+  expect(await hiddenObjects(f.server, f.paseo)).toEqual(hidden);
   await f.login(1, f.primary.apiUrl, "same-account");
   f.server.setSettings(multicaSettings.id, { profile: "same-account" });
   await f.server.rpc(syncBootstrap, {}, f.paseo);
@@ -206,9 +194,8 @@ it("credential rotation reuses history while account and service switches isolat
   await f.server.rpc(threadOpen, f.address(other.connectionKey), f.paseo);
   expect(f.events).toContainEqual(expect.objectContaining({ type: "timeline.item", sessionId: otherThread.id, item: expect.objectContaining({ type: "assistant_message", text: "Lin: \n\nOriginal Lin comment" }) }));
   const beforeRetry = f.posts.length;
-  expect(await f.server.rpc(stopRetry, { ...original, runId: "run" }, f.paseo)).toMatchObject({ status: "unavailable" });
   await f.send("old-tab-new-account");
-  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records.find(record => record.clientMessageId === "old-tab-new-account")?.status).toBe("failed");
+  await expect.poll(() => f.events.some(event => event.type === "timeline.item" && event.item.type === "error")).toBe(true);
   expect(f.posts.length).toBe(beforeRetry);
 
   f.server.setSettings(multicaSettings.id, { profile: "" });
@@ -227,39 +214,28 @@ it("credential rotation reuses history while account and service switches isolat
   await (await f.connect()).send({ type: "session.open", requestId: "old-replay", sessionId: "old-replay", history: "replay", persistence: { version: 1, data: { connectionKey: original.connectionKey, issueId: "issue", discussion: "thread", rootId: "root" } }, config: { cwd: originalThread.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
   expect(f.events).toContainEqual(expect.objectContaining({ type: "timeline.item", sessionId: "old-replay", item: expect.objectContaining({ type: "user_message", messageId: "root", text: "Original Lin comment" }) }));
   expect(f.events).toContainEqual(expect.objectContaining({ type: "timeline.item", sessionId: "old-replay", item: expect.objectContaining({ type: "plugin", kind: "run-summary", data: expect.objectContaining({ ...original, runId: "run" }) }) }));
-  // Background receipt verification may update its explanation; the accepted
-  // input and its original identity, target, key and Stop fence must survive.
-  expect((await f.server.rpc(deliveryList, {}, f.paseo)).records.find(record => record.clientMessageId === "pending-input"))
-    .toMatchObject({ ...immutableDelivery, status: "pending_verification" });
-  const retainedIntents = Object.values((JSON.parse(await f.persisted()) as LocalState).connections[original.connectionKey].issues.issue.deliveries);
-  expect(retainedIntents.find(record => record.clientMessageId === "pending-input")).toMatchObject({
-    ...immutableDelivery, stopEpoch: originalIntent.stopEpoch, nativeDelivery: originalIntent.nativeDelivery,
-    remoteWorkspaceId: originalIntent.remoteWorkspaceId, status: "pending_verification",
-  });
-  expect(await f.server.rpc(hiddenList, {}, f.paseo)).toEqual(hidden);
-  expect(await f.server.rpc(stopList, {}, f.paseo)).toEqual(warnings);
+  expect(await hiddenObjects(f.server, f.paseo)).toEqual(hidden);
 
   await f.login(1);
   await f.server.rpc(syncBootstrap, {}, f.paseo);
   expect((await f.server.rpc(connectionStatus, {}, f.paseo)).connectionKey).toBe(original.connectionKey);
   expect(f.agents).toHaveLength(6);
   expect(originalThread.archivedAt).toBeTruthy();
-  const history = await f.server.rpc(historyRpc, {}, f.paseo);
-  expect(history.connections.find(connection => connection.connectionKey === original.connectionKey)).toMatchObject({ hiddenCount: 1, pendingDeliveryCount: 1, stopWarningCount: 1 });
-  expect(f.secretAbsent([history, f.events, await f.persisted()])).toBe(true);
+  expect(f.secretAbsent([f.events, await f.persisted()])).toBe(true);
 });
 
-it("an account switch during Stop setup preserves the original warning without sending an old cancellation", async () => {
+it("an account switch during Stop setup fails without sending an old cancellation", async () => {
   const f = await fixture();
-  const gate = pause(); f.blockWorkspaces(gate.handler);
+  await f.login(1);
+  const gate = pause(); f.blockIdentity(gate.handler);
   const thread = f.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
   const stopping = (await f.connect()).send({ type: "session.interrupt", requestId: "switch-during-stop", sessionId: thread.id });
   await gate.waiting; await f.login(2); gate.release(); await stopping;
   expect(f.posts).toEqual([]);
-  expect((await f.server.rpc(stopList, {}, f.paseo)).records).toEqual([expect.objectContaining({ ...f.address(), runId: "run", retryable: true })]);
+  expect(f.events).toContainEqual(expect.objectContaining({ type: "request.failed", requestId: "switch-during-stop" }));
 });
 
-it("a management action opened under an old account cannot enable rules for a newly selected account", async () => {
+it("a settings action opened under an old account cannot enable rules for a newly selected account", async () => {
   const f = await fixture();
   const original = f.address().connectionKey;
   await f.login(2);

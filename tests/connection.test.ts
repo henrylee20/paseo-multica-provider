@@ -2,14 +2,14 @@ import { createServer } from "node:http";
 import { mkdtemp, mkdir, writeFile, rm, rename, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import type { PaseoApi } from "@getpaseo/client";
 import { createServerContribution } from "../server/contribute.js";
-import { connectionStatus, multicaSettings } from "../shared/contracts.js";
+import { connectionStatus, multicaSettings, workspaceList } from "../shared/contracts.js";
 import { FakeServer } from "./support/fake-server.js";
 
 const cleanup: Array<() => void | Promise<void>> = [];
-afterEach(async () => { for (const dispose of cleanup.splice(0).reverse()) await dispose(); });
+afterEach(async () => { for (const dispose of cleanup.splice(0).reverse()) await dispose(); vi.restoreAllMocks(); });
 
 async function fixture(profile = "", environment: NodeJS.ProcessEnv = {}) {
   const home = await mkdtemp(join(tmpdir(), "paseo-multica-cli-"));
@@ -118,6 +118,7 @@ it("atomic CLI replacement rotates credentials, logout removes access, and servi
   expect(f.requests.at(-1)?.authorization).toBe("Bearer rotated-credential");
   expect(await readFile(f.path, "utf8")).toBe(rotated);
   f.remote.body = { id: "different-user", name: "Kai", email: "kai@example.test" };
+  await writeFile(f.path, JSON.stringify({ server_url: f.apiUrl, token: "other-user-credential" }));
   const switched = await f.read();
   expect(switched.connectionKey).not.toBe(original.connectionKey);
   const otherService = await fixture();
@@ -154,4 +155,28 @@ it("server errors and malformed identity responses never become a verified user"
   f.remote.status = 200;
   f.remote.body = { name: "missing id" };
   expect(await f.read()).toMatchObject({ status: "offline" });
+});
+
+it("reuses identity briefly while config edits and TTL expiry force verification", async () => {
+  const f = await fixture();
+  let now = Date.now();
+  vi.spyOn(Date, "now").mockImplementation(() => now);
+  const original = await f.read();
+  expect(await f.read()).toEqual(original);
+  expect(f.requests).toHaveLength(1);
+  now += 60_001;
+  expect(await f.read()).toEqual(original);
+  expect(f.requests).toHaveLength(2);
+  await writeFile(f.path, `${await readFile(f.path, "utf8")}\n`);
+  expect(await f.read()).toEqual(original);
+  expect(f.requests).toHaveLength(3);
+});
+
+it.each([401, 403])("HTTP %s invalidates the cached identity without waiting for its TTL", async status => {
+  const f = await fixture();
+  expect(await f.read()).toMatchObject({ status: "ready" });
+  f.remote.status = status;
+  await expect(f.server.rpc(workspaceList, {}, {} as PaseoApi)).rejects.toThrow();
+  expect(await f.read()).toMatchObject({ status: "authentication_failed" });
+  expect(f.requests.map(request => request.path)).toEqual(["/api/me", "/api/workspaces", "/api/me"]);
 });
