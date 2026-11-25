@@ -920,3 +920,20 @@ it("clears old-service permissions and never borrows a newly selected service to
   expect(replacement.requests.filter(request => request.path.startsWith("/api/attachments/"))).toEqual([]);
   expect(f.posts).toEqual([]); expect(replacement.posts).toEqual([]); expect(replacement.skips).toEqual([]);
 });
+
+
+it("fences an explicit answer resend received before Stop while its workspace preflight waits", async () => {
+  const f = await fixture(); f.comments[0].attachments = [attachment("stop-resend")]; f.documents.set("stop-resend", card); await f.sync();
+  f.remote.postStatus = 403; await expect(answer(f, ["原始回答"])).rejects.toThrow();
+  const original = (await f.server.rpc(deliveryList, {}, f.paseo)).records[0];
+  let entered!: () => void; let release!: () => void;
+  const arrived = new Promise<void>(resolve => { entered = resolve; }); const blocked = new Promise<void>(resolve => { release = resolve; });
+  f.remote.beforeWorkspaces = async () => { entered(); await blocked; };
+  const decision = f.server.rpc(deliveryResend, { ...original, requestId: "stopped-resend", acknowledgeDuplicateRisk: true }, f.paseo);
+  await arrived;
+  await (await f.connect()).send({ type: "session.interrupt", requestId: "stop-resend", sessionId: f.agents[1].id });
+  f.remote.postStatus = 200; release(); await decision;
+  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[1]?.status).toBe("failed");
+  expect((await f.server.rpc(deliveryList, {}, f.paseo)).records[1]).toMatchObject({ body: original.body, message: "Delivery was stopped" });
+  expect(f.posts).toHaveLength(1); expect(f.skips).toEqual([]);
+});

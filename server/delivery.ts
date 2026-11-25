@@ -87,9 +87,13 @@ export class CommentDelivery {
       if (this.posts.has(anchor.idempotencyKey)) continue;
       if ((await this.lookup(anchor, connection, workspace)).kind === "saved") { proof = true; break; }
     }
-    for (const record of pending) {
-      if (this.posts.has(record.idempotencyKey)) continue;
-      await this.track(record, async () => {
+    for (const candidate of pending) {
+      if (this.posts.has(candidate.idempotencyKey)) continue;
+      await this.track(candidate, async () => {
+        // Anchor reads may outlive an active POST. Recheck after claiming this
+        // key so a stale recovery snapshot cannot overwrite its final receipt.
+        const record = await this.record(candidate);
+        if (record.status === "saved" || record.status === "failed" || record.recoveryHalted) return;
         const result = await this.lookup(record, connection, workspace);
         if (result.kind === "saved") {
           proof = true;
@@ -274,6 +278,7 @@ export class CommentDelivery {
   }
   async resend(address: RunAddress & { clientMessageId: string; requestId: string; acknowledgeDuplicateRisk: true }) {
     const original = await this.record(address);
+    const receivedEpoch = original.askuserAnswerTo ? await this.stops.epoch(original) : undefined;
     // Revalidate the original identity before accepting a new user-authorized attempt.
     await this.context(original);
     await this.posts.get(original.idempotencyKey);
@@ -293,7 +298,7 @@ export class CommentDelivery {
       next = issue.deliveries[deliveryKey(original.rootId, clientMessageId)] = {
         connectionKey: original.connectionKey, issueId: original.issueId, rootId: original.rootId, parentCommentId: original.parentCommentId, askuserAnswerTo: original.askuserAnswerTo, remoteWorkspaceId: original.remoteWorkspaceId ?? issue.remoteWorkspaceId,
         clientMessageId, idempotencyKey: randomUUID(), retryOf: original.idempotencyKey, body: original.body,
-        createdAt: this.now().toISOString(), stopEpoch: issue.stopEpochs[original.rootId] ?? 0,
+        createdAt: this.now().toISOString(), stopEpoch: receivedEpoch ?? issue.stopEpochs[original.rootId] ?? 0,
         nativeDelivery: "auto", status: "received", retryCount: 0,
       };
     });

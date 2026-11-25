@@ -388,8 +388,11 @@ it("recovers a saved comment after a lost response and restart using its authori
 
 it("retries a missing receipt only after fresh positive proof, preserving key, content and original native input", async () => {
   const f = await fixture(false, true);
-  await f.send("root", "Capability anchor", "anchor");
-  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[0]?.status).toBe("saved");
+  await f.send("main", "Capability anchor", "anchor");
+  // Observe the saved anchor's newly imported Thread before admitting the next
+  // input, so its projection cannot consume that input's retry during setup.
+  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[0]?.threadAgentId).toBeTruthy();
+  await f.server.rpc(syncBootstrap, {}, f.paseo);
   f.post(async () => ({ status: 503 }));
   await f.send("root", "Same immutable body", "safe-retry");
   await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[1]?.status).toBe("pending_verification");
@@ -547,4 +550,32 @@ it("accepts ordinary comment receipts whose optional askuser target is explicitl
   const record = (await f.server.rpc(deliveryList, {}, f.paseo)).records[0];
   expect(await f.server.rpc(deliveryVerify, record, f.paseo)).toMatchObject({ status: "saved" });
   expect(f.posts).toHaveLength(1);
+});
+
+
+it.each([403, 200])("preserves the confirmed HTTP %s outcome when an older pending recovery snapshot resumes", async status => {
+  const f = await fixture(false, true);
+  await f.send("root", "Saved proof", "settled-proof");
+  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[0]?.status).toBe("saved");
+  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  const anchor = (await f.server.rpc(deliveryList, {}, f.paseo)).records[0];
+  let enteredPost!: () => void; let releasePost!: () => void; let enteredLookup!: () => void; let releaseLookup!: () => void;
+  const postArrived = new Promise<void>(resolve => { enteredPost = resolve; }); const postBlocked = new Promise<void>(resolve => { releasePost = resolve; });
+  const lookupArrived = new Promise<void>(resolve => { enteredLookup = resolve; }); const lookupBlocked = new Promise<void>(resolve => { releaseLookup = resolve; });
+  f.post(async body => {
+    enteredPost(); await postBlocked;
+    if (status === 403) return { status };
+    const saved = comment("settled-success", "root", body.content); f.comments.push(saved); return { body: saved };
+  });
+  f.lookupFailure(503);
+  f.beforeLookup(async key => { if (key === anchor.idempotencyKey) { enteredLookup(); await lookupBlocked; } });
+  await f.send("root", "Settled immutable input", "settled-rejection"); await postArrived;
+  const synchronization = f.server.rpc(syncBootstrap, {}, f.paseo);
+  try {
+    await lookupArrived;
+    releasePost();
+    await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[1]?.status).toBe(status === 403 ? "failed" : "saved");
+  } finally { releasePost(); releaseLookup(); await synchronization; }
+  expect((await f.server.rpc(deliveryList, {}, f.paseo)).records[1]).toMatchObject({ status: status === 403 ? "failed" : "saved", body: "Settled immutable input", message: expect.stringContaining(status === 403 ? "HTTP 403" : "评论已保存") });
+  expect(f.posts).toHaveLength(2);
 });
