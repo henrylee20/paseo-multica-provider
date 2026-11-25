@@ -2,7 +2,8 @@ import { askuserPermission, askuserPermissionId, isLocalAskuserDismiss } from ".
 import type { AskuserCardData } from "../shared/askuser.js";
 import type { AskUsers } from "./askuser.js";
 import { randomUUID } from "node:crypto";
-import { isActiveRun, runSummary, type RunSynchronizer } from "./runs.js";
+import { isActiveRun } from "../shared/runs.js";
+import { runSummary, type RunSynchronizer } from "./runs.js";
 import { z } from "zod";
 import type { ProviderEvent, ProviderRegistration } from "@getpaseo/plugin/server/provider";
 import { StateStore } from "./state.js";

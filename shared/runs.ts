@@ -3,6 +3,7 @@ import { threadAddress } from "./threads.js";
 import { z } from "zod";
 
 export const runStatusSchema = z.enum(["queued", "dispatched", "running", "waiting_local_directory", "deferred", "completed", "failed", "cancelled"]);
+export const isActiveRun = (status: z.infer<typeof runStatusSchema>) => ["queued", "dispatched", "running", "waiting_local_directory", "deferred"].includes(status);
 // Preserve source values, including explicit null and empty strings. These can
 // be arbitrarily large and belong in paged cached reads, never native rows.
 export const runMetadataSchema = z.object({

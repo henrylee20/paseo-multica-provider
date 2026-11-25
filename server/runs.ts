@@ -4,9 +4,8 @@ import type { AuthenticatedConnection } from "./connection.js";
 import { StateStore, type IssueMapping } from "./state.js";
 import type { StoredRun } from "./run-state.js";
 import { remoteJson, workspaceAgents, type RemoteWorkspace } from "./sync.js";
-import { runMetadataSchema, runStatusSchema, runSummarySchema } from "../shared/runs.js";
+import { isActiveRun, runMetadataSchema, runStatusSchema, runSummarySchema } from "../shared/runs.js";
 
-export const isActiveRun = (status: StoredRun["status"]) => ["queued", "dispatched", "running", "waiting_local_directory", "deferred"].includes(status);
 export type RunAddress = { connectionKey: string; issueId: string; rootId: string };
 const key = (address: RunAddress) => JSON.stringify([address.connectionKey, address.issueId, address.rootId]);
 const remoteRunSchema = z.object({

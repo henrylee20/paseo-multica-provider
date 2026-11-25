@@ -1,7 +1,7 @@
 import { z } from "zod";
-import { runMetadataSchema, runStatusSchema } from "../shared/runs.js";
+import { isActiveRun, runMetadataSchema, runStatusSchema } from "../shared/runs.js";
 import { remoteFetch, type AuthenticatedConnection } from "./connection.js";
-import { isActiveRun, type RunAddress, type RunSynchronizer } from "./runs.js";
+import type { RunAddress, RunSynchronizer } from "./runs.js";
 import { StateStore, cachedWorkspace } from "./state.js";
 
 const cancelledRunSchema = z.object({ id: z.string(), issue_id: z.string(), status: runStatusSchema,

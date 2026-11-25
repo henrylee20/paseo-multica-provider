@@ -10,7 +10,7 @@ import { askuserReopen } from "../shared/askuser.js";
 import { hiddenRestore } from "../shared/hiding.js";
 import { createServerContribution } from "../server/contribute.js";
 import type { NativeHost } from "../server/native-host.js";
-import { FakeServer } from "./support/fake-server.js";
+import { FakeServer, resync } from "./support/fake-server.js";
 
 const cleanup: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const dispose of cleanup.splice(0).reverse()) await dispose(); });
@@ -120,7 +120,7 @@ async function fixture() {
     const source = comments.get(issueId)!.find(c => c.id === root)!; source.attachments = [attachment(root)]; documents.set(root, document);
   };
   return { ...started, start, connect, open, agents, workspaces, thread, question, events, registrationOrder, wakes, refreshes, requests, comments, timelines, runs, issues, documents, remote, wakeControl, nativeControl, paseo,
-    setClock: (value: Date) => { clock = value; }, sync: () => server.rpc(syncBootstrap, {}, paseo),
+    setClock: (value: Date) => { clock = value; }, sync: () => resync(server, paseo, "workspace"),
     disconnect: async () => { await provider?.close(); provider = undefined; opened.clear(); } };
 }
 

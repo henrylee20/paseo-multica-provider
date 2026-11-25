@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { useRpc, type PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import type { z } from "zod";
-import { runObserve, runOpen, runRead, runMetadataRead, runMetadataSchema, runMessageSchema, runSummarySchema, type RunMessage, type RunMetadata } from "../shared/runs.js";
+import { isActiveRun, runObserve, runOpen, runRead, runMetadataRead, runMetadataSchema, runMessageSchema, runSummarySchema, type RunMessage, type RunMetadata } from "../shared/runs.js";
 import { collectText } from "./chunked-text.js";
 import { RunMetadataView } from "./run-metadata.js";
 
@@ -61,7 +61,7 @@ function RunSummaryBody({ item, theme }: Props) {
     };
     setNotice("正在读取执行明细…");
     void refresh();
-    if (["completed", "failed", "cancelled"].includes(status)) return () => { active = false; };
+    if (!isActiveRun(status)) return () => { active = false; };
     const timer = setInterval(() => { void refresh(); }, 2000);
     return () => { active = false; clearInterval(timer); };
   }, [expanded, open, read, readMetadata, connectionKey, issueId, rootId, runId, status, attempt]);

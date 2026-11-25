@@ -338,7 +338,6 @@ export class SidebarSynchronizer {
         if (mainAgentId && !mapping.manualHidden.discussions.includes("main")) await this.host.updateAgent(mainAgentId, { name: "主讨论" });
         this.syncState.stage = "history";
         await this.options.onIssue?.(connection, workspace, issue.id, this.host);
-
       }
       this.syncState.completedWorkspaces++;
     }

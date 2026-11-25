@@ -14,7 +14,7 @@ import { askuserRead, askuserObserve } from "../shared/askuser.js";
 import { hiddenRestore } from "../shared/hiding.js";
 import { threadOpen } from "../shared/threads.js";
 import { createServerContribution } from "../server/contribute.js";
-import { FakeServer } from "./support/fake-server.js";
+import { FakeServer, resync } from "./support/fake-server.js";
 
 const cleanup: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const dispose of cleanup.splice(0).reverse()) await dispose(); });
@@ -145,7 +145,7 @@ async function fixture() {
   const address = () => ({ connectionKey: agents[1].labels["multica.connection"], issueId: "issue", rootId: "root" });
   const cards = () => (rows.get(agents[1].id) ?? []).filter(row => row.type === "plugin" && row.kind === "askuser") as Array<Extract<ProviderTimelineItem, { type: "plugin" }> & { data: Record<string, any> }>;
   return { ...started, start, connect, events, posts, skips, receipts, setClock: (value: Date) => { clock = value; }, comments, timeline, runs, documents, requests, remote, rows, agents, cards, address, open, home, configPath, paseo, refreshLogin,
-    disconnect: async () => { await provider?.close(); provider = undefined; }, signal: (type: string) => { for (const socket of websocket.clients) socket.send(JSON.stringify({ type })); }, eventsReady: () => expect.poll(() => websocket.clients.size).toBeGreaterThan(0), sync: () => server.rpc(syncBootstrap, {}, paseo) };
+    disconnect: async () => { await provider?.close(); provider = undefined; }, signal: (type: string) => { for (const socket of websocket.clients) socket.send(JSON.stringify({ type })); }, eventsReady: () => expect.poll(() => websocket.clients.size).toBeGreaterThan(0), sync: () => resync(server, paseo, "workspace") };
 }
 
 it("discovers root and descendant cards on their owning Thread and downloads each attachment only once across restart", async () => {
@@ -161,7 +161,7 @@ it("discovers root and descendant cards on their owning Thread and downloads eac
     ["/api/attachments/root-file/download", "product", "Bearer synthetic"], ["/api/attachments/child-file/download", "product", "Bearer synthetic"],
   ]);
   await f.dispose(); await f.disconnect(); const restarted = f.start(); await f.open("skip");
-  await restarted.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(restarted.server, f.paseo, "workspace");
   expect(f.cards().map(row => row.id)).toEqual(ids);
   expect(f.requests.filter(r => r.path.startsWith("/api/attachments/"))).toHaveLength(2);
 });
@@ -433,15 +433,15 @@ it("restores pending native permissions between opened and ready while new cards
   expect(opening.map(event => event.type).indexOf("session.permission")).toBeGreaterThan(opening.map(event => event.type).indexOf("session.opened"));
   expect(opening.map(event => event.type).indexOf("session.permission")).toBeLessThan(opening.map(event => event.type).indexOf("session.ready"));
   f.comments.push(comment("child", "root", [attachment("live")])); f.documents.set("live", card);
-  await restarted.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(restarted.server, f.paseo, "workspace");
   const live = f.events.map(event => event.type === "session.permission" && event.request.id === "multica:askuser:child:live").lastIndexOf(true);
   expect(live).toBeGreaterThan(f.events.map(event => event.type).lastIndexOf("session.ready"));
   f.timeline.push({ id: "answer", type: "comment", parent_id: "root", content: "**确认结果**\n\n1. **理由**：网页回答", actor_type: "member", actor_id: "me" },
     { id: "child", type: "comment", askuser_skipped_at: stamp });
-  await restarted.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(restarted.server, f.paseo, "workspace");
   expect(f.events.filter(event => event.type === "session.permission_resolved").map(event => event.permissionId)).toEqual(["multica:askuser:root:replayed", "multica:askuser:child:live"]);
   f.comments.push(comment("removed", "root", [attachment("deleted")])); f.documents.set("deleted", card);
-  await restarted.server.rpc(syncBootstrap, {}, f.paseo); f.comments.pop(); await restarted.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(restarted.server, f.paseo, "workspace"); f.comments.pop(); await resync(restarted.server, f.paseo, "workspace");
   expect(f.events).toContainEqual({ type: "session.permission_resolved", sessionId: native, permissionId: "multica:askuser:removed:deleted" });
 });
 
