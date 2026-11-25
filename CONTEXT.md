@@ -135,3 +135,15 @@ PR #17 已合入 `main`（`2285008`）。用户要求直接在主干补齐停用
 验证：类型检查与 172 项测试通过；用 npm 发布的真实 0.17.4 SDK 声明（61 个 `.d.ts`）检查新客户端与服务端代码零错误；用未修改的实际 0.17.4 宿主编译器源码编译两端 bundle，并分别以真实 0.17.4、0.15.3 共享 SDK 加载（宿主 UI 模块以替身提供）：0.17.4 注册 `multica-mention`，0.15.3 正常加载且不注册，两者均注册既有 8 项贡献，服务端 provider／settings 正常。
 
 2026-11-25 已在用户主 daemon（`srv_k4Tm0x9H1FtO`，0.17.4，listener `127.0.0.1:6767`）完成真实安装与验收：只 reload `multica`，编译约 5 秒，daemon PID `4116328` 不变；真实 daemon 提供 97,666 字节 client bundle（hash `67cb5fbd314a61f98657865dc5f904a7552fdef22851d85b1fdcdeef259705cf`，含 `multica-mention`）。启用现有 henrylee 规则后，HENR-1 主讨论、HENR-2 主讨论与已有 Thread 三个 agent 的 metadata 与 labels 一致；`delivery.mentions` 返回真实 agent 拉车的🫏（`5505d430-fd5c-416a-9455-2af92d34b67d`）。SDK 与 UI 各发送一条真实评论（`01a2114f-7f2b-776b-b5cc-c27e4c9153fe`、`01a21152-da7b-7cc4-afb7-9349a0a27879`），均触发该 agent 的 Run（`01a2114f-7f59-73ea-b55a-f8732a1cb38d`、`01a21152-da8b-74cb-a604-717a146eafdc`），原生 Stop 后服务端 cancelled、原生 idle（1401ms、667ms）。UI 使用独立 Electron user-data 的第二客户端连同一主 daemon，通过 CDP 打开已有 Thread、点击「提及 Agent」、搜索选择并发送；截图与状态见验收记录。隔离客户端已关闭，主 daemon／主窗口未重启；验收后规则保持启用、讨论保持活跃。剩余边界：Run cleanup UNKNOWN（未证明物理退出）、移动布局／原生溢出面板未验证、自部署服务未验证。
+
+## Issue #20：askuser（#21–#26）
+
+2026-11-25 集成基线 `7d45a7b027c80ecd4b60addd662eb82258d737ae` 已合入 #21–#25：自部署 `askuser.json` version `"1"` 的安全附件下载与持久缓存、完整 timeline 终态校验、稳定时间线及离线只读卡片、原生问题映射、精确中文回答与子回复目标、7 天投递核实、本地收起／重展、两步跳过、受保护的后台主动加载，以及 Stop／访问／归档／CLI 身份变化下的权限对齐。首次无关联 Run 仍属于本地主讨论；它生成的根卡片在新 Thread，不迁移 Run 展示归属。完整模拟结果与后续步骤见 [askuser 验收记录](docs/askuser-acceptance.md)，主动加载／限流／回放契约见 [askuser-wakeup](docs/askuser-wakeup.md)。
+
+用户明确要求“就Mock测试即可，之后的真实测试我手动执行。”因此本轮只完成 #26 的自动化、构建与手动清单，没有安装或 reload、没有真实 daemon／Multica 请求和原生界面操作，#26 的真实验收保持未完成。前文 #1、提及选择器等实机结果是历史记录，不能用于宣称新 askuser 功能已在用户主 daemon 部署或验收。manifest 仍为 `>=0.15.3`、无最高版本，不修改 Paseo 核心；后续由用户更新已安装源目录，在当前 `0.17.4` daemon 与受控自部署 Issue 上手动验证。
+
+原生权限 ID 精确使用 `multica:askuser:<cardCommentId>:<attachmentId>`；通过 provider session 与连接／Issue 地址隔离，账号切换不能借用相同远端 ID。回答的 `parent_id` 与 `askuser_answer_to` 指向卡片评论本身，讨论根保留为 Run 与 Stop 归属。Stop epoch 必须在等待身份或工作区核实前捕获；最终写入及显式重发继续检查隐藏、归档、hold、访问与原身份。投递保存／失败终态不得被较早恢复快照覆盖。
+
+宿主静态核查发现的边界仍保留：已填写文字的全选填文本 Dismiss 与 Submit 同为非空 allow，插件无法区分；全空 allow 已按本地收起保护。条件提交失败保留权限，但原生内联为通用错误，细节由题目／时间线提示。初次打开期间权限静默恢复，ready 后新卡片才走 live 注意力路径，首次后台打开的系统通知尚未证明；OS 通知标题固定，正文携带可读卡片标题／说明。这些均不是已执行原生体验验收。
+
+真实 skip HTTP 状态／正文、已跳过 timeline 的 `askuser_skipped_at`／`askuser_skipped_by` 与专用 WebSocket 事件仍未采样。模拟覆盖成功空响应、正文无关处理、202 未确认、失败及 Stop 竞态；没有远端元数据时不补造时间或操作者，失败不自动重发。真实差异必须在 #26 手动采样后修正实现与回归。最终类型检查、323 项测试／12 文件、构建、97 文件归档的校验和／清单／源码一致性及独立解压后的离线生产依赖安装通过。首次检查暴露既有凭据恢复测试的准备时序竞态，已通过公开同步入口等待 anchor 完成并断言凭据变化 hook 确实触发；全量及 3 次定向复验通过，不改生产代码、不新增测试边界。详细结果见上述验收文档。
