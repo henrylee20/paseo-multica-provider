@@ -55,6 +55,10 @@ Run 任务元数据回归覆盖执行前失败、空／不可用执行消息、�
 
 ## 证据范围与复验
 
+2026-11-25 合并后空 Project 清理补充：独立实际 0.17.4 daemon（监听 17697）与只允许 GET 的合成 Multica 服务（17698）完成完整插件流程。停用规则后已归档任务的空 Project 注册消失；daemon 重启后不重建，重新启用生成新的 Project／Paseo 工作区外壳，以原 cwd 和 provider handle 迁回全部 4 个讨论。原讨论 ID、评论内容、来源元数据、Run／停止／投递缓存保持，人工隐藏继续有效，选定恢复才解除。原生重放 envelope 时间可能重新生成或规范化，核对保留的历史内容、顺序、来源时间和原身份，不把重放时间当作远端评论时间。全程 0 次远端修改；实际云服务和用户主 daemon 未参与此项合成验收。原始删除／重建接口探针及完整插件证据位于 `/tmp/paseo-multica-project-rebuild-probe/{evidence,plugin-before-restart,plugin-acceptance-evidence}.json`。
+
+该修复类型检查与 154 项测试通过，覆盖空规则、用户自建工作区及后续分页、不完整目录、删除／导入回执丢失、重启重试和两层人工隐藏。随后确认用户主 daemon 的规则全部停用、讨论均关闭，备份状态并仅 reload Multica 插件，原遗留 Project 消失，同步 ready；2 项任务的已有缓存及 3 个归档讨论按原 ID 读取核对保留。父项目删除后原生讨论目录会省略相关记录，includeArchived 也不能替代精确 ID 核对。此本机应用未重新启用真实规则、未重启整个 daemon、未恢复讨论或修改远端 Issue／Run；证据与备份位于 `/tmp/paseo-multica-main-project-lifecycle/`。本项是合并后修复的部署记录，与前文母任务未 reload 主 daemon 的历史验收范围分开。
+
 自动化在仓库执行 `npm ci --ignore-scripts && npm run check`；构建执行 `npm run build`。从产物独立解压后执行 `npm ci --omit=dev --ignore-scripts`，再在目标 daemon 安装并检查插件状态。真实服务复验需先核对当前账号、工作区、精确 Issue 与唯一可用 agent，限定筛选后再产生评论；不要把已用过的故障注入脚本当作干净状态直接重跑。
 
 私有临时证据位置仅作本次会话审计索引，不是发布包运行依赖，也没有提交完整响应、邮箱、凭据、运行状态或评论正文：

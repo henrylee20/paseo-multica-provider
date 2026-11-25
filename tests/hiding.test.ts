@@ -76,6 +76,7 @@ async function fixture() {
   }
   const host = {
     listHosts: async () => ({ self: { serverId: "owner" } }),
+    listProjects: async () => ({ projects: [] }),
     addProject: async () => ({ project: { projectId: "project", projectKind: "non_git" } }), renameProject: async () => {},
     // The real directory lists only active workspaces, omits archivedAt, and
     // accepts idPrefix without filtering on it. Callers must match exact IDs.

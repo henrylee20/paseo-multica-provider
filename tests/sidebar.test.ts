@@ -12,6 +12,7 @@ import { z } from "zod";
 import { createServerContribution } from "../server/contribute.js";
 import type { LocalState } from "../server/state.js";
 import { FakeServer } from "./support/fake-server.js";
+import { hiddenList, hiddenRestore } from "../shared/hiding.js";
 
 const bootstrap = defineRpc({ name: "sync.bootstrap", input: z.object({}), output: z.object({ status: z.string() }) });
 const management = defineRpc({ name: "workspace.list", input: z.object({}), output: z.object({ workspaces: z.array(z.object({ id: z.string(), name: z.string(), enabled: z.boolean() })) }) });
@@ -91,12 +92,19 @@ async function fixture(syncIntervalMs = 15_000, homePrefix = "multica-sidebar-")
   await mkdir(join(home, ".multica"));
   await writeFile(join(home, ".multica", "config.json"), JSON.stringify({ server_url: `http://127.0.0.1:${address.port}`, token: "private-token" }));
   const native = { projects: [] as Array<{ projectId: string; cwd: string; name: string }>, workspaces: [] as Array<{ id: string; projectId: string; cwd: string; title: string; archived?: boolean }>, agents: [] as Array<{ id: string; workspaceId: string; cwd: string; labels: Record<string, string>; name?: string; handle: string; archivedAt?: string | null }>, workspacePageSize: 100 };
+  let projectSequence = 0;
   const host = {
     listHosts: async () => ({ self: { serverId: "owning-daemon" } }),
     addProject: async (cwd: string) => {
       let project = native.projects.find(item => item.cwd === cwd);
-      if (!project) { project = { projectId: "native-project", cwd, name: "" }; native.projects.push(project); }
+      if (!project) { project = { projectId: projectSequence++ ? `native-project-${projectSequence}` : "native-project", cwd, name: "" }; native.projects.push(project); }
       return { project, error: null };
+    },
+    listProjects: async () => ({ projects: native.projects.map(project => ({ projectId: project.projectId, projectRootPath: project.cwd, projectKind: "non_git" })) }),
+    removeProject: async (id: string) => {
+      if (native.workspaces.some(workspace => workspace.projectId === id && !workspace.archived)) throw new Error("Project still has active workspaces");
+      native.projects.splice(native.projects.findIndex(project => project.projectId === id), 1);
+      return { removedWorkspaceIds: [] };
     },
     renameProject: async (id: string, name: string) => { native.projects.find(item => item.projectId === id)!.name = name; },
     // Match the native active directory: no archived field and idPrefix ignored.
@@ -109,6 +117,7 @@ async function fixture(syncIntervalMs = 15_000, homePrefix = "multica-sidebar-")
     },
     createWorkspace: async (input: { source: { path: string; projectId: string }; workspaceId: string; title: string }) => {
       if (!input.source.projectId) throw new Error("Explicit parent project required");
+      if (native.workspaces.some(workspace => workspace.id === input.workspaceId)) throw new Error("workspace_id_conflict");
       const workspace = { id: input.workspaceId, projectId: input.source.projectId, cwd: input.source.path, title: input.title };
       native.workspaces.push(workspace);
       return { workspace, error: null };
@@ -116,6 +125,12 @@ async function fixture(syncIntervalMs = 15_000, homePrefix = "multica-sidebar-")
     setWorkspaceTitle: async (id: string, title: string) => { native.workspaces.find(item => item.id === id)!.title = title; },
     fetchAgents: async () => ({ entries: native.agents.map(agent => ({ agent: { provider: "multica", ...agent } })), pageInfo: { hasMore: false, nextCursor: null } }),
     importAgent: async (input: { workspaceId: string; cwd: string; providerHandleId: string; labels: Record<string, string> }) => {
+      const existing = native.agents.find(agent => agent.handle === input.providerHandleId);
+      if (existing) {
+        if (!existing.archivedAt) throw new Error("Provider session is already imported");
+        Object.assign(existing, { workspaceId: input.workspaceId, archivedAt: null });
+        return existing;
+      }
       const agent = { id: `native-agent-${native.agents.length + 1}`, workspaceId: input.workspaceId, cwd: input.cwd, labels: input.labels, handle: input.providerHandleId };
       native.agents.push(agent); return agent;
     },
@@ -127,10 +142,14 @@ async function fixture(syncIntervalMs = 15_000, homePrefix = "multica-sidebar-")
     },
     restoreWorkspace: async (id: string) => {
       const workspace = native.workspaces.find(item => item.id === id)!;
+      if (!native.projects.some(project => project.projectId === workspace.projectId)) throw new Error("Unknown project");
       if (!workspace.archived) throw new Error("This workspace is not archived, but it is unavailable from the host.");
       workspace.archived = false;
     },
-    fetchAgent: async (id: string) => ({ agent: native.agents.find(item => item.id === id) }),
+    fetchAgent: async (id: string) => {
+      const agent = native.agents.find(item => item.id === id);
+      return agent ? { agent: { provider: "multica", status: "idle", persistence: { sessionId: agent.handle }, ...agent } } : null;
+    },
     refreshAgent: async (id: string) => {
       const agent = native.agents.find(item => item.id === id)!;
       if (!agent.archivedAt) throw new Error("Refreshing a live agent would interrupt it");
@@ -158,18 +177,24 @@ it("client bootstrap leaves the native sidebar empty until a workspace rule is e
   expect(f.websocketRequests).toEqual([]);
 });
 
-it("turning a workspace rule off and back on archives and restores the same native records", async () => {
+it("disabling a rule removes its empty Project and reenabling preserves tasks, discussion IDs and directories", async () => {
   const f = await fixture();
   await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
-  const ids = f.native.workspaces.map(item => item.id);
+  const projectId = f.native.projects[0].projectId;
+  const directories = f.native.workspaces.map(item => item.cwd);
   const agents = f.native.agents.map(item => item.id);
   await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: false }, f.paseo);
   expect(f.native.workspaces.every(item => item.archived)).toBe(true);
+  expect(f.native.projects).toEqual([]);
   await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
-  expect(f.native.workspaces.every(item => !item.archived)).toBe(true);
+  const active = f.native.workspaces.filter(item => !item.archived);
+  expect(active.map(item => item.cwd)).toEqual(directories);
+  expect(f.native.projects).toHaveLength(1);
+  expect(f.native.projects[0].projectId).not.toBe(projectId);
+  expect(active.every(item => item.projectId === f.native.projects[0].projectId)).toBe(true);
   expect(f.native.agents.every(item => !item.archivedAt)).toBe(true);
-  expect(f.native.workspaces.map(item => item.id)).toEqual(ids);
   expect(f.native.agents.map(item => item.id)).toEqual(agents);
+  expect(f.native.agents.every(agent => active.some(workspace => workspace.id === agent.workspaceId))).toBe(true);
 });
 
 it("a failed rule archive remains retryable and reenable does not refresh a previously hidden main tab", async () => {
@@ -185,6 +210,94 @@ it("a failed rule archive remains retryable and reenable does not refresh a prev
   await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   expect(f.native.agents[0].archivedAt).toBeTruthy();
   expect(f.native.agents[1].archivedAt).toBeNull();
+});
+
+it("rebuilt Projects retain manual hiding and restore the original discussion only when selected", async () => {
+  const f = await fixture();
+  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const main = f.native.agents[0];
+  main.archivedAt = "manual-hidden";
+  await f.server.hook("agent.archive.after", { agent: { id: main.id, workspaceId: main.workspaceId, provider: "multica", cwd: main.cwd, title: "主讨论", parentAgentId: null }, archivedAt: main.archivedAt }, f.paseo);
+  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: false }, f.paseo);
+  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  expect(main.archivedAt).toBeTruthy();
+  const hidden = await f.server.rpc(hiddenList, {}, f.paseo);
+  expect(hidden.objects).toHaveLength(1);
+  expect(hidden.objects[0].agentId).toBe(main.id);
+  expect(await f.server.rpc(hiddenRestore, { connectionKey: main.labels["multica.connection"], issueId: "issue-one", rootId: "main" }, f.paseo)).toEqual({ status: "ready" });
+  expect(main.archivedAt).toBeNull();
+  expect(f.native.agents).toHaveLength(2);
+  expect(f.native.workspaces.find(workspace => workspace.id === main.workspaceId)?.projectId).toBe(f.native.projects[0].projectId);
+});
+
+it("rebuilding a disabled Project leaves manually hidden tasks archived until explicitly restored", async () => {
+  const f = await fixture();
+  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const workspace = f.native.workspaces[0], main = f.native.agents[0];
+  await f.host.archiveWorkspace(workspace.id);
+  await f.server.hook("agent.archive.after", { agent: { id: main.id, workspaceId: main.workspaceId, provider: "multica", cwd: main.cwd, title: "主讨论", parentAgentId: null }, archivedAt: main.archivedAt! }, f.paseo);
+  await f.server.hook("workspace.archive.after", { workspace: { id: workspace.id, projectId: workspace.projectId, cwd: workspace.cwd, name: workspace.title, archivedAt: "manual-hidden" } }, f.paseo);
+  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: false }, f.paseo);
+  expect(f.native.projects).toEqual([]);
+  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  expect(f.native.workspaces.filter(item => !item.archived)).toHaveLength(1);
+  const address = { connectionKey: main.labels["multica.connection"], issueId: "issue-one" };
+  expect(await f.server.rpc(hiddenRestore, address, f.paseo)).toEqual({ status: "ready" });
+  expect(main.archivedAt).toBeTruthy();
+  expect(await f.server.rpc(hiddenRestore, { ...address, rootId: "main" }, f.paseo)).toEqual({ status: "ready" });
+  expect(main.archivedAt).toBeNull();
+  expect(f.native.agents).toHaveLength(2);
+});
+
+it("a lost Project removal acknowledgement survives restart and rebuilding retries lost discussion imports", async () => {
+  const f = await fixture();
+  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const original = f.native.agents.map(({ id, cwd, handle }) => ({ id, cwd, handle }));
+  const remove = f.host.removeProject.bind(f.host);
+  f.host.removeProject = async id => { await remove(id); throw new Error("Removal acknowledgement lost"); };
+  expect(await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: false }, f.paseo)).toEqual({ status: "unavailable" });
+  expect(f.native.projects).toEqual([]);
+  await f.dispose();
+  const restarted = f.start();
+  expect(await restarted.server.rpc(bootstrap, {}, f.paseo)).toEqual({ status: "ready" });
+  const importAgent = f.host.importAgent.bind(f.host);
+  f.host.importAgent = async input => { await importAgent(input); throw new Error("Import acknowledgement lost"); };
+  expect(await restarted.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo)).toEqual({ status: "unavailable" });
+  f.host.importAgent = importAgent;
+  expect(await restarted.server.rpc(bootstrap, {}, f.paseo)).toEqual({ status: "ready" });
+  expect(f.native.agents.map(({ id, cwd, handle }) => ({ id, cwd, handle }))).toEqual(original);
+  expect(f.native.agents.every(agent => !agent.archivedAt)).toBe(true);
+  expect(f.native.projects).toHaveLength(1);
+});
+
+it("disabling an empty rule removes its Project, but retains Projects containing user workspaces on later pages", async () => {
+  const f = await fixture();
+  f.issues.length = 0;
+  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  expect(f.native.projects).toHaveLength(1);
+  expect(await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: false }, f.paseo)).toEqual({ status: "ready" });
+  expect(f.native.projects).toEqual([]);
+  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const projectId = f.native.projects[0].projectId;
+  f.native.workspacePageSize = 1;
+  f.native.workspaces.push({ id: "unrelated", projectId: "unrelated-project", cwd: f.home, title: "Unrelated" },
+    { id: "user-workspace", projectId, cwd: f.home, title: "User workspace" });
+  expect(await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: false }, f.paseo)).toEqual({ status: "ready" });
+  expect(f.native.projects[0].projectId).toBe(projectId);
+  expect(f.native.workspaces.every(workspace => !workspace.archived)).toBe(true);
+});
+
+it("an incomplete native workspace directory cannot authorize removing a disabled Project", async () => {
+  const f = await fixture();
+  f.issues.length = 0;
+  await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const fetch = f.host.fetchWorkspaces.bind(f.host);
+  f.host.fetchWorkspaces = (async () => ({ entries: [], pageInfo: { hasMore: true, nextCursor: null } })) as unknown as DaemonClient["fetchWorkspaces"];
+  expect(await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: false }, f.paseo)).toEqual({ status: "unavailable" });
+  expect(f.native.projects).toHaveLength(1);
+  f.host.fetchWorkspaces = fetch;
+  expect(await f.server.rpc(bootstrap, {}, f.paseo)).toEqual({ status: "ready" });
+  expect(f.native.projects).toEqual([]);
 });
 
 it("repeated bootstrap, title edits, token rotation and normal restart preserve native issue and tab identities", async () => {
@@ -563,7 +676,7 @@ it("a lost automatic archive response survives restart and restores the tabs cap
   const restarted = f.start();
   expect(await restarted.server.rpc(bootstrap, {}, f.paseo)).toEqual({ status: "ready" });
   await restarted.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
-  expect(f.native.workspaces.every(item => !item.archived)).toBe(true);
+  expect(f.native.workspaces.filter(item => !item.archived)).toHaveLength(2);
   expect(f.native.agents.every(item => !item.archivedAt)).toBe(true);
 });
 
@@ -571,6 +684,8 @@ it("retries a lost automatic workspace restore acknowledgement after restart wit
   const f = await fixture(60_000);
   await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   const original = f.native.agents.map(agent => ({ id: agent.id, cwd: agent.cwd, handle: agent.handle }));
+  // A user-created workspace retains this Project, so recovery uses restore.
+  f.native.workspaces.push({ id: "user-workspace", projectId: f.native.projects[0].projectId, cwd: f.home, title: "User workspace" });
   await f.server.rpc(enable, { workspaceId: "remote-workspace", enabled: false }, f.paseo);
   const restore = f.host.restoreWorkspace.bind(f.host);
   f.host.restoreWorkspace = async id => { await restore(id); throw new Error("workspace restore acknowledgement lost"); };

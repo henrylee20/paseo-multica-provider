@@ -9,9 +9,10 @@ import { deliveryRecordSchema } from "./delivery-state.js";
 import { connectionIdentitySchema, taskRuleSchema } from "../shared/contracts.js";
 import { issueAccessSchema } from "../shared/access.js";
 
-const projectSchema = z.object({ cwd: z.string(), name: z.string(), projectId: z.string().optional() });
+const projectSchema = z.object({ cwd: z.string(), name: z.string(), projectId: z.string().optional(), removed: z.boolean().optional() });
 const issueSchema = z.object({
   remoteWorkspaceId: z.string(), workspaceId: z.string(), cwd: z.string(), title: z.string(),
+  projectId: z.string().optional(),
   description: z.string(), updatedAt: z.string().optional(), workspaceCreated: z.boolean().default(false), mainAgentId: z.string().optional(),
   access: issueAccessSchema.optional(),
   archiveReason: z.enum(["rule_disabled", "filter_exit", "inaccessible"]).optional(), ruleArchivedAgentIds: z.array(z.string()).default([]), archivePending: z.boolean().default(false),

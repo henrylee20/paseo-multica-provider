@@ -130,6 +130,7 @@ async function fixture(initialRuns: Run[] = []) {
   }
   const host = {
     listHosts: async () => ({ self: { serverId: "owning-daemon" } }),
+    listProjects: async () => ({ projects: [] }),
     addProject: async () => ({ project: { projectId: "project", projectKind: "non_git" } }), renameProject: async () => {},
     fetchWorkspaces: async () => ({ entries: [], pageInfo: { hasMore: false } }),
     createWorkspace: async (input: { workspaceId: string }) => ({ workspace: { id: input.workspaceId } }), setWorkspaceTitle: async () => {},

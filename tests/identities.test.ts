@@ -90,6 +90,7 @@ async function fixture() {
   };
   const host = {
     listHosts: async () => ({ self: { serverId: "daemon" } }),
+    listProjects: async () => ({ projects: [] }),
     addProject: async (cwd: string) => { let project = projects.find(value => value.cwd === cwd); if (!project) { project = { projectId: `project-${projects.length}`, cwd }; projects.push(project); } return { project: { ...project, projectKind: "non_git" } }; },
     renameProject: async () => {}, fetchWorkspaces: async () => ({ entries: workspaces, pageInfo: { hasMore: false } }),
     createWorkspace: async (input: { workspaceId: string }) => { const workspace = { id: input.workspaceId }; workspaces.push(workspace); return { workspace }; }, setWorkspaceTitle: async () => {},

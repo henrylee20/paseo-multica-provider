@@ -3,9 +3,10 @@ import { join } from "node:path";
 import { setTimeout } from "node:timers/promises";
 import { createHostClient } from "@getpaseo/client/node";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
+import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
 
 /** These are the real low-level SDK methods, including explicit project placement. */
-export type NativeHost = Pick<DaemonClient, "listHosts" | "addProject" | "renameProject" | "fetchWorkspaces" |
+export type NativeHost = Pick<DaemonClient, "listHosts" | "addProject" | "renameProject" | "listProjects" | "removeProject" | "fetchWorkspaces" |
   "createWorkspace" | "setWorkspaceTitle" | "fetchAgents" | "importAgent" | "updateAgent" | "close" |
   "archiveWorkspace" | "restoreWorkspace" | "fetchAgent" | "archiveAgent" | "refreshAgent" | "fetchAgentTimeline">;
 
@@ -45,6 +46,41 @@ export async function findActiveWorkspace(host: NativeHost, workspaceId: string)
 
 export async function ensureWorkspaceActive(host: NativeHost, workspaceId: string) {
   if (!await findActiveWorkspace(host, workspaceId)) await host.restoreWorkspace(workspaceId);
+}
+
+/** removeProject also archives active children: prove emptiness across every page. */
+export async function projectHasActiveWorkspaces(host: NativeHost, projectId: string) {
+  let cursor: string | undefined;
+  const cursors = new Set<string>();
+  for (;;) {
+    const page = await host.fetchWorkspaces({ page: { limit: 100, cursor } });
+    if (page.entries.some(workspace => workspace.projectId === projectId)) return true;
+    if (!page.pageInfo.hasMore) return false;
+    const next = page.pageInfo.nextCursor;
+    if (!next || cursors.has(next)) throw new Error("Incomplete native workspace pagination");
+    cursors.add(next); cursor = next;
+  }
+}
+
+/** Reimport an archived handle to move its original agent, preserving native
+ * history and cwd. A rebuilt Project cannot reuse an old workspace ID. */
+export async function restoreMappedDiscussion(host: NativeHost, lifecycle: DiscussionLifecycle, agentId: string,
+  expected: { workspaceId: string; cwd: string }, address: { connectionKey: string; issueId: string }) {
+  const agent = (await host.fetchAgent(agentId))?.agent;
+  if (!agent || agent.cwd !== expected.cwd) throw new Error("Mapped native discussion unavailable");
+  if (agent.workspaceId !== expected.workspaceId) {
+    const rootId = agent.labels["multica.discussion"];
+    if (agent.provider !== "multica" || !agent.workspaceId || !rootId || agent.labels["multica.connection"] !== address.connectionKey ||
+      agent.labels["multica.issue"] !== address.issueId || !agent.persistence?.sessionId.startsWith("plugin:")) throw new Error("Mapped native discussion cannot be moved");
+    // A native history query may have reopened the retired agent. Close its
+    // local activity before archiving, so migration cannot interrupt a remote Run.
+    const release = await lifecycle.hold([{ ...address, rootId }]);
+    try { await archiveClosedDiscussion(host, agentId, { cwd: expected.cwd, workspaceId: agent.workspaceId }); }
+    finally { release(); }
+    const imported = await host.importAgent({ providerId: "multica", providerHandleId: agent.persistence.sessionId,
+      cwd: expected.cwd, workspaceId: expected.workspaceId, labels: agent.labels });
+    if (imported.id !== agentId) throw new Error("Native discussion identity changed");
+  } else if (agent.archivedAt) await host.refreshAgent(agentId);
 }
 
 /** Caller must keep this discussion's provider resource closed and reject new

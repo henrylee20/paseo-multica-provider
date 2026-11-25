@@ -7,7 +7,7 @@ import { taskRuleSchema, type TaskRule, type SyncStatus } from "../shared/contra
 import { issueQuery } from "./filters.js";
 import { WorkspaceEvents, type WorkspaceEvent } from "./workspace-events.js";
 import { remoteFetch, type AuthenticatedConnection } from "./connection.js";
-import { ensureWorkspaceActive, findActiveWorkspace, findNativeDiscussion, type NativeHost } from "./native-host.js";
+import { archiveClosedDiscussion, ensureWorkspaceActive, findActiveWorkspace, findNativeDiscussion, projectHasActiveWorkspaces, restoreMappedDiscussion, type NativeHost } from "./native-host.js";
 import { StateStore, connectionState } from "./state.js";
 import { hiddenAgent, restoreWorkspacePreservingHidden } from "./hiding.js";
 import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
@@ -170,10 +170,38 @@ export class SidebarSynchronizer {
     });
     // An already archived workspace ignores bulk archive. Restore its record
     // before bulk teardown, whose close path does not interrupt remote Runs.
-    if (!workspaceActive) await ensureWorkspaceActive(this.host!, issue.workspaceId);
-    const result = await this.host!.archiveWorkspace(issue.workspaceId);
-    if (result.error) throw new Error("Native workspace archive failed");
+    const project = (await this.options.store.read()).connections[connectionKey].projects[issue.remoteWorkspaceId];
+    if (!workspaceActive && (project?.removed || (issue.projectId && issue.projectId !== project?.projectId))) {
+      // The old parent may already be gone. Close reopened projections locally;
+      // restoring that retired workspace would fail with Unknown project.
+      const roots = ["main", ...Object.keys(issue.threads)];
+      const release = await this.options.lifecycle.hold(roots.map(rootId => ({ connectionKey, issueId, rootId })));
+      try { for (const agentId of activeAgents) await archiveClosedDiscussion(this.host!, agentId, issue); }
+      finally { release(); }
+    } else {
+      if (!workspaceActive) await ensureWorkspaceActive(this.host!, issue.workspaceId);
+      const result = await this.host!.archiveWorkspace(issue.workspaceId);
+      if (result.error) throw new Error("Native workspace archive failed");
+    }
     await this.options.store.update(state => { state.connections[connectionKey].issues[issueId].archivePending = false; });
+  }
+
+  private async removeDisabledProjects(connectionKey: string) {
+    const local = (await this.options.store.read()).connections[connectionKey];
+    for (const [workspaceId, cached] of Object.entries(local?.projects ?? {})) {
+      if (local.rules[workspaceId]?.enabled !== false || !cached.projectId) continue;
+      const project = (await this.host!.listProjects()).projects.find(project => project.projectId === cached.projectId);
+      if (project && (project.projectRootPath !== cached.cwd || project.projectKind !== "non_git")) continue;
+      if (project && await projectHasActiveWorkspaces(this.host!, cached.projectId)) continue;
+      // Preserve the old parent on each task before replacing the Project cache.
+      // Intent survives a lost remove acknowledgement and plugin restarts.
+      await this.options.store.update(state => {
+        const saved = state.connections[connectionKey];
+        saved.projects[workspaceId].removed = true;
+        for (const issue of Object.values(saved.issues)) if (issue.remoteWorkspaceId === workspaceId) issue.projectId ??= cached.projectId;
+      });
+      if (project) await this.host!.removeProject(cached.projectId);
+    }
   }
 
   /** A filtered list cannot distinguish a rule exit from loss of object access. */
@@ -229,12 +257,14 @@ export class SidebarSynchronizer {
     this.syncState.stage = "workspaces";
     const disabledIssues = Object.entries(local?.issues ?? {}).filter(([, issue]) =>
       local?.rules[issue.remoteWorkspaceId]?.enabled === false);
-    if (!enabled.length && !disabledIssues.length) { this.events.reconcile(connection, []); return; }
+    const disabledProjects = Object.keys(local?.projects ?? {}).some(id => local?.rules[id]?.enabled === false);
+    if (!enabled.length && !disabledIssues.length && !disabledProjects) { this.events.reconcile(connection, []); return; }
     const workspaces = enabled.length ? await this.workspaces(connection) : [];
     this.events.reconcile(connection, workspaces.filter(workspace => local?.rules[workspace.id]?.enabled));
     if (!this.host) this.host = await this.options.connectHost();
     if ((await this.host.listHosts()).self.serverId !== this.expectedServerId) throw new Error("Native host is not the owning daemon");
     for (const [issueId] of disabledIssues) await this.archive(connection.connectionKey, issueId, "rule_disabled");
+    await this.removeDisabledProjects(connection.connectionKey);
     for (const [workspaceId, rule] of enabled) {
       const workspace = workspaces.find(item => item.id === workspaceId);
       if (!workspace) throw new Error("Enabled workspace snapshot unavailable");
@@ -290,6 +320,8 @@ export class SidebarSynchronizer {
           continue;
         }
         const title = [issue.identifier, issue.title].filter(Boolean).join(" ");
+        const oldProjectId = previous?.projectId ?? local?.projects[workspaceId]?.projectId;
+        const rebuild = previous?.workspaceCreated && oldProjectId && oldProjectId !== projectId;
         const cwd = local?.issues[issue.id]?.cwd ?? join(projectDirectory, stableId(issue.id).slice(0, 20));
         await mkdir(cwd, { recursive: true });
         // Persist intent before native creation. A retry uses the same valid native ID.
@@ -298,8 +330,10 @@ export class SidebarSynchronizer {
           local.issues[issue.id] = { ...local.issues[issue.id], remoteWorkspaceId: workspaceId,
             access: { ...local.issues[issue.id]?.access, status: "available", reason: undefined, checkedAt: new Date().toISOString(),
               ...(access === "available" ? { objectVerifiedAt: new Date().toISOString() } : {}) },
-            workspaceId: local.issues[issue.id]?.workspaceId ?? `wks_${stableId(connection.connectionKey, issue.id).slice(0, 16)}`,
-            workspaceCreated: local.issues[issue.id]?.workspaceCreated ?? false,
+            projectId,
+            workspaceId: rebuild ? `wks_${stableId(connection.connectionKey, issue.id, projectId).slice(0, 16)}`
+              : local.issues[issue.id]?.workspaceId ?? `wks_${stableId(connection.connectionKey, issue.id).slice(0, 16)}`,
+            workspaceCreated: rebuild ? false : local.issues[issue.id]?.workspaceCreated ?? false,
             commentSourceTaskIds: local.issues[issue.id]?.commentSourceTaskIds ?? {},
             runs: local.issues[issue.id]?.runs ?? {}, runDetails: local.issues[issue.id]?.runDetails ?? {}, commentCreatedAt: local.issues[issue.id]?.commentCreatedAt ?? {},
             stopEpochs: local.issues[issue.id]?.stopEpochs ?? {}, stopRecords: local.issues[issue.id]?.stopRecords ?? {},
@@ -310,14 +344,25 @@ export class SidebarSynchronizer {
             ruleArchivedAgentIds: local.issues[issue.id]?.ruleArchivedAgentIds ?? [], archivePending: local.issues[issue.id]?.archivePending ?? false, cwd, title, description: issue.description ?? "", updatedAt: issue.updated_at };
         });
         const mapping = (await this.options.store.read()).connections[connection.connectionKey].issues[issue.id];
+        if (!mapping.workspaceCreated) {
+          if (!await findActiveWorkspace(this.host, mapping.workspaceId)) {
+            const result = await this.host.createWorkspace({ source: { kind: "directory", path: cwd, projectId }, title,
+              workspaceId: mapping.workspaceId, idempotencyKey: `multica:${connection.connectionKey}:${issue.id}` +
+                (mapping.workspaceId === `wks_${stableId(connection.connectionKey, issue.id).slice(0, 16)}` ? "" : `:${mapping.workspaceId}`) });
+            if (result.error || result.workspace?.id !== mapping.workspaceId) throw new Error("Native workspace creation failed");
+          }
+          if (mapping.manualHidden.workspace) {
+            const result = await this.host.archiveWorkspace(mapping.workspaceId);
+            if (result.error) throw new Error("Native workspace archive failed");
+          }
+          await this.options.store.update(state => { state.connections[connection.connectionKey].issues[issue.id].workspaceCreated = true; });
+        }
         if (mapping.manualHidden.workspace) continue;
         if (mapping.archiveReason) {
           await restoreWorkspacePreservingHidden(this.host, this.options.lifecycle, mapping, { connectionKey: connection.connectionKey, issueId: issue.id });
           for (const agentId of mapping.ruleArchivedAgentIds) {
             if (hiddenAgent(mapping, agentId)) continue;
-            const existing = await this.host.fetchAgent(agentId);
-            // refreshAgent interrupts a live agent; use it only for archived records.
-            if (existing?.agent.archivedAt) await this.host.refreshAgent(agentId);
+            await restoreMappedDiscussion(this.host, this.options.lifecycle, agentId, mapping, { connectionKey: connection.connectionKey, issueId: issue.id });
           }
           await this.options.store.update(state => {
             const saved = state.connections[connection.connectionKey].issues[issue.id];
@@ -325,14 +370,6 @@ export class SidebarSynchronizer {
             saved.archivePending = false;
             saved.ruleArchivedAgentIds = [];
           });
-        }
-        if (!mapping.workspaceCreated) {
-          if (!await findActiveWorkspace(this.host, mapping.workspaceId)) {
-            const result = await this.host.createWorkspace({ source: { kind: "directory", path: cwd, projectId }, title,
-              workspaceId: mapping.workspaceId, idempotencyKey: `multica:${connection.connectionKey}:${issue.id}` });
-            if (result.error || result.workspace?.id !== mapping.workspaceId) throw new Error("Native workspace creation failed");
-          }
-          await this.options.store.update(state => { state.connections[connection.connectionKey].issues[issue.id].workspaceCreated = true; });
         }
         await this.host.setWorkspaceTitle(mapping.workspaceId, title);
         let mainAgentId = mapping.mainAgentId;

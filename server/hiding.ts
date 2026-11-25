@@ -1,6 +1,6 @@
 import type { PluginHookAgent } from "@getpaseo/plugin/server";
 import { StateStore, type IssueMapping } from "./state.js";
-import { archiveClosedDiscussion, ensureWorkspaceActive, type NativeHost } from "./native-host.js";
+import { archiveClosedDiscussion, ensureWorkspaceActive, restoreMappedDiscussion, type NativeHost } from "./native-host.js";
 import { assertWritableIssue } from "./access.js";
 import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
 
@@ -25,7 +25,12 @@ export async function restoreWorkspacePreservingHidden(host: NativeHost, lifecyc
     try {
       for (const rootId of roots) {
         const agentId = discussionAgent(issue, rootId);
-        if (agentId) await archiveClosedDiscussion(host, agentId, issue);
+        if (agentId) {
+          const agent = (await host.fetchAgent(agentId))?.agent;
+          // Hidden discussions may still belong to the retired workspace shell.
+          if (!agent?.workspaceId || agent.cwd !== issue.cwd) throw new Error("Mapped native discussion unavailable");
+          await archiveClosedDiscussion(host, agentId, { cwd: issue.cwd, workspaceId: agent.workspaceId });
+        }
       }
     } finally { release(); }
   }
@@ -72,9 +77,7 @@ export class ManualHiding {
     if (input.rootId !== undefined && !agentId) throw new Error("Mapped discussion unavailable");
     await restoreWorkspacePreservingHidden(host, this.lifecycle, issue, input, input.rootId);
     if (agentId) {
-      const existing = await host.fetchAgent(agentId);
-      if (!existing?.agent || existing.agent.workspaceId !== issue.workspaceId || existing.agent.cwd !== issue.cwd) throw new Error("Mapped native discussion unavailable");
-      if (existing.agent.archivedAt) await host.refreshAgent(agentId);
+      await restoreMappedDiscussion(host, this.lifecycle, agentId, issue, input);
     }
     await this.store.update(state => {
       const saved = state.connections[input.connectionKey].issues[input.issueId];
