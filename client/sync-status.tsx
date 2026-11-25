@@ -1,7 +1,4 @@
-import { useEffect, useState } from "react";
-import { Text, View } from "react-native";
-import { useRpc, type PluginTimelineItemProps } from "@getpaseo/plugin/client";
-import { syncStatus, type SyncStatus } from "../shared/contracts.js";
+import type { SyncStatus } from "../shared/contracts.js";
 import { formatTime } from "./format.js";
 
 const stages: Record<SyncStatus["stage"], string> = { idle: "", connection: "连接验证", workspaces: "Multica 工作区核对", issues: "任务与筛选核对", history: "讨论与执行摘要核对" };
@@ -23,42 +20,12 @@ export interface SyncDescription {
 export function describeSync(status: SyncStatus | null, disconnected: boolean): SyncDescription {
   if (disconnected) return { label: "无法读取 daemon 同步状态；已读历史仍可阅读。", short: "无法读取", message: "已读历史仍可阅读。", tone: "danger" };
   if (!status) return { label: "正在读取同步状态…", short: "读取中", tone: "muted" };
-  const progress = [stages[status.stage], status.status === "syncing" ? `Multica 工作区 ${status.completedWorkspaces}/${status.enabledWorkspaces}` : ""].filter(Boolean).join(" · ") || undefined;
+  const progress = [stages[status.stage],
+    status.status === "syncing" ? `Multica 工作区 ${status.completedWorkspaces}/${status.enabledWorkspaces}` : ""
+  ].filter(Boolean).join(" · ") || undefined;
   return {
     label: [labels[status.status], progress].filter(Boolean).join(" · "), short: shortLabels[status.status], progress,
     message: status.message || undefined, lastSuccess: formatTime(status.lastSuccessAt),
     tone: status.status === "unavailable" ? "warning" : "muted",
   };
-}
-
-/** One daemon-owned status is visible from management and every discussion. */
-export function useSyncStatus() {
-  const read = useRpc(syncStatus);
-  const [status, setStatus] = useState<SyncStatus | null>(null);
-  const [disconnected, setDisconnected] = useState(false);
-  useEffect(() => {
-    let active = true;
-    let pending = false;
-    async function update() {
-      if (pending) return;
-      pending = true;
-      try { const value = await read({}); if (active) { setStatus(value); setDisconnected(false); } }
-      catch { if (active) setDisconnected(true); }
-      finally { pending = false; }
-    }
-    void update();
-    const timer = setInterval(() => { void update(); }, 5_000);
-    return () => { active = false; clearInterval(timer); };
-  }, [read]);
-  return describeSync(status, disconnected);
-}
-
-export function SyncState({ theme }: Pick<PluginTimelineItemProps, "theme">) {
-  const sync = useSyncStatus();
-  const muted = { color: theme.colors.foregroundMuted };
-  return <View style={{ gap: 4 }}>
-    <Text style={muted}>{sync.label}</Text>
-    {sync.message && sync.tone !== "danger" ? <Text style={muted}>{sync.message}</Text> : null}
-    {sync.lastSuccess ? <Text style={muted}>上次完成核对：{sync.lastSuccess}</Text> : null}
-  </View>;
 }

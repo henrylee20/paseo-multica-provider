@@ -10,7 +10,9 @@ export async function nativeOriginals(host: NativeHost, agentId: string) {
   let cursor: NonNullable<Page["startCursor"]> | undefined;
   let epoch: string | undefined;
   for (;;) {
-    const page = await host.fetchAgentTimeline(agentId, { projection: "canonical", direction: cursor ? "before" : "tail", cursor, limit: 200, mergeWindow: false });
+    const page = await host.fetchAgentTimeline(agentId, {
+      projection: "canonical", direction: cursor ? "before" : "tail", cursor, limit: 200, mergeWindow: false
+    });
     // Installed 0.15.3 can return projected pages for this canonical request.
     // Both preserve source messageId; incomplete/changed windows are not authority.
     if (page.error || page.agentId !== agentId || page.gap || page.staleCursor || page.reset || (epoch && page.epoch !== epoch)) {
@@ -34,7 +36,8 @@ export function hasNativeOriginal(entries: Awaited<ReturnType<typeof nativeOrigi
       (item.messageId === row.commentId || (row.role === "user" && row.clientMessageId !== undefined && item.type === "user_message" && item.clientMessageId === row.clientMessageId));
   });
   if (!matches.length) return false;
-  if (matches.some(entry => entry.item.type !== type) || matches.sort((a, b) => a.seqStart - b.seqStart).map(entry => "text" in entry.item ? entry.item.text : "").join("") !== row.text) {
+  if (matches.some(entry => entry.item.type !== type) ||
+    matches.sort((a, b) => a.seqStart - b.seqStart).map(entry => "text" in entry.item ? entry.item.text : "").join("") !== row.text) {
     throw new Error("Native source comment differs from cached original; retain history without replay");
   }
   return true;

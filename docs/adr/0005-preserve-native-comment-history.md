@@ -20,3 +20,29 @@ Paseo 0.15.3 实际导入时，notification 映射未保留 provider 稳定 ID�
 #10 的自身评论还保存原输入 clientMessageId。宿主会把提供此 ID 的 user_message 对应到同一原生乐观输入，公开 canonical 记录可能以 clientMessageId 作为 item.messageId，来源 commentId 则在宿主内部单独关联。因此缓存原文核对还接受相同 clientMessageId 的同角色／全文精确匹配，不能只依赖来源 ID。主讨论的新输入与其新建 Thread 根分属不同 native agent；新 Thread 导入不复用主讨论的 clientMessageId。插件接收但尚未取得回执的输入从独立 deliveries 恢复，不能伪装成远端已保存评论。
 
 真实 0.15.3 重启验收发现，同一已保存回复可同时存在于 Thread 评论缓存与 durable delivery 中。provider replay 与 `history:skip` 缺失恢复因此共用本次 native 会话的原文身份集合，以角色／commentId 与自身输入 clientMessageId 关联两种表示；已经核对存在的评论原文也进入该集合。来源插件行仍独立投影，但同一轮不再分别追加评论原文与投递原输入。集合随会话关闭释放，不跨主讨论或新 Thread 去重，也不按相同正文推断未知回执；失败、待核实与仅本地保存的缺失输入仍逐条恢复。正常实时输入后的精确回执 echo 继续携带原 clientMessageId，供宿主关联其乐观输入。
+
+## 修订：精简时间线（OPT-01）
+
+不再为每条原生评论追加独立来源卡；来源时间仍保存在缓存和 provider 事件中，更正、删除及系统事件继续显示已有来源时间。Thread 挂载仍读取历史，仅在读取或同步失败时显示提示；主讨论保留触发历史读取的隐藏条目，不再显示冗余的任务事件头卡。成功投递仅在主讨论提示新 Thread 已建立，可从侧边栏打开。
+
+## 修订：评论回声关联（OPT-06）
+
+删除 durable delivery 原输入重放和恢复路径。成功投递只保存 clientMessageId、commentId 与讨论归属；Thread 缓存原文仍携带 clientMessageId，与来源 commentId 共用会话原文去重集合。同步在在途 POST 完成后关联回声，失败输入不另行持久化或重放。
+
+## 修订：依靠原生归档历史（OPT-08）
+
+删除独立只读快照浏览器与失权二次取证。完整筛选列表中消失的任务统一按筛选退出归档，原生历史及已读缓存保留；远端写入遇到 403／404 直接报告错误，不再由本地访问状态拦截。
+
+AskUser 卡片同样移除只读快照集成与 inaccessible 二次取证；完整卡片继续由原生时间线和 AskUser 缓存读取，403／404 直接报告远端错误，指定答复者、卡片终态与隐藏／归档保护保留。
+
+## 修订：由 provider 推送描述（OPT-04）
+
+删除讨论内同步状态轮询和任务描述观测轮询；描述更新由 provider 的现有订阅推送同一稳定条目。Thread 挂载仍读取历史，仅显示读取失败及重试入口。
+
+## 修订：恢复即时输入投影
+
+本地校验通过后，在 prompt_result 之前直接发出携带 clientMessageId 和原正文的原生 user_message，保留已验收的宿主输入行为。远端失败时原生输入保留，随后追加一条错误；插件仍不持久化失败投递或在重启后另行恢复它。
+
+## 修订：保留原生时间线完整核对（OPT-10）
+
+评估过移除恢复时的全量回扫，核对 Paseo 0.17.4 的 plugin-provider / timeline-projection 实现后保留。普通消息的 item ID 去重仅存在于每个 provider 会话的内存中，不保证跨重启去重；持久投影的稳定身份合并仅覆盖工具和插件条目，自身输入另按 clientMessageId 关联回声。因此仍需完整分页核对原生原文，避免缓存已保存而宿主尚未落盘时漏消息，或无差别重放造成重复。

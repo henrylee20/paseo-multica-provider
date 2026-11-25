@@ -1,7 +1,7 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState } from "react";
 import { Text, View } from "react-native";
 import { useRpc, type PluginSurfaceProps } from "@getpaseo/plugin/client";
-import { SettingsAction, SettingsCard, SettingsRow, SettingsSelect, SettingsSwitch } from "@getpaseo/plugin/client/ui";
+import { SettingsAction, SettingsCard, SettingsRow, SettingsSwitch } from "@getpaseo/plugin/client/ui";
 import { workspaceCatalog, workspaceRule, type TaskRule } from "../shared/contracts.js";
 import { SubHeading } from "./ui-kit.js";
 import type { z } from "zod";
@@ -9,11 +9,9 @@ import type { z } from "zod";
 type Catalog = z.output<typeof workspaceCatalog.output>;
 type Theme = PluginSurfaceProps["theme"];
 type Choice = { id: string; name: string };
-type StatusMode = "category" | "status";
 
 const categories: Array<{ id: TaskRule["statusCategories"][number]; name: string }> = [
   { id: "unstarted", name: "未开始" }, { id: "started", name: "进行中" }, { id: "done", name: "已完成" }, { id: "closed", name: "已关闭" }];
-const defaultCategories: TaskRule["statusCategories"] = ["unstarted", "started"];
 const actorName = { member: "成员", agent: "Agent", squad: "Squad" };
 /** Long catalogs (labels, members) stay readable: the rest is one press away, selected items always show. */
 const collapsedLimit = 8;
@@ -23,21 +21,21 @@ const categoryNames = (ids: string[]) => ids.map(id => categories.find(item => i
 /** A one-line reading of a saved rule that needs no catalog request. */
 export function describeRule(rule: TaskRule) {
   const parts = [rule.statuses.length ? `具体状态 ${rule.statuses.length} 项` : rule.statusCategories.length ? categoryNames(rule.statusCategories) : "状态不限"];
-  if (rule.statuses.length && rule.statusCategories.length) parts.push(`类别 ${categoryNames(rule.statusCategories)}`);
   const limited = ([["负责人", rule.assignees.length], ["Multica 项目", rule.projectIds.length], ["标签", rule.labelIds.length]] as const).filter(([, count]) => count > 0);
   parts.push(...limited.map(([name, count]) => `${name} ${count} 项`));
   if (!limited.length) parts.push("其他条件不限");
   return parts.join(" · ");
 }
 
-function Choices({ title, values, choices, onChange, disabled, theme, leading }: { title: string; values: string[]; choices: Choice[]; onChange(values: string[]): void; disabled: boolean; theme: Theme; leading?: ReactNode }) {
+function Choices({ title, values, choices, onChange, disabled, theme }: {
+  title: string; values: string[]; choices: Choice[]; onChange(values: string[]): void; disabled: boolean; theme: Theme
+}) {
   const [expanded, setExpanded] = useState(false);
   const all = [...choices, ...values.filter(id => !choices.some(item => item.id === id)).map(id => ({ id, name: `${id}（当前目录不可用）` }))];
   const visible = expanded ? all : all.filter((item, index) => index < collapsedLimit || values.includes(item.id));
   return <View style={{ gap: 8 }}>
     <SubHeading theme={theme}>{title} · {values.length ? `已选 ${values.length} 项` : "不限"}</SubHeading>
     <SettingsCard>
-      {leading}
       {visible.map(item => <SettingsSwitch key={item.id} label={item.name} value={values.includes(item.id)} disabled={disabled}
         onValueChange={checked => onChange(checked ? [...values, item.id] : values.filter(value => value !== item.id))} />)}
       {!all.length ? <SettingsRow key="empty" label="当前没有可选项" hint="不限制此字段。" /> : null}
@@ -48,37 +46,43 @@ function Choices({ title, values, choices, onChange, disabled, theme, leading }:
 }
 
 export function WorkspaceRuleEditor({ workspaceId, connectionKey, initialRule, theme, onSaved, onCancel, onDirtyChange }: {
-  workspaceId: string; connectionKey?: string; initialRule: TaskRule; theme: Theme; onSaved(rule: TaskRule): void; onCancel(): void; onDirtyChange?(dirty: boolean): void;
+  workspaceId: string; connectionKey?: string; initialRule: TaskRule; theme: Theme;
+  onSaved(rule: TaskRule): void; onCancel(): void; onDirtyChange?(dirty: boolean): void;
 }) {
   const load = useRpc(workspaceCatalog);
   const save = useRpc(workspaceRule);
   const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [rule, setRule] = useState(initialRule);
-  const [mode, setMode] = useState<StatusMode>(initialRule.statuses.length ? "status" : "category");
   const [catalogFailed, setCatalogFailed] = useState(false);
   const [saveFailure, setSaveFailure] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     let active = true;
-    void load({ workspaceId, connectionKey }).then(result => { if (active) { setCatalog(result); setCatalogFailed(false); } }, () => { if (active) setCatalogFailed(true); });
+    void load({ workspaceId, connectionKey }).then(result => {
+      if (active) {
+        setCatalog(result);
+        setCatalogFailed(false);
+      }
+    }, () => {
+      if (active)
+        setCatalogFailed(true);
+    });
     return () => { active = false; };
   }, [load, workspaceId, connectionKey, attempt]);
   function update(next: TaskRule) {
     setRule(next);
     onDirtyChange?.(JSON.stringify(next) !== JSON.stringify(initialRule));
   }
-  function changeMode(next: StatusMode) {
-    if (next === mode) return;
-    setMode(next);
-    // Categories and specific statuses combine with AND, so one mode at a time keeps the rule readable.
-    update(next === "status" ? { ...rule, statusCategories: [] } : { ...rule, statuses: [], statusCategories: rule.statusCategories.length ? rule.statusCategories : defaultCategories });
-  }
+  const statuses = catalog && rule.statusCategories.length
+    ? catalog.statuses.filter(item => rule.statusCategories.some(category => category === item.category) && (!rule.statuses.length || rule.statuses.includes(item.key))).map(item => item.key)
+    : rule.statuses;
   async function persist() {
     setSaving(true);
     try {
-      const result = await save({ workspaceId, connectionKey, rule });
-      if (result.status === "ready") { onDirtyChange?.(false); onSaved(rule); }
+      const savedRule = { ...rule, statuses, statusCategories: [] };
+      const result = await save({ workspaceId, connectionKey, rule: savedRule });
+      if (result.status === "ready") { onDirtyChange?.(false); onSaved(savedRule); }
       else setSaveFailure(result.message ?? "规则同步失败，已保存的规则会在连接恢复后重新核对。");
     } catch { setSaveFailure("规则保存失败，请重试。"); }
     finally { setSaving(false); }
@@ -88,22 +92,18 @@ export function WorkspaceRuleEditor({ workspaceId, connectionKey, initialRule, t
     {catalogFailed ? <SettingsAction label="无法读取筛选目录" hint="请检查连接后重试。" actionLabel="重试" onPress={() => setAttempt(value => value + 1)} />
       : <SettingsRow label="正在读取筛选目录…" />}
   </SettingsCard>;
-  const statusMode = <SettingsSelect key="mode" label="筛选方式" value={mode} disabled={saving} onValueChange={changeMode}
-    hint={mode === "category" ? "按状态类别；默认只导入未开始和进行中。" : "按具体状态；不选表示不限状态。"}
-    options={[{ label: "按状态类别", value: "category" }, { label: "按具体状态", value: "status" }]} />;
-  const legacyCategories = mode === "status" && rule.statusCategories.length
-    ? <SettingsRow key="legacy" label="另有状态类别限制" hint={`${categoryNames(rule.statusCategories)}；修改具体状态时清除。`} /> : null;
   return <View style={{ gap: 16 }}>
     <Text style={muted}>字段之间同时满足；同一字段多选时任一命中；不选表示不限。</Text>
-    {mode === "category"
-      ? <Choices title="状态" theme={theme} leading={statusMode} choices={categories} values={rule.statusCategories} disabled={saving}
-        onChange={statusCategories => update({ ...rule, statusCategories: statusCategories as TaskRule["statusCategories"] })} />
-      : <Choices title="状态" theme={theme} leading={[statusMode, legacyCategories]} values={rule.statuses} disabled={saving}
-        choices={catalog.statuses.map(item => ({ id: item.key, name: `${item.name} · ${categories.find(category => category.id === item.category)?.name ?? item.category}` }))}
-        onChange={statuses => update({ ...rule, statuses, statusCategories: [] })} />}
+    <Choices title="状态" theme={theme} values={statuses} disabled={saving}
+      choices={catalog.statuses.map(item => ({ id: item.key,
+        name: `${item.name} · ${categories.find(category => category.id === item.category)?.name ?? item.category}` }))}
+      onChange={statuses => update({ ...rule, statuses, statusCategories: [] })} />
     <Choices title="负责人" theme={theme} disabled={saving} values={rule.assignees.map(item => `${item.type}:${item.id}`)}
       choices={catalog.assignees.map(item => ({ id: `${item.type}:${item.id}`, name: `${actorName[item.type]} · ${item.name}` }))}
-      onChange={values => update({ ...rule, assignees: values.map(value => { const index = value.indexOf(":"); return { type: value.slice(0, index) as TaskRule["assignees"][number]["type"], id: value.slice(index + 1) }; }) })} />
+      onChange={values => update({ ...rule, assignees: values.map(value => {
+        const index = value.indexOf(":");
+        return { type: value.slice(0, index) as TaskRule["assignees"][number]["type"], id: value.slice(index + 1) };
+      }) })} />
     <Choices title="Multica 项目" theme={theme} choices={catalog.projects} values={rule.projectIds} disabled={saving} onChange={projectIds => update({ ...rule, projectIds })} />
     <Choices title="标签" theme={theme} choices={catalog.labels} values={rule.labelIds} disabled={saving} onChange={labelIds => update({ ...rule, labelIds })} />
     <SettingsCard>

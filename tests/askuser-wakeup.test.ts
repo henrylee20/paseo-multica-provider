@@ -5,12 +5,12 @@ import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import type { PaseoApi } from "@getpaseo/client";
 import type { ProviderConnection, ProviderEvent } from "@getpaseo/plugin/server/provider";
-import { workspaceEnable, workspaceRule, syncBootstrap } from "../shared/contracts.js";
+import { workspaceEnable, workspaceRule } from "../shared/contracts.js";
 import { askuserReopen } from "../shared/askuser.js";
 import { hiddenRestore } from "../shared/hiding.js";
 import { createServerContribution } from "../server/contribute.js";
 import type { NativeHost } from "../server/native-host.js";
-import { FakeServer } from "./support/fake-server.js";
+import { FakeServer, resync } from "./support/fake-server.js";
 
 const cleanup: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const dispose of cleanup.splice(0).reverse()) await dispose(); });
@@ -120,7 +120,7 @@ async function fixture() {
     const source = comments.get(issueId)!.find(c => c.id === root)!; source.attachments = [attachment(root)]; documents.set(root, document);
   };
   return { ...started, start, connect, open, agents, workspaces, thread, question, events, registrationOrder, wakes, refreshes, requests, comments, timelines, runs, issues, documents, remote, wakeControl, nativeControl, paseo,
-    setClock: (value: Date) => { clock = value; }, sync: () => server.rpc(syncBootstrap, {}, paseo),
+    setClock: (value: Date) => { clock = value; }, sync: () => resync(server, paseo, "workspace"),
     disconnect: async () => { await provider?.close(); provider = undefined; opened.clear(); } };
 }
 
@@ -276,7 +276,7 @@ it.each(["read-only", "answered", "skipped", "invalid", "timeline unavailable"])
   expect(f.wakes).toEqual([]); expect(f.events.filter(e => e.type === "session.permission")).toEqual([]);
 });
 
-it.each(["tab hidden", "workspace hidden", "rule disabled", "filter exit", "inaccessible", "native archived", "native workspace archived"])("does not wake %s discussions", async state => {
+it.each(["tab hidden", "workspace hidden", "rule disabled", "filter exit", "attachment forbidden", "native archived", "native workspace archived"])("does not wake %s discussions", async state => {
   const f = await fixture();
   const thread = f.thread();
   if (state === "tab hidden") {
@@ -286,7 +286,7 @@ it.each(["tab hidden", "workspace hidden", "rule disabled", "filter exit", "inac
   if (state === "workspace hidden") await f.server.hook("workspace.archive.after", { workspace: { id: thread.workspaceId, cwd: thread.cwd, projectId: "project", name: "Task", archivedAt: stamp } }, f.paseo);
   if (state === "rule disabled") await f.server.rpc(workspaceEnable, { workspaceId: "workspace", enabled: false }, f.paseo);
   if (state === "filter exit") { f.issues.length = 0; await f.server.rpc(workspaceRule, { workspaceId: "workspace", rule: { statusCategories: ["started"] } }, f.paseo); }
-  if (state === "inaccessible") f.remote.issueStatus = 403;
+  if (state === "attachment forbidden") f.remote.issueStatus = 403;
   if (state === "native archived") thread.archivedAt = stamp;
   if (state === "native workspace archived") f.workspaces[0].archivedAt = stamp;
   f.question(); await f.sync(); await f.sync();

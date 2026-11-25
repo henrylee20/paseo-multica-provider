@@ -1,14 +1,14 @@
-import { assertWritableIssue } from "./access.js";
 import { nativeOriginals, hasNativeOriginal } from "./projection-recovery.js";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { ProviderTimelineItem } from "@getpaseo/plugin/server/provider";
 import { remoteFetch, type AuthenticatedConnection } from "./connection.js";
 import { findNativeDiscussion, type NativeHost } from "./native-host.js";
-import { StateStore } from "./state.js";
+import { StateStore, cachedWorkspace } from "./state.js";
 import type { IssueMapping } from "./state.js";
+import type { DiscussionMetadata } from "./discussion-metadata.js";
 import type { StoredRow } from "./thread-state.js";
-import { remoteJson, workspaceSchema, type RemoteWorkspace } from "./sync.js";
+import { workspaceAgents, workspaceMembers, type RemoteWorkspace } from "./sync.js";
 import { discussionKeys } from "../shared/discussion.js";
 import type { threadAddress } from "../shared/threads.js";
 import type { AskUsers } from "./askuser.js";
@@ -61,7 +61,9 @@ function body(comment: Comment, apiUrl: string): string {
 }
 
 export function projectRow(address: Address, row: StoredRow): ProviderTimelineItem {
-  if (row.role === "user") return { type: "user_message", id: row.id, messageId: row.commentId, text: row.text, ...(row.clientMessageId ? { clientMessageId: row.clientMessageId } : {}) };
+  if (row.role === "user")
+    return { type: "user_message", id: row.id, messageId: row.commentId, text: row.text,
+      ...(row.clientMessageId ? { clientMessageId: row.clientMessageId } : {}) };
   if (row.role === "assistant") return { type: "assistant_message", id: row.id, messageId: row.commentId, text: row.text };
   // Row payloads stay below the host's 64 KiB limit; full correction text stays available via RPC.
   const preview = [...row.text].slice(0, 6000).join("");
@@ -77,7 +79,7 @@ export class ThreadSynchronizer {
   private readonly opened = new Set<string>();
   private readonly pending = new Map<string, Promise<void>>();
   private waitForDeliveries: () => Promise<void> = async () => {};
-  constructor(private readonly store: StateStore, private readonly connection: () => Promise<AuthenticatedConnection>, private readonly askusers: AskUsers) {}
+  constructor(private readonly store: StateStore, private readonly connection: () => Promise<AuthenticatedConnection>, private readonly metadata: DiscussionMetadata, private readonly askusers: AskUsers) {}
   coordinateDeliveries(wait: () => Promise<void>) { this.waitForDeliveries = wait; }
   subscribe(address: Address, deliver: (row: StoredRow, includeOriginal?: boolean) => void, recovery = false) {
     const listener = { deliver, recovery };
@@ -112,9 +114,11 @@ export class ThreadSynchronizer {
       const query = new URLSearchParams({ ...mode, ...cursor });
       const response = await remoteFetch(connection, `/api/issues/${encodeURIComponent(issueId)}/comments?${query}`, { headers: { "X-Workspace-Slug": workspace.slug } });
       if (!response.ok) { await response.body?.cancel(); throw new Error("Comment history unavailable"); }
-      if (response.headers.get("X-Comments-Truncated")?.toLowerCase() === "true") { await response.body?.cancel(); throw new Error("Remote comments were truncated"); }
+      if (response.headers.get("X-Comments-Truncated")?.toLowerCase() === "true") {
+        await response.body?.cancel();
+        throw new Error("Remote comments were truncated");
+      }
       const page = z.array(commentSchema).parse(await response.json());
-      await connection.assertCurrent?.();
       for (const comment of page) {
         if (comment.issue_id !== issueId) throw new Error("Comment belongs to another issue");
         comments.set(comment.id, comment);
@@ -177,30 +181,27 @@ export class ThreadSynchronizer {
         agentId = (await findNativeDiscussion(host, { workspaceId: issue.workspaceId, provider: "multica", labels }))?.id;
         agentId ??= (await host.importAgent({ providerId: "multica", providerHandleId: `plugin:${JSON.stringify(threadPersistence(connection.connectionKey, issueId, root.id))}`,
           cwd: issue.cwd, workspaceId: issue.workspaceId, labels })).id;
+        await this.metadata.write(agentId, connection.connectionKey, issueId);
         await this.store.update(state => { state.connections[connection.connectionKey].issues[issueId].threads[root.id].agentId = agentId; });
       }
       await host.updateAgent(agentId, { name: mapping.title });
       const address = { connectionKey: connection.connectionKey, issueId, rootId: root.id };
       if (mapping.historyLoaded && this.opened.has(key(address))) await this.refresh(connection, workspace, address, false);
     }
-    if (this.opened.has(key({ connectionKey: connection.connectionKey, issueId, rootId: "main" })) && (await this.store.read()).connections[connection.connectionKey].issues[issueId].mainHistory.historyLoaded) {
+    if (this.opened.has(key({ connectionKey: connection.connectionKey, issueId, rootId: "main" })) &&
+      (await this.store.read()).connections[connection.connectionKey].issues[issueId].mainHistory.historyLoaded) {
       await this.refresh(connection, workspace, { connectionKey: connection.connectionKey, issueId, rootId: "main" }, false);
     }
   }
   async open(address: Address): Promise<{ status: "ready" | "cached" | "unavailable"; message?: string }> {
     const issue = (await this.store.read()).connections[address.connectionKey]?.issues[address.issueId];
     const thread = issue ? projectionHistory(issue, address.rootId) : undefined;
-    if (!thread) return { status: "unavailable", message: "此 Thread 尚未映射。" };
-    if (issue?.access?.status === "inaccessible") return { status: thread.historyLoaded ? "cached" : "unavailable",
-      message: `此任务已不可访问，仅显示只读缓存。最后完整同步：${issue.access.lastSuccessAt ?? "未知"}。` };
+    if (!issue || !thread) return { status: "unavailable", message: "此 Thread 尚未映射。" };
     this.opened.add(key(address));
     try {
-      assertWritableIssue(issue);
-      const connection = await this.connection();
+        const connection = await this.connection();
       if (connection.connectionKey !== address.connectionKey) throw new Error("Connection identity changed");
-      const workspaces = await remoteJson(connection, "/api/workspaces", z.array(workspaceSchema)) as RemoteWorkspace[];
-      const workspace = workspaces.find(value => value.id === issue.remoteWorkspaceId);
-      if (!workspace) throw new Error("Workspace unavailable");
+      const workspace = cachedWorkspace(await this.store.read(), address.connectionKey, issue);
       await this.refresh(connection, workspace, address);
       return { status: "ready" };
     } catch { return { status: thread.historyLoaded ? "cached" : "unavailable", message: "无法完整读取远端 Thread；保留已读的本地历史。" }; }
@@ -209,19 +210,21 @@ export class ThreadSynchronizer {
     const id = key(address);
     const operation = (this.pending.get(id) ?? Promise.resolve()).catch(() => {}).then(async () => {
       const issue = (await this.store.read()).connections[address.connectionKey].issues[address.issueId];
-      assertWritableIssue(issue);
-      const rootIds = address.rootId === "main" ? issue.systemRootIds : [address.rootId];
+        const rootIds = address.rootId === "main" ? issue.systemRootIds : [address.rootId];
       const comments = new Map<string, Comment>();
-      for (const rootId of rootIds) for (const [id, comment] of await this.pages(connection, workspace, address.issueId, { thread: rootId, tail: "100" })) comments.set(id, comment);
+      for (const rootId of rootIds)
+        for (const [id, comment] of await this.pages(connection, workspace, address.issueId, { thread: rootId, tail: "100" }))
+          comments.set(id, comment);
       const roots = rootsOf(comments);
-      if (rootIds.some(rootId => !comments.has(rootId)) || [...comments.values()].some(comment => comment.content_truncated || !rootIds.includes(roots.get(comment.id) ?? ""))) {
+      if (rootIds.some(rootId => !comments.has(rootId)) ||
+        [...comments.values()].some(comment => comment.content_truncated || !rootIds.includes(roots.get(comment.id) ?? ""))) {
         throw new Error("Thread snapshot is incomplete");
       }
       const [members, agents] = await Promise.all([
         [...comments.values()].some(comment => comment.type === "comment" && comment.author_type === "member" && comment.author_id !== connection.userId)
-          ? remoteJson(connection, `/api/workspaces/${encodeURIComponent(workspace.id)}/members`, z.array(z.object({ user_id: z.string(), name: z.string() })), workspace) : [],
+          ? workspaceMembers(connection, workspace) : [],
         [...comments.values()].some(comment => comment.type === "comment" && comment.author_type === "agent")
-          ? remoteJson(connection, `/api/agents?workspace_id=${encodeURIComponent(workspace.id)}&include_archived=true`, z.array(z.object({ id: z.string(), name: z.string() })), workspace) : [],
+          ? workspaceAgents(connection, workspace) : [],
       ]) as [Array<{ user_id: string; name: string }>, Array<{ id: string; name: string }>];
       const newRows: StoredRow[] = [];
       // A WS invalidation can beat the HTTP receipt. Wait for active POSTs so
@@ -252,18 +255,18 @@ export class ThreadSynchronizer {
           if (deleted || previous) {
             const category = deleted ? "deletion" : "correction";
             const revision = comment.revision ?? hash([fingerprint, comment.updated_at]);
-            append({ ...source, id: `multica:${category}:${comment.id}:${revision}`, role: "event", category, text: deleted ? "此评论已在 Multica 删除；保留先前读到的原始记录（如有）。" : text });
+            append({ ...source, id: `multica:${category}:${comment.id}:${revision}`, role: "event", category,
+              text: deleted ? "此评论已在 Multica 删除；保留先前读到的原始记录（如有）。" : text });
           } else if (comment.author_type === "system" || comment.type !== "comment") {
             append({ ...source, id: `multica:comment:${comment.id}`, role: "event", category: "system", text });
           } else {
             const own = comment.author_type === "member" && comment.author_id === connection.userId;
-            const outgoing = own ? Object.values(issue.deliveries).find(record => record.rootId === address.rootId && record.commentId === comment.id) : undefined;
-            // Unknown receipts cannot be identified by body alone. Keep a
-            // potentially matching echo unprojected until receipt recovery.
-            if (own && !outgoing && Object.values(issue.deliveries).some(record => record.rootId === address.rootId && record.claimedAt && (record.status === "received" || record.status === "pending_verification") && record.body === comment.content)) continue;
+            const outgoing = own
+              ? Object.entries(issue.commentInputs).find(([, input]) => input.rootId === address.rootId && input.commentId === comment.id)?.[0] : undefined;
             const name = comment.author_type === "member" ? members.find(member => member.user_id === comment.author_id)?.name ?? `成员 ${comment.author_id}`
               : agents.find(agent => agent.id === comment.author_id)?.name ?? `Agent ${comment.author_id}`;
-            append({ ...source, id: `multica:comment:${comment.id}`, role: own ? "user" : "assistant", text: own ? text : `${name}: \n\n${text}`, ...(outgoing ? { clientMessageId: outgoing.clientMessageId } : {}) });
+            append({ ...source, id: `multica:comment:${comment.id}`, role: own ? "user" : "assistant",
+              text: own ? text : `${name}: \n\n${text}`, ...(outgoing ? { clientMessageId: outgoing } : {}) });
           }
           thread.observed[comment.id] = { fingerprint, deleted, revision: comment.revision, updatedAt: comment.updated_at };
         }

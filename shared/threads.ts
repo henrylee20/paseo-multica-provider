@@ -12,5 +12,3 @@ export const commentEventSchema = threadAddress.extend({
   text: z.string(), truncated: z.boolean(), sourceCreatedAt: z.string().optional(), sourceUpdatedAt: z.string().optional(),
 });
 export const commentEventDetail = defineRpc({ name: "thread.event", input: threadAddress.extend({ recordId: z.string() }), output: z.object({ text: z.string() }) });
-export const threadResolve = defineRpc({ name: "thread.resolve", input: z.object({ connectionKey: z.string(), issueId: z.string(), commentIds: z.array(z.string()) }),
-  output: z.object({ comments: z.array(z.object({ commentId: z.string(), status: z.enum(["resolved", "unresolved"]), rootId: z.string().optional(), createdAt: z.string().optional() })) }) });

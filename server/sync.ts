@@ -8,17 +8,21 @@ import { issueQuery } from "./filters.js";
 import { WorkspaceEvents, type WorkspaceEvent } from "./workspace-events.js";
 import { remoteFetch, type AuthenticatedConnection } from "./connection.js";
 import { archiveClosedDiscussion, ensureWorkspaceActive, findActiveWorkspace, findNativeDiscussion, projectHasActiveWorkspaces, restoreMappedDiscussion, type NativeHost } from "./native-host.js";
-import { StateStore, connectionState } from "./state.js";
+import { StateStore, connectionState, issueSchema } from "./state.js";
 import { hiddenAgent, restoreWorkspacePreservingHidden } from "./hiding.js";
 import { discussionKeys } from "../shared/discussion.js";
+import type { DiscussionMetadata } from "./discussion-metadata.js";
 import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
 
 export const workspaceSchema = z.object({ id: z.string().min(1), name: z.string(), slug: z.string().min(1) });
-const issueSchema = z.object({ id: z.string().min(1), workspace_id: z.string(), identifier: z.string().optional(), title: z.string(),
+const remoteIssueSchema = z.object({ id: z.string().min(1), workspace_id: z.string(), identifier: z.string().optional(), title: z.string(),
   description: z.string().nullish(), status: z.string(), status_category: z.string().optional(), updated_at: z.string().optional() });
-const pageSchema = z.object({ issues: z.array(issueSchema), total: z.number().int().nonnegative() });
-export type RemoteWorkspace = z.infer<typeof workspaceSchema>;
-export const defaultStatusCategories = ["unstarted", "started"];
+const pageSchema = z.object({ issues: z.array(remoteIssueSchema), total: z.number().int().nonnegative() });
+// These requests live only for this snapshot (or an explicit Thread open).
+export type RemoteWorkspace = z.infer<typeof workspaceSchema> & {
+  agents?: Promise<Array<{ id: string; name: string; archived_at?: string | null }>>;
+  members?: Promise<Array<{ user_id: string; name: string }>>;
+};
 export const providerId = "multica";
 export function mainPersistence(connectionKey: string, issueId: string) {
   return { version: 1, data: { connectionKey, issueId, discussion: "main" } } as const;
@@ -31,9 +35,16 @@ function stableId(...parts: string[]) { return createHash("sha256").update(JSON.
 export async function remoteJson(connection: AuthenticatedConnection, path: string, schema: z.ZodType, workspace?: RemoteWorkspace) {
   const response = await remoteFetch(connection, path, { headers: workspace ? { "X-Workspace-Slug": workspace.slug } : {} });
   if (!response.ok) { await response.body?.cancel(); throw new Error(`Multica read failed (HTTP ${response.status})`); }
-  const value = schema.parse(await response.json());
-  await connection.assertCurrent?.();
-  return value;
+  return schema.parse(await response.json());
+}
+
+export function workspaceAgents(connection: AuthenticatedConnection, workspace: RemoteWorkspace) {
+  return workspace.agents ??= remoteJson(connection, `/api/agents?workspace_id=${encodeURIComponent(workspace.id)}&include_archived=true`,
+    z.array(z.object({ id: z.string(), name: z.string(), archived_at: z.string().nullish() })), workspace) as NonNullable<RemoteWorkspace["agents"]>;
+}
+export function workspaceMembers(connection: AuthenticatedConnection, workspace: RemoteWorkspace) {
+  return workspace.members ??= remoteJson(connection, `/api/workspaces/${encodeURIComponent(workspace.id)}/members`,
+    z.array(z.object({ user_id: z.string(), name: z.string() })), workspace) as NonNullable<RemoteWorkspace["members"]>;
 }
 
 export class SidebarSynchronizer {
@@ -67,7 +78,7 @@ export class SidebarSynchronizer {
     this.eventTimer.unref?.();
   }
   constructor(private readonly options: {
-    store: StateStore; connection: () => Promise<AuthenticatedConnection>; lifecycle: DiscussionLifecycle;
+    store: StateStore; connection: () => Promise<AuthenticatedConnection>; lifecycle: DiscussionLifecycle; metadata: DiscussionMetadata;
     connectHost: () => Promise<NativeHost>; intervalMs: number; onRemoteEvent?: (event: WorkspaceEvent) => void;
     onCached?: (host: NativeHost) => Promise<void>;
     onIssue?: (connection: AuthenticatedConnection, workspace: RemoteWorkspace, issueId: string, host: NativeHost) => Promise<void>;
@@ -76,15 +87,19 @@ export class SidebarSynchronizer {
   async workspaces(connection: AuthenticatedConnection): Promise<RemoteWorkspace[]> {
     return await remoteJson(connection, "/api/workspaces", z.array(workspaceSchema)) as RemoteWorkspace[];
   }
-  async bootstrap(paseo: PaseoApi): Promise<void> {
-    const serverId = (await paseo.hosts.list()).self.serverId;
-    if (this.expectedServerId && this.expectedServerId !== serverId) throw new Error("Bootstrap daemon identity changed");
+  private async assertOwningDaemon(paseo?: PaseoApi) {
+    const serverId = (await (paseo ? paseo.hosts.list() : this.host!.listHosts())).self.serverId;
+    if (this.expectedServerId && this.expectedServerId !== serverId) throw new Error("Native host is not the owning daemon");
     this.expectedServerId = serverId;
+  }
+  async bootstrap(paseo: PaseoApi, force = false): Promise<void> {
+    await this.assertOwningDaemon(paseo);
     // A client connection starts daemon recovery even if the first remote read fails.
     if (!this.closed && !this.timer) {
       this.timer = setInterval(() => { void this.requestSync().catch(() => {}); }, this.options.intervalMs);
       this.timer.unref?.();
     }
+    if (!force && this.syncState.status === "ready") return;
     return this.requestSync();
   }
   private requestSync(): Promise<void> {
@@ -106,11 +121,9 @@ export class SidebarSynchronizer {
   }
   withNativeHost(paseo: PaseoApi, operation: (host: NativeHost) => Promise<void>): Promise<void> {
     return this.serialize(async () => {
-      const serverId = (await paseo.hosts.list()).self.serverId;
-      if (this.expectedServerId && this.expectedServerId !== serverId) throw new Error("Bootstrap daemon identity changed");
-      this.expectedServerId = serverId;
+      await this.assertOwningDaemon(paseo);
       if (!this.host) this.host = await this.options.connectHost();
-      if ((await this.host.listHosts()).self.serverId !== serverId) throw new Error("Native host is not the owning daemon");
+      await this.assertOwningDaemon();
       await operation(this.host);
     });
   }
@@ -126,7 +139,7 @@ export class SidebarSynchronizer {
         const rules = connectionState(state, connection.connectionKey).rules;
         rules[workspaceId] = { ...taskRuleSchema.parse(rules[workspaceId] ?? {}), enabled };
       });
-    }).then(() => this.bootstrap(paseo));
+    }).then(() => this.bootstrap(paseo, true));
   }
   rule(paseo: PaseoApi, workspaceId: string, rule: TaskRule, expectedConnectionKey?: string): Promise<void> {
     return this.serialize(async () => {
@@ -137,9 +150,9 @@ export class SidebarSynchronizer {
         const rules = connectionState(state, connection.connectionKey).rules;
         rules[workspaceId] = { ...rule, enabled: rules[workspaceId]?.enabled ?? false };
       });
-    }).then(() => this.bootstrap(paseo));
+    }).then(() => this.bootstrap(paseo, true));
   }
-  private async archive(connectionKey: string, issueId: string, reason: "rule_disabled" | "filter_exit" | "inaccessible") {
+  private async archive(connectionKey: string, issueId: string, reason: "rule_disabled" | "filter_exit") {
     const issue = (await this.options.store.read()).connections[connectionKey].issues[issueId];
     if (!issue.workspaceCreated || issue.manualHidden.workspace) return;
     const activeAgents: string[] = [];
@@ -155,10 +168,7 @@ export class SidebarSynchronizer {
       cursor = next;
     }
     const workspaceActive = await findActiveWorkspace(this.host!, issue.workspaceId);
-    if (issue.archiveReason && !workspaceActive && !activeAgents.length) {
-      if (issue.archivePending) await this.options.store.update(state => { state.connections[connectionKey].issues[issueId].archivePending = false; });
-      return;
-    }
+    if (issue.archiveReason && !workspaceActive && !activeAgents.length) return;
     // Native prompt admission can reopen an agent inside an archived workspace.
     // Preserve the original restore set while repairing that later native drift.
     await this.options.store.update(state => {
@@ -167,7 +177,6 @@ export class SidebarSynchronizer {
         mapping.archiveReason = reason;
         mapping.ruleArchivedAgentIds = activeAgents;
       }
-      mapping.archivePending = true;
     });
     // An already archived workspace ignores bulk archive. Restore its record
     // before bulk teardown, whose close path does not interrupt remote Runs.
@@ -184,7 +193,6 @@ export class SidebarSynchronizer {
       const result = await this.host!.archiveWorkspace(issue.workspaceId);
       if (result.error) throw new Error("Native workspace archive failed");
     }
-    await this.options.store.update(state => { state.connections[connectionKey].issues[issueId].archivePending = false; });
   }
 
   private async removeDisabledProjects(connectionKey: string) {
@@ -205,39 +213,6 @@ export class SidebarSynchronizer {
     }
   }
 
-  /** A filtered list cannot distinguish a rule exit from loss of object access. */
-  private async objectAccess(connection: AuthenticatedConnection, workspace: RemoteWorkspace, issueId: string) {
-    const response = await remoteFetch(connection, `/api/issues/${encodeURIComponent(issueId)}`, { headers: { "X-Workspace-Slug": workspace.slug } });
-    if (response.ok) {
-      const parsed = issueSchema.safeParse(await response.json());
-      await connection.assertCurrent?.();
-      if (!parsed.success || parsed.data.id !== issueId || parsed.data.workspace_id !== workspace.id) return "unknown" as const;
-      return "available" as const;
-    }
-    const status = response.status;
-    let error = "";
-    try { error = z.object({ error: z.string() }).parse(await response.json()).error; } catch { /* An HTML/generic route error is not object evidence. */ }
-    await connection.assertCurrent?.();
-    if (status !== 403 && status !== 404) throw new Error(`Multica object read failed (HTTP ${status})`);
-    const issue = (await this.options.store.read()).connections[connection.connectionKey]?.issues[issueId];
-    const explicitIssueError = /\bissue\b/i.test(error) && /not found|forbidden|denied|permission/i.test(error);
-    if (!error || (!issue?.access?.objectVerifiedAt && !explicitIssueError)) return "unknown" as const;
-    // Recheck both account and workspace AFTER denial. Token expiry, a service
-    // outage or a workspace-wide rejection must not retire every cached Issue.
-    const me = await remoteJson(connection, "/api/me", z.object({ id: z.string() })) as { id: string };
-    if (me.id !== connection.userId || !(await this.workspaces(connection)).some(item => item.id === workspace.id && item.slug === workspace.slug)) {
-      throw new Error("Multica connection or workspace unavailable");
-    }
-    return status === 403 ? "forbidden" as const : "not_found" as const;
-  }
-  private async inaccessible(connectionKey: string, issueId: string, reason: "forbidden" | "not_found") {
-    await this.options.store.update(state => {
-      const issue = state.connections[connectionKey].issues[issueId];
-      issue.access = { ...issue.access, status: "inaccessible", reason, checkedAt: new Date().toISOString() };
-    });
-    await this.archive(connectionKey, issueId, "inaccessible");
-  }
-
   private serialize(operation: () => Promise<void>) {
     const result = this.pending.then(async () => { if (this.closed) return; await operation(); });
     this.pending = result.catch(() => {});
@@ -245,7 +220,7 @@ export class SidebarSynchronizer {
   }
   private async sync() {
     if (!this.host) this.host = await this.options.connectHost();
-    if ((await this.host.listHosts()).self.serverId !== this.expectedServerId) throw new Error("Native host is not the owning daemon");
+    await this.assertOwningDaemon();
     this.syncState.stage = "history";
     await this.options.onCached?.(this.host);
     this.syncState.stage = "connection";
@@ -262,15 +237,14 @@ export class SidebarSynchronizer {
     if (!enabled.length && !disabledIssues.length && !disabledProjects) { this.events.reconcile(connection, []); return; }
     const workspaces = enabled.length ? await this.workspaces(connection) : [];
     this.events.reconcile(connection, workspaces.filter(workspace => local?.rules[workspace.id]?.enabled));
-    if (!this.host) this.host = await this.options.connectHost();
-    if ((await this.host.listHosts()).self.serverId !== this.expectedServerId) throw new Error("Native host is not the owning daemon");
+    await this.assertOwningDaemon();
     for (const [issueId] of disabledIssues) await this.archive(connection.connectionKey, issueId, "rule_disabled");
     await this.removeDisabledProjects(connection.connectionKey);
     for (const [workspaceId, rule] of enabled) {
       const workspace = workspaces.find(item => item.id === workspaceId);
       if (!workspace) throw new Error("Enabled workspace snapshot unavailable");
       this.syncState.stage = "issues";
-      const issues: z.infer<typeof issueSchema>[] = [];
+      const issues: z.infer<typeof remoteIssueSchema>[] = [];
       let offset = 0;
       for (;;) {
         const query = issueQuery(rule, offset);
@@ -285,18 +259,7 @@ export class SidebarSynchronizer {
       const matchingIds = new Set(issues.map(issue => issue.id));
       for (const [issueId, mapping] of Object.entries(local?.issues ?? {})) {
         if (mapping.remoteWorkspaceId !== workspaceId || matchingIds.has(issueId)) continue;
-        const access = await this.objectAccess(connection, workspace, issueId);
-        if (access === "forbidden" || access === "not_found") await this.inaccessible(connection.connectionKey, issueId, access);
-        else {
-          // A readable object that left the filter remains outside active work.
-          // Unknown legacy routes retain their prior access classification.
-          if (access === "available") await this.options.store.update(state => {
-            const issue = state.connections[connection.connectionKey].issues[issueId];
-            issue.access = { ...issue.access, status: "available", checkedAt: new Date().toISOString(), objectVerifiedAt: new Date().toISOString() };
-            delete issue.access.reason;
-          });
-          await this.archive(connection.connectionKey, issueId, "filter_exit");
-        }
+        await this.archive(connection.connectionKey, issueId, "filter_exit");
       }
       // AgentStorage flattens the entire cwd into one filename component.
       // Keep existing mappings bound to their original directories and history.
@@ -307,19 +270,11 @@ export class SidebarSynchronizer {
       if (added.error || !added.project || added.project.projectKind === "git") throw new Error("Could not register non-Git native project");
       const projectId = added.project.projectId;
       await this.host.renameProject(projectId, workspace.name);
-      await this.options.store.update(state => { connectionState(state, connection.connectionKey).projects[workspaceId] = { cwd: projectDirectory, projectId, name: workspace.name }; });
+      await this.options.store.update(state => {
+        connectionState(state, connection.connectionKey).projects[workspaceId] = { cwd: projectDirectory, projectId, name: workspace.name, slug: workspace.slug };
+      });
       for (const issue of issues) {
         const previous = (await this.options.store.read()).connections[connection.connectionKey]?.issues[issue.id];
-        // A returned list row alone does not undo a confirmed object denial.
-        const access = await this.objectAccess(connection, workspace, issue.id);
-        if (access === "forbidden" || access === "not_found") {
-          if (previous) await this.inaccessible(connection.connectionKey, issue.id, access);
-          continue;
-        }
-        if (previous?.access?.status === "inaccessible" && access !== "available") {
-          await this.archive(connection.connectionKey, issue.id, "inaccessible");
-          continue;
-        }
         const title = [issue.identifier, issue.title].filter(Boolean).join(" ");
         const oldProjectId = previous?.projectId ?? local?.projects[workspaceId]?.projectId;
         const rebuild = previous?.workspaceCreated && oldProjectId && oldProjectId !== projectId;
@@ -328,21 +283,12 @@ export class SidebarSynchronizer {
         // Persist intent before native creation. A retry uses the same valid native ID.
         await this.options.store.update(state => {
           const local = connectionState(state, connection.connectionKey);
-          local.issues[issue.id] = { ...local.issues[issue.id], remoteWorkspaceId: workspaceId,
-            access: { ...local.issues[issue.id]?.access, status: "available", reason: undefined, checkedAt: new Date().toISOString(),
-              ...(access === "available" ? { objectVerifiedAt: new Date().toISOString() } : {}) },
+          local.issues[issue.id] = issueSchema.parse({ ...local.issues[issue.id], remoteWorkspaceId: workspaceId,
             projectId,
             workspaceId: rebuild ? `wks_${stableId(connection.connectionKey, issue.id, projectId).slice(0, 16)}`
               : local.issues[issue.id]?.workspaceId ?? `wks_${stableId(connection.connectionKey, issue.id).slice(0, 16)}`,
-            workspaceCreated: rebuild ? false : local.issues[issue.id]?.workspaceCreated ?? false,
-            commentSourceTaskIds: local.issues[issue.id]?.commentSourceTaskIds ?? {},
-            runs: local.issues[issue.id]?.runs ?? {}, runDetails: local.issues[issue.id]?.runDetails ?? {}, commentCreatedAt: local.issues[issue.id]?.commentCreatedAt ?? {},
-            stopEpochs: local.issues[issue.id]?.stopEpochs ?? {}, stopRecords: local.issues[issue.id]?.stopRecords ?? {},
-            deliveries: local.issues[issue.id]?.deliveries ?? {},
-            manualHidden: local.issues[issue.id]?.manualHidden ?? { workspace: false, discussions: [] },
-            threads: local.issues[issue.id]?.threads ?? {}, commentRoots: local.issues[issue.id]?.commentRoots ?? {}, unresolvedCommentIds: local.issues[issue.id]?.unresolvedCommentIds ?? [],
-            systemRootIds: local.issues[issue.id]?.systemRootIds ?? [], mainHistory: local.issues[issue.id]?.mainHistory ?? { title: "主讨论", historyLoaded: false, rows: [], observed: {} },
-            ruleArchivedAgentIds: local.issues[issue.id]?.ruleArchivedAgentIds ?? [], archivePending: local.issues[issue.id]?.archivePending ?? false, cwd, title, description: issue.description ?? "", updatedAt: issue.updated_at };
+            workspaceCreated: rebuild ? false : local.issues[issue.id]?.workspaceCreated,
+            cwd, title, description: issue.description ?? "", updatedAt: issue.updated_at });
         });
         const mapping = (await this.options.store.read()).connections[connection.connectionKey].issues[issue.id];
         if (!mapping.workspaceCreated) {
@@ -364,11 +310,11 @@ export class SidebarSynchronizer {
           for (const agentId of mapping.ruleArchivedAgentIds) {
             if (hiddenAgent(mapping, agentId)) continue;
             await restoreMappedDiscussion(this.host, this.options.lifecycle, agentId, mapping, { connectionKey: connection.connectionKey, issueId: issue.id });
+            await this.options.metadata.write(agentId, connection.connectionKey, issue.id);
           }
           await this.options.store.update(state => {
             const saved = state.connections[connection.connectionKey].issues[issue.id];
             delete saved.archiveReason;
-            saved.archivePending = false;
             saved.ruleArchivedAgentIds = [];
           });
         }
@@ -380,17 +326,13 @@ export class SidebarSynchronizer {
           if (!mainAgentId) {
             mainAgentId = (await this.host.importAgent({ providerId, providerHandleId: `plugin:${JSON.stringify(mainPersistence(connection.connectionKey, issue.id))}`,
               cwd, workspaceId: mapping.workspaceId, labels })).id;
+            await this.options.metadata.write(mainAgentId, connection.connectionKey, issue.id);
           }
           await this.options.store.update(state => { state.connections[connection.connectionKey].issues[issue.id].mainAgentId = mainAgentId; });
         }
         if (mainAgentId && !mapping.manualHidden.discussions.includes("main")) await this.host.updateAgent(mainAgentId, { name: "主讨论" });
         this.syncState.stage = "history";
         await this.options.onIssue?.(connection, workspace, issue.id, this.host);
-        await this.options.store.update(state => {
-          const saved = state.connections[connection.connectionKey].issues[issue.id];
-          saved.access = { ...saved.access, status: "available", lastSuccessAt: new Date().toISOString() };
-          delete saved.access.reason;
-        });
       }
       this.syncState.completedWorkspaces++;
     }

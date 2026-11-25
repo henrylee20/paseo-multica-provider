@@ -26,14 +26,15 @@ export function AskuserContents({ data, theme }: { data: AskuserCardData; theme:
     {data.answer ? <View style={{ gap: 4 }}><Text style={muted}>答复者：{data.answer.actorId ?? "未知"}{data.answer.delegatedBy ? ` · 代理委托：${data.answer.delegatedBy}` : ""}</Text><Markdown>{data.answer.content}</Markdown></View> : null}
     {data.skippedAt || data.skippedBy ? <Text style={muted}>跳过时间：{data.skippedAt ? formatTime(data.skippedAt) ?? data.skippedAt : "未知"} · 操作者：{data.skippedBy ?? "未知"}</Text> : null}
     {data.readOnlyReason ? <Text style={muted}>{data.readOnlyReason}</Text> : null}
-    {data.delivery?.status === "pending_verification" || data.delivery?.status === "received" ? <Text style={muted}>回答保存结果待核实：请在 Multica 管理页「评论投递」核实原投递，或核实远端后明确重新发送；请勿重复提交。{data.delivery.message}</Text> : null}
+    {data.delivery?.status === "received" ? <Text style={muted}>回答发送中…</Text> : null}
+    {data.delivery?.status === "failed" ? <Text style={muted}>{data.delivery.message}</Text> : null}
     {data.statusError ? <Text style={muted}>{data.statusError}</Text> : null}
     {data.error ? <Text accessibilityRole="alert" style={{ color: theme.colors.statusDanger }}>{data.error}</Text> : null}
     <Text selectable style={muted}>原评论 {data.commentId} · 附件 {data.attachmentId} · Thread {data.rootId}</Text>
   </View>;
 }
 
-export function AskuserCard(props: Props & { openManagement?: () => void }) {
+export function AskuserCard(props: Props) {
   const observe = useRpc(askuserObserve);
   const [data, setData] = useState(props.item.data);
   const { connectionKey, issueId, commentId, attachmentId, revision } = props.item.data;
@@ -52,10 +53,10 @@ export function AskuserCard(props: Props & { openManagement?: () => void }) {
     const timer = setInterval(() => { void refresh(); }, 10_000);
     return () => { active = false; clearInterval(timer); };
   }, [observe, connectionKey, issueId, commentId, attachmentId, revision]);
-  return <AskuserBody key={data.revision} data={data} theme={props.theme} onChanged={setData} openManagement={props.openManagement} />;
+  return <AskuserBody key={data.revision} data={data} theme={props.theme} onChanged={setData} />;
 }
 
-function AskuserBody({ data, theme, onChanged, openManagement }: { data: AskuserCardData; theme: PluginSurfaceProps["theme"]; onChanged: (card: AskuserCardData) => void; openManagement?: () => void }) {
+function AskuserBody({ data, theme, onChanged }: { data: AskuserCardData; theme: PluginSurfaceProps["theme"]; onChanged: (card: AskuserCardData) => void }) {
   const read = useRpc(askuserRead);
   const reopen = useRpc(askuserReopen);
   const skip = useRpc(askuserSkip);
@@ -94,7 +95,6 @@ function AskuserBody({ data, theme, onChanged, openManagement }: { data: Askuser
       <Pressable accessibilityRole="button" accessibilityLabel="确认远端跳过" disabled={acting} onPress={() => { void act("skip"); }}><Text style={{ color: theme.colors.statusDanger }}>确认远端跳过</Text></Pressable>
       <Pressable accessibilityRole="button" accessibilityLabel="取消" disabled={acting} onPress={() => setConfirmSkip(false)}><Text style={{ color: theme.colors.foreground }}>取消</Text></Pressable>
     </View> : <Pressable accessibilityRole="button" accessibilityLabel="跳过此卡" disabled={acting} onPress={() => setConfirmSkip(true)}><Text style={{ color: theme.colors.foreground }}>跳过此卡</Text></Pressable> : null}
-    {data.delivery && ["received", "pending_verification", "failed"].includes(data.delivery.status) && openManagement ? <Pressable accessibilityRole="button" onPress={openManagement}><Text style={{ color: theme.colors.foreground }}>在管理页核实 / 重新发送</Text></Pressable> : null}
     {data.truncated && !full ? <SettingsAction label="内容较长，当前仅显示标题、警示和题目摘要。" actionLabel={loading ? "正在读取…" : "读取完整提问"} disabled={loading} onPress={() => { void load(); }} /> : null}
     {error ? <Text accessibilityRole="alert" style={{ color: theme.colors.statusDanger }}>{error}</Text> : null}
   </View>;

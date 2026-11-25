@@ -3,6 +3,7 @@ import { threadAddress } from "./threads.js";
 import { z } from "zod";
 
 export const runStatusSchema = z.enum(["queued", "dispatched", "running", "waiting_local_directory", "deferred", "completed", "failed", "cancelled"]);
+export const isActiveRun = (status: z.infer<typeof runStatusSchema>) => ["queued", "dispatched", "running", "waiting_local_directory", "deferred"].includes(status);
 // Preserve source values, including explicit null and empty strings. These can
 // be arbitrarily large and belong in paged cached reads, never native rows.
 export const runMetadataSchema = z.object({
@@ -32,6 +33,5 @@ export const runOpen = defineRpc({ name: "run.open", input: runAddress, output: 
 }) });
 // Detailed history is a versioned JSON stream, split below the native row/RPC
 // budget even when one tool result is much larger than a single transport frame.
-export const runRead = defineRpc({ name: "run.read", input: runAddress.extend({ revision: z.string(), offset: z.number().int().nonnegative() }),
+export const runRead = defineRpc({ name: "run.read", input: runAddress.extend({ kind: z.enum(["messages", "metadata"]), revision: z.string(), offset: z.number().int().nonnegative() }),
   output: z.object({ text: z.string(), nextOffset: z.number().int().nonnegative().nullable() }) });
-export const runMetadataRead = defineRpc({ name: "run.metadata.read", input: runRead.input, output: runRead.output });

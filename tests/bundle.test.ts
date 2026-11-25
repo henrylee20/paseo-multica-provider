@@ -8,7 +8,6 @@ import * as pluginRuntime from "@getpaseo/plugin";
 import * as zod from "zod";
 import { expect, it, vi } from "vitest";
 import { FakeServer } from "./support/fake-server.js";
-import { formatTime } from "../client/format.js";
 
 async function bundledContribution(entry: string, runtime: Record<string, unknown> = {}) {
   const result = await build({ entryPoints: [fileURLToPath(new URL(entry, import.meta.url))], bundle: true,
@@ -23,7 +22,7 @@ async function bundledContribution(entry: string, runtime: Record<string, unknow
   return exports.default;
 }
 
-it("the host-compiled server entry registers CLI connection management", async () => {
+it("the host-compiled server entry registers CLI connection settings", async () => {
   const setup = await bundledContribution("../index.server.ts");
   const server = new FakeServer();
   const dispose = setup(server.context);
@@ -32,7 +31,7 @@ it("the host-compiled server entry registers CLI connection management", async (
   await dispose();
 }, 15_000);
 
-it("the host-compiled client entry offers a Multica management screen and sidebar entry", async () => {
+it("the host-compiled client entry offers only the Multica settings screen", async () => {
   const setup = await bundledContribution("../index.client.tsx", { "@getpaseo/plugin/client": {}, "@getpaseo/plugin/client/ui": {}, "react-native": {} });
   const entries: Array<{ kind: string; id: string; Component?: unknown }> = [];
   const add = (kind: string) => (entry: { id: string; Component?: unknown }) => {
@@ -41,27 +40,36 @@ it("the host-compiled client entry offers a Multica management screen and sideba
   };
   const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: add("settings"), addScreen: add("screen"), addSidebarHeaderItem: add("sidebar"), addTimelineRenderer: () => () => {} });
   expect(entries.map(({ kind, id }) => ({ kind, id }))).toEqual([
-    { kind: "settings", id: "multica" }, { kind: "screen", id: "management" }, { kind: "sidebar", id: "multica" },
+    { kind: "settings", id: "multica" },
   ]);
   expect(entries.every(entry => typeof entry.Component === "function")).toBe(true);
   dispose();
   expect(entries).toEqual([]);
 });
 
-it("client contribution bootstraps without opening management and retries after a disconnected RPC", async () => {
+it("client bootstrap keeps running through successful connections and daemon restarts", async () => {
   const setup = await bundledContribution("../index.client.tsx", { "@getpaseo/plugin/client": {}, "@getpaseo/plugin/client/ui": {}, "react-native": {} });
   vi.useFakeTimers();
   try {
     const calls: string[] = [];
-    const dispose = setup({ rpc: async (contract: { name: string }) => { calls.push(contract.name); if (calls.length === 1) throw new Error("disconnected"); return { status: "ready" }; },
+    const dispose = setup({ rpc: async (contract: { name: string }) => {
+      calls.push(contract.name);
+      if (calls.length === 1 || calls.length === 4)
+        throw new Error("daemon restarted");
+      return { status: "ready" };
+    },
       addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: () => () => {} });
     await Promise.resolve();
     expect(calls).toEqual(["sync.bootstrap"]);
     await vi.advanceTimersByTimeAsync(10_000);
     expect(calls).toEqual(["sync.bootstrap", "sync.bootstrap"]);
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(calls).toHaveLength(4);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(calls).toHaveLength(5);
     dispose();
     await vi.advanceTimersByTimeAsync(20_000);
-    expect(calls).toHaveLength(2);
+    expect(calls).toHaveLength(5);
   } finally { vi.useRealTimers(); }
 });
 
@@ -84,7 +92,10 @@ async function pickerHarness(answer: (input: unknown) => Promise<{ agents: unkno
   expect(items.map(item => item.id)).toEqual(["multica-mention"]);
   return {
     calls, inserted, focused, dispose, items,
-    render: () => { cursor = 0; return items[0].Component({ theme: { colors: {} }, host: { id: "host", label: "Host" }, layout: { compact: false, platform: "web" } }) as unknown as { props: { title: string; icon: string; value: null; search(event: { query: string }): Promise<readonly PickerItem[]>; onSelect(event: { item: PickerItem }): Promise<void> } } | null; },
+    render: () => {
+      cursor = 0;
+      return items[0].Component({ theme: { colors: {} }, host: { id: "host", label: "Host" }, layout: { compact: false, platform: "web" } }) as unknown as { props: { title: string; icon: string; value: null; search(event: { query: string }): Promise<readonly PickerItem[]>; onSelect(event: { item: PickerItem }): Promise<void> } } | null;
+    },
   };
 }
 const builder = (tail: string) => ({ id: `9f3c1a2e-0000-4000-8000-00000000000${tail}`, name: "Builder", reference: `[@Builder](mention://agent/9f3c1a2e-0000-4000-8000-00000000000${tail})` });
@@ -133,7 +144,11 @@ it.each([
 it("a picker whose agent reading fails shows the failure and reads again on the next query", async () => {
   let offline = true;
   const agents = [builder("1")];
-  const h = await pickerHarness(async () => { if (offline) throw new Error("CLI 未登录"); return { agents }; }, { agent: { provider: "multica", metadata: task } });
+  const h = await pickerHarness(async () => {
+    if (offline)
+      throw new Error("CLI 未登录");
+    return { agents };
+  }, { agent: { provider: "multica", metadata: task } });
   try {
     const picker = h.render()!;
     await expect(picker.props.search({ query: "" })).rejects.toThrow("CLI 未登录");
@@ -200,7 +215,10 @@ it("a reader can explicitly load every page of a long description from its visib
     "react-native": { View: "View", Text: "Text" },
   });
   const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {},
-    addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: PluginTimelineRendererContribution) => { renderers.push(renderer); return () => {}; } });
+    addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: PluginTimelineRendererContribution) => {
+      renderers.push(renderer);
+      return () => {};
+    } });
   try {
     const renderer = renderers.find(value => value.kind === "task-description")!;
     const data = renderer.schema.parse({ connectionKey: "connection", issueId: "issue", revision: "revision", preview: "目标预览", truncated: true });
@@ -222,7 +240,7 @@ it("a reader can explicitly load every page of a long description from its visib
   } finally { dispose(); }
 });
 
-it.each(["task-description", "comment-delivery"])("the compiled %s reader stops stalled cursors and cancels further pages on unmount", async kind => {
+it.each(["task-description"])("the compiled %s reader stops stalled cursors and cancels further pages on unmount", async kind => {
   vi.useFakeTimers();
   const renderers: Array<{ kind: string; Component: (props: any) => any }> = [];
   const state: unknown[] = [], dependencies: unknown[][] = [];
@@ -236,12 +254,23 @@ it.each(["task-description", "comment-delivery"])("the compiled %s reader stops 
     : { connectionKey: "connection", issueId: "issue", rootId: "root", clientMessageId: "input", idempotencyKey: "key", body: "Preview", truncated: true, createdAt: "2026-11-24T10:00:00Z", status: "failed" };
   const setup = await bundledContribution("../index.client.tsx", {
     react: {
-      useState: (initial: unknown) => { const index = cursor++; if (!(index in state)) state[index] = initial; return [state[index], (value: unknown) => { state[index] = typeof value === "function" ? value(state[index]) : value; }]; },
+      useState: (initial: unknown) => {
+        const index = cursor++;
+        if (!(index in state))
+          state[index] = initial;
+        return [state[index], (value: unknown) => {
+          state[index] = typeof value === "function" ? value(state[index]) : value;
+        }];
+      },
       useEffect: (effect: () => unknown, next: unknown[]) => {
         const index = cursor++;
         if (dependencies[index] && next.every((value, i) => Object.is(value, dependencies[index][i]))) return;
         dependencies[index] = next;
-        effects.push(() => { cleanups[index]?.(); const result = effect(); cleanups[index] = typeof result === "function" ? result as () => void : undefined; });
+        effects.push(() => {
+          cleanups[index]?.();
+          const result = effect();
+          cleanups[index] = typeof result === "function" ? result as () => void : undefined;
+        });
       },
     },
     "@getpaseo/plugin/client": { useRpc: (contract: { name: string }) => {
@@ -254,12 +283,25 @@ it.each(["task-description", "comment-delivery"])("the compiled %s reader stops 
       });
       return rpcs.get(contract.name);
     } },
-    "@getpaseo/plugin/client/ui": { Markdown: ({ children }: any) => children, SettingsAction: ({ onPress, actionLabel }: any) => { actions.push({ onPress }); return actionLabel; } },
+    "@getpaseo/plugin/client/ui": { Markdown: ({ children }: any) => children, SettingsAction: ({ onPress, actionLabel }: any) => {
+      actions.push({ onPress });
+      return actionLabel;
+    } },
     "react-native": { View: "View", Text: "Text", Pressable: ({ onPress, children }: any) => { actions.push({ onPress }); return children; } },
   });
-  const dispose = setup({ rpc: async () => ({}), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: any) => { renderers.push(renderer); return () => {}; } });
+  const dispose = setup({ rpc: async () => ({}), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: any) => {
+    renderers.push(renderer);
+    return () => {};
+  } });
   const renderer = renderers.find(renderer => renderer.kind === kind)!;
-  const render = () => { cursor = 0; actions.length = 0; const text = renderedText(renderer.Component({ item: { data }, theme: { colors: {} } })); for (const effect of effects.splice(0)) effect(); return text; };
+  const render = () => {
+    cursor = 0;
+    actions.length = 0;
+    const text = renderedText(renderer.Component({ item: { data }, theme: { colors: {} } }));
+    for (const effect of effects.splice(0))
+      effect();
+    return text;
+  };
   try {
     render(); actions[0].onPress();
     await vi.advanceTimersByTimeAsync(0);
@@ -276,12 +318,15 @@ it.each(["task-description", "comment-delivery"])("the compiled %s reader stops 
   } finally { for (const cleanup of cleanups) cleanup?.(); dispose(); vi.useRealTimers(); }
 });
 
-it("the native thread renderer lazily opens history and comment events render as independent records", async () => {
+it.each(["root", "main"])("the invisible %s thread renderer still opens history and comment events render independently", async rootId => {
   const effects: Array<() => unknown> = [];
   const calls: Array<{ name: string; input: unknown }> = [];
   const renderers: Array<{ kind: string; schema: zod.ZodType; Component: (props: any) => any }> = [];
   const setup = await bundledContribution("../index.client.tsx", {
-    "@getpaseo/plugin/client": { useRpc: (contract: { name: string }) => async (input: unknown) => { calls.push({ name: contract.name, input }); return { status: "ready" }; } },
+    "@getpaseo/plugin/client": { useRpc: (contract: { name: string }) => async (input: unknown) => {
+      calls.push({ name: contract.name, input });
+      return { status: "ready" };
+    } },
     "@getpaseo/plugin/client/ui": {}, "react-native": { Text: "Text", View: "View", Pressable: "Pressable" },
     react: { useEffect: (effect: () => unknown) => effects.push(effect), useState: (initial: unknown) => [initial, () => {}] },
   });
@@ -289,43 +334,38 @@ it("the native thread renderer lazily opens history and comment events render as
     addTimelineRenderer: (renderer: any) => { renderers.push(renderer); return () => {}; } });
   expect(renderers.map(renderer => renderer.kind)).toEqual(["task-description", "thread", "run-summary", "comment-event", "askuser", "comment-delivery"]);
   expect(calls).toEqual([]);
-  const address = { connectionKey: "connection", issueId: "issue", rootId: "root" };
+  const address = { connectionKey: "connection", issueId: "issue", rootId };
   const theme = { colors: { foreground: "black", foregroundMuted: "gray" } };
   const threadRenderer = renderers.find(renderer => renderer.kind === "thread")!;
   const eventRenderer = renderers.find(renderer => renderer.kind === "comment-event")!;
-  threadRenderer.Component({ item: { data: threadRenderer.schema.parse({ ...address, title: "Thread" }) }, theme });
-  for (const effect of effects.splice(0)) effect();
+  expect(threadRenderer.Component({ item: { data: threadRenderer.schema.parse({ ...address, title: "Thread" }) }, theme })).toBeNull();
+  const cleanups = effects.splice(0).map(effect => effect());
   await Promise.resolve();
   expect(calls).toEqual([{ name: "thread.open", input: address }]);
+  for (const cleanup of cleanups) if (typeof cleanup === "function") cleanup();
   const event = eventRenderer.Component({ item: { data: eventRenderer.schema.parse({ ...address, recordId: "correction", commentId: "root", category: "correction", text: "Updated text", sourceUpdatedAt: "2026-11-24T12:00:00Z", truncated: false }) }, theme });
   expect(JSON.stringify(event)).toContain("评论更正");
   expect(JSON.stringify(event)).toContain("Updated text");
   expect(JSON.stringify(event)).toContain("2026-11-24T12:00:00Z");
-  const source = eventRenderer.Component({ item: { data: eventRenderer.schema.parse({ ...address, recordId: "original", commentId: "root", category: "source", text: "First observed snapshot", sourceCreatedAt: "2020-01-01T00:00:00Z", sourceUpdatedAt: "2026-11-24T12:00:00Z", truncated: false }) }, theme });
-  expect(JSON.stringify(source)).toContain("评论来源");
-  expect(JSON.stringify(source)).toContain("2020-01-01T00:00:00Z");
-  expect(JSON.stringify(source)).toContain("2026-11-24T12:00:00Z");
   dispose();
 });
 
-it("delivery rows distinguish durable input, saved comments and unknown results without claiming a Run started", async () => {
+it("the main-discussion success renderer shows only a brief Thread hint", async () => {
   const renderers: Array<{ kind: string; schema: zod.ZodType; Component: (props: any) => any }> = [];
   const setup = await bundledContribution("../index.client.tsx", {
     "@getpaseo/plugin/client": { useRpc: () => async () => ({}) }, "@getpaseo/plugin/client/ui": {},
     "react-native": { Text: "Text", View: "View", Pressable: "Pressable" },
     react: { useState: (initial: unknown) => [initial, () => {}], useEffect: () => {} },
   });
-  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: any) => { renderers.push(renderer); return () => {}; } });
+  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: any) => {
+    renderers.push(renderer);
+    return () => {};
+  } });
   try {
     const renderer = renderers.find(renderer => renderer.kind === "comment-delivery");
     expect(renderer).toBeDefined();
-    const base = { connectionKey: "connection", issueId: "issue", rootId: "main", clientMessageId: "input", idempotencyKey: "key", createdAt: "2026-11-24T10:00:00Z", body: "Preserved input" };
-    const render = (status: string) => renderedText(renderer!.Component({ item: { data: renderer!.schema.parse({ ...base, status }) }, theme: { colors: { foreground: "black", foregroundMuted: "gray", statusDanger: "red" } } }));
-    expect(render("received")).toContain("插件已接收");
-    expect(render("saved")).toContain("评论已保存");
-    expect(render("saved")).toContain("Run 状态");
-    expect(render("pending_verification")).toContain("待核实");
-    expect(render("failed")).toContain("投递失败");
+    const text = renderedText(renderer!.Component({ item: { data: renderer!.schema.parse({}) }, theme: { colors: { foregroundMuted: "gray" } } }));
+    expect(text).toBe("新 Thread 已建立，可在侧边栏打开。");
   } finally { dispose(); }
 });
 
@@ -334,11 +374,17 @@ it("renders each run's agent and actual state as a bounded summary and observes 
   const calls: Array<{ name: string; input: unknown }> = [];
   const renderers: Array<{ kind: string; schema: zod.ZodType; Component: (props: any) => any }> = [];
   const setup = await bundledContribution("../index.client.tsx", {
-    "@getpaseo/plugin/client": { useRpc: (contract: { name: string }) => async (input: unknown) => { calls.push({ name: contract.name, input }); return { status: "ready" }; } },
+    "@getpaseo/plugin/client": { useRpc: (contract: { name: string }) => async (input: unknown) => {
+      calls.push({ name: contract.name, input });
+      return { status: "ready" };
+    } },
     "@getpaseo/plugin/client/ui": {}, "react-native": { Text: "Text", View: "View", Pressable: "Pressable" },
     react: { useEffect: (effect: () => unknown) => effects.push(effect), useState: (initial: unknown) => [initial, () => {}] },
   });
-  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: any) => { renderers.push(renderer); return () => {}; } });
+  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: any) => {
+    renderers.push(renderer);
+    return () => {};
+  } });
   try {
     const renderer = renderers.find(renderer => renderer.kind === "run-summary");
     expect(renderer, "a native run needs a visible registered summary renderer").toBeDefined();
@@ -348,6 +394,8 @@ it("renders each run's agent and actual state as a bounded summary and observes 
     const text = renderedText(tree);
     expect(text).toContain("Build Agent");
     expect(text).toContain("waiting_local_directory");
+    expect(text).not.toContain("Run ");
+    expect(text).not.toContain("Agent agent");
     expect(calls).toEqual([]);
     for (const effect of effects) effect();
     await Promise.resolve();
@@ -355,7 +403,7 @@ it("renders each run's agent and actual state as a bounded summary and observes 
   } finally { dispose(); }
 });
 
-it.each(["messages", "empty", "unavailable"])("expands source Run metadata with %s output and keeps detail reads inside expansion", async mode => {
+it.each(["messages", "empty", "unavailable", "terminal"])("expands source Run metadata with %s output and keeps detail reads inside expansion", async mode => {
   vi.useFakeTimers();
   const calls: Array<{ name: string; input: any }> = [];
   const renderers: Array<{ kind: string; schema: zod.ZodType; Component: (props: any) => any }> = [];
@@ -382,29 +430,46 @@ it.each(["messages", "empty", "unavailable"])("expands source Run metadata with 
   const rpcs = new Map<string, (input: any) => Promise<any>>();
   const setup = await bundledContribution("../index.client.tsx", {
     react: {
-      useState: (initial: unknown) => { const index = cursor++; if (!(index in state)) state[index] = initial; return [state[index], (value: unknown) => { state[index] = typeof value === "function" ? value(state[index]) : value; }]; },
+      useState: (initial: unknown) => {
+        const index = cursor++;
+        if (!(index in state))
+          state[index] = initial;
+        return [state[index], (value: unknown) => {
+          state[index] = typeof value === "function" ? value(state[index]) : value;
+        }];
+      },
       useEffect: (effect: () => unknown, next: unknown[]) => {
         const index = cursor++;
         if (dependencies[index] && next.every((value, i) => Object.is(value, dependencies[index][i]))) return;
         dependencies[index] = next;
-        effects.push(() => { cleanups[index]?.(); const result = effect(); cleanups[index] = typeof result === "function" ? result as () => void : undefined; });
+        effects.push(() => {
+          cleanups[index]?.();
+          const result = effect();
+          cleanups[index] = typeof result === "function" ? result as () => void : undefined;
+        });
       },
     },
     "@getpaseo/plugin/client": { useRpc: (contract: { name: string }) => {
       if (!rpcs.has(contract.name)) rpcs.set(contract.name, async input => {
         calls.push({ name: contract.name, input });
-        if (contract.name === "run.open") return { status: mode === "unavailable" ? "cached" : "ready", ...(mode !== "unavailable" ? { revision: String(messages.length) } : {}), metadataRevision: "metadata", message: mode === "unavailable" ? "No message cache" : undefined };
-        if (contract.name === "run.read") return input.offset === 0 ? { text: JSON.stringify(messages).slice(0, 80), nextOffset: 80 } : { text: JSON.stringify(messages).slice(80), nextOffset: null };
-        if (contract.name === "run.metadata.read") return input.offset === 0 ? { text: JSON.stringify(metadata).slice(0, 40), nextOffset: 40 } : { text: JSON.stringify(metadata).slice(40), nextOffset: null };
+        if (contract.name === "run.open")
+          return { status: mode === "unavailable" ? "cached" : "ready", ...(mode !== "unavailable" ? { revision: String(messages.length) } : {}), metadataRevision: "metadata", message: mode === "unavailable" ? "No message cache" : undefined };
+        if (contract.name === "run.read" && input.kind === "metadata")
+          return input.offset === 0 ? { text: JSON.stringify(metadata).slice(0, 40), nextOffset: 40 } : { text: JSON.stringify(metadata).slice(40), nextOffset: null };
+        if (contract.name === "run.read")
+          return input.offset === 0 ? { text: JSON.stringify(messages).slice(0, 80), nextOffset: 80 } : { text: JSON.stringify(messages).slice(80), nextOffset: null };
         return { status: "ready" };
       });
       return rpcs.get(contract.name);
     } },
     "@getpaseo/plugin/client/ui": {}, "react-native": { Text: "Text", View: "View", Pressable: "Pressable" },
   });
-  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: any) => { renderers.push(renderer); return () => {}; } });
+  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: any) => {
+    renderers.push(renderer);
+    return () => {};
+  } });
   const renderer = renderers.find(value => value.kind === "run-summary")!;
-  const data = renderer.schema.parse({ connectionKey: "connection", issueId: "issue", rootId: "root", runId: "run", agentId: "agent", agentName: "Build Agent", status: "running" });
+  const data = renderer.schema.parse({ connectionKey: "connection", issueId: "issue", rootId: "root", runId: "run", agentId: "agent", agentName: "Build Agent", status: mode === "terminal" ? "completed" : "running" });
   let actions: Array<{ onPress(): void }> = [];
   const visit = (node: any): string => {
     if (node === null || node === undefined || typeof node === "boolean") return "";
@@ -414,7 +479,14 @@ it.each(["messages", "empty", "unavailable"])("expands source Run metadata with 
     if (node.type === "Pressable") actions.push(node.props);
     return visit(node.props?.children);
   };
-  const render = () => { cursor = 0; actions = []; const text = visit(renderer.Component({ item: { data }, theme: { colors: { foreground: "black", foregroundMuted: "gray" } } })); for (const effect of effects.splice(0)) effect(); return text; };
+  const render = () => {
+    cursor = 0;
+    actions = [];
+    const text = visit(renderer.Component({ item: { data }, theme: { colors: { foreground: "black", foregroundMuted: "gray" } } }));
+    for (const effect of effects.splice(0))
+      effect();
+    return text;
+  };
   try {
     expect(render()).toContain("展开执行明细");
     await vi.advanceTimersByTimeAsync(5000);
@@ -425,29 +497,32 @@ it.each(["messages", "empty", "unavailable"])("expands source Run metadata with 
     const text = render();
     expect(text).toContain("Runtime failed before streaming");
     expect(text).toContain("local_directory_error");
-    expect(text).toContain("REMOTE · work_dir");
-    expect(text).toContain("REMOTE · relative_work_dir");
+    expect(text).toContain("远端目录");
+    expect(text).not.toContain("REMOTE");
     expect(text).toContain("/remote/agent/../checkout with spaces");
     expect(text).toContain("../checkout with spaces");
-    expect(text).toContain("与 Paseo 本地占位目录不同");
-    expect(calls.filter(call => call.name === "run.metadata.read").map(call => call.input.offset)).toEqual([0, 40]);
+    expect(calls.filter(call => call.name === "run.read" && call.input.kind === "metadata").map(call => call.input.offset)).toEqual([0, 40]);
     if (mode === "messages") {
       expect(text).toContain("Run text");
       expect(text.indexOf("Run thought")).toBeGreaterThan(text.indexOf("Run text"));
       expect(text.indexOf("Exact output")).toBeGreaterThan(text.indexOf("code.ts"));
       expect(text.indexOf("Source error")).toBeGreaterThan(text.indexOf("Partial output"));
-      expect(text).toContain("结果序号 #4");
-      expect(text).toContain("输入序号 #3");
-      expect(text).toContain("调用关联未知");
+      expect(text).not.toContain("调用 ID");
+      expect(text).not.toContain("调用关联");
       expect(text).toContain("工具输入缺失");
-      expect(text).toContain("输出完整性未知");
+      expect(text).not.toContain("输出完整性未知");
+      expect(text).not.toContain("来源标记输出完整");
       expect(text).toContain("源端已截断");
       expect(text).toContain("输出缺失");
-      expect(text).toContain("调用 ID：ambiguous · 调用关联未知（调用 ID 不唯一）");
       messages.push({ task_id: "run", issue_id: "issue", seq: 13, type: "text", content: "Live update" });
       await vi.advanceTimersByTimeAsync(2100);
       expect(render()).toContain("Live update");
-      expect(calls.filter(call => call.name === "run.read").map(call => call.input.offset)).toEqual([0, 80, 0, 80]);
+      expect(calls.filter(call => call.name === "run.read" && call.input.kind === "messages").map(call => call.input.offset)).toEqual([0, 80, 0, 80]);
+    }
+    if (mode === "terminal") {
+      const reads = calls.filter(call => call.name === "run.open").length;
+      await vi.advanceTimersByTimeAsync(6000);
+      expect(calls.filter(call => call.name === "run.open")).toHaveLength(reads);
     }
     actions[0].onPress();
     render();
@@ -471,7 +546,9 @@ function componentTree() {
     useState: (initial: unknown) => {
       const id = `${scope}#${stateIndex++}`;
       if (!state.has(id)) state.set(id, initial);
-      return [state.get(id), (value: unknown) => { state.set(id, typeof value === "function" ? (value as (previous: unknown) => unknown)(state.get(id)) : value); }];
+      return [state.get(id), (value: unknown) => {
+        state.set(id, typeof value === "function" ? (value as (previous: unknown) => unknown)(state.get(id)) : value);
+      }];
     },
     useEffect: (effect: () => unknown, deps?: unknown[]) => {
       const id = `${scope}@${effectIndex++}`;
@@ -483,7 +560,8 @@ function componentTree() {
   function visit(node: unknown, path: string): string {
     if (typeof node === "string") return node;
     if (typeof node === "number") return String(node);
-    if (Array.isArray(node)) return node.map((child, position) => visit(child, `${path}.${isValidElement(child) && child.key !== null ? child.key : position}`)).join("");
+    if (Array.isArray(node))
+      return node.map((child, position) => visit(child, `${path}.${isValidElement(child) && child.key !== null ? child.key : position}`)).join("");
     if (!isValidElement<{ children?: unknown }>(node)) return "";
     if (typeof node.type !== "function") return visit(node.props.children, path);
     const own = `${path}/${node.type.name || "component"}`;
@@ -511,7 +589,7 @@ function componentTree() {
 
 type Answer = (name: string, input: unknown) => unknown;
 /** `host.composerItems` is a Paseo 0.16+ host; without it the client context is the 0.15 surface. */
-async function managementHarness(answer: Answer, host: { composerItems?: boolean } = {}) {
+async function settingsHarness(answer: Answer, host: { composerItems?: boolean } = {}) {
   const tree = componentTree();
   const calls: Array<{ name: string; input: unknown }> = [];
   const actions: Array<{ label: string; hint?: string; actionLabel: string; disabled?: boolean; onPress(): unknown }> = [];
@@ -529,38 +607,51 @@ async function managementHarness(answer: Answer, host: { composerItems?: boolean
     "@getpaseo/plugin/client": {
       useSettings: () => ({ status: "ready", values: { profile: "" }, revision: "1", saving: false, saveError: null, reload: async () => {}, save: async () => true, reset: async () => true }),
       useRpc: (contract: { name: string }) => {
-        if (!rpcs.has(contract.name)) rpcs.set(contract.name, async input => { calls.push({ name: contract.name, input }); return answer(contract.name, input); });
+        if (!rpcs.has(contract.name))
+          rpcs.set(contract.name, async input => {
+            calls.push({ name: contract.name, input });
+            return contract.name === "connection.status" ? { sync: { status: "ready", stage: "idle", completedWorkspaces: 1, enabledWorkspaces: 1 }, hidden: [], ...(await answer(contract.name, input) as object) } : answer(contract.name, input);
+          });
         return rpcs.get(contract.name);
       },
     },
     "@getpaseo/plugin/client/ui": {
       Markdown: ({ children }: { children: string }) => children, Icon: () => null, ExternalLink: ({ children }: { children: unknown }) => children,
       SettingsSection: passthrough, SettingsCard: passthrough, SettingsInput: passthrough, SettingsRow: passthrough,
-      SettingsAction: (props: typeof actions[number] & { error?: string }) => { actions.push(props); return [props.label, props.hint, props.error, props.actionLabel]; },
+      SettingsAction: (props: typeof actions[number] & { error?: string }) => {
+        actions.push(props);
+        return [props.label, props.hint, props.error, props.actionLabel];
+      },
       SettingsSwitch: (props: typeof switches[number] & { hint?: string }) => { switches.push(props); return [props.label, props.hint]; },
       SettingsSelect: (props: typeof selects[number] & { hint?: string }) => { selects.push(props); return [props.label, props.hint]; },
       Modal: Object.assign(({ title, children }: { title: string; children: unknown }) => [title, children], { Content: ({ children }: { children: unknown }) => children }),
       copyText: async (text: string) => { copied.push(text); },
       ScrollView: (props: typeof scrolls[number] & { children?: unknown }) => { scrolls.push(props); return props.children; },
     },
-    "react-native": { View: "View", Text: "Text", Pressable: (props: typeof pressables[number] & { children: unknown }) => { pressables.push(props); return props.children; } },
+    "react-native": { View: "View", Text: "Text", Pressable: (props: typeof pressables[number] & { children: unknown }) => {
+      pressables.push(props);
+      return props.children;
+    } },
   });
   const screens: Record<string, FunctionComponent<Record<string, unknown>>> = {};
   const composerItems: string[] = [];
   const dispose = setup({ rpc: async () => ({ status: "ready" }), openScreen: (input: unknown) => opened.push(input),
     addSettingsScreen: (entry: { Component: FunctionComponent<Record<string, unknown>> }) => { screens.settings = entry.Component; return () => {}; },
-    addScreen: (entry: { Component: FunctionComponent<Record<string, unknown>> }) => { screens.management = entry.Component; return () => {}; },
     addSidebarHeaderItem: () => () => {}, addTimelineRenderer: () => () => {},
     ...(host.composerItems ? { addComposerItem: (entry: { id: string }) => { composerItems.push(entry.id); return () => {}; } } : {}) });
   const colors = { foreground: "fg", foregroundMuted: "muted", statusDanger: "danger", statusWarning: "warning", statusSuccess: "success" };
   return {
     calls, actions, switches, selects, pressables, copied, opened, navigation, scrolls, composerItems,
-    render(screen: "settings" | "management" = "management", props: Record<string, unknown> = {}) {
+    render(screen: "settings" = "settings", props: Record<string, unknown> = {}) {
       actions.length = 0; switches.length = 0; selects.length = 0; pressables.length = 0; scrolls.length = 0;
       return tree.render(createElement(screens[screen], { host: { id: "host", label: "Host" }, theme: { colors }, layout: { compact: false, platform: "web" },
         navigation: { openAgent: (input: unknown) => navigation.push(input) }, ...props }));
     },
-    action(actionLabel: string) { const found = actions.find(action => action.actionLabel === actionLabel); expect(found, actionLabel).toBeDefined(); return found!; },
+    action(actionLabel: string) {
+      const found = actions.find(action => action.actionLabel === actionLabel);
+      expect(found, actionLabel).toBeDefined();
+      return found!;
+    },
     dispose() { tree.unmount(); dispose(); },
   };
 }
@@ -568,130 +659,46 @@ async function managementHarness(answer: Answer, host: { composerItems?: boolean
 const readyStatus = { status: "ready", message: "已验证", profile: "", connectionKey: "current", apiUrl: "https://api.example.test", appUrl: "https://app.example.test", configPath: "/home/user/.multica/config.json",
   source: { api: "config", credentials: "config", app: "config" }, user: { id: "me", name: "Lin", email: "lin@example.test" }, loginCommand: "multica login" };
 const defaultRule = { statusCategories: ["unstarted", "started"], statuses: [], assignees: [], projectIds: [], labelIds: [] };
-const empty: Answer = name => ({
-  "connection.history": { connections: [] }, "stop.list": { records: [] }, "hidden.list": { objects: [] }, "issue.history.list": { issues: [] },
-  "delivery.list": { records: [] }, "delivery.targets": { issues: [] }, "sync.status": { status: "ready", stage: "idle", completedWorkspaces: 1, enabledWorkspaces: 1 },
-} as Record<string, unknown>)[name];
+const empty: Answer = () => undefined;
 
-it("management points at the composer's agent picker where the host has one, and at the copied reference elsewhere", async () => {
-  const answer: Answer = (name, input) => name === "delivery.targets" ? { issues: [{ connectionKey: "old-connection", issueId: "issue", title: "Task" }] } : empty(name, input);
-  const legacy = await managementHarness(answer);
-  try {
-    await vi.waitFor(() => expect(legacy.render()).toContain("提及 Agent"));
-    expect(legacy.composerItems).toEqual([]);
-    for (const text of ["需要 Paseo 0.16.0", "复制完整身份引用"]) expect(legacy.render()).toContain(text);
-  } finally { legacy.dispose(); }
-  const current = await managementHarness(answer, { composerItems: true });
-  try {
-    await vi.waitFor(() => expect(current.render()).toContain("提及 Agent"));
-    expect(current.composerItems).toEqual(["multica-mention"]);
-    const page = current.render();
-    expect(page).toContain("输入框");
-    expect(page).not.toContain("需要 Paseo 0.16.0");
-  } finally { current.dispose(); }
-});
-
-it("management lists shared hidden objects and offers separate workspace and selected-tab restoration", async () => {
+it("settings lists shared hidden objects and offers separate workspace and selected-tab restoration", async () => {
   const objects = [
     { connectionKey: "old-connection", issueId: "issue", workspaceId: "workspace", cwd: "/original", kind: "workspace", title: "Task" },
     { connectionKey: "old-connection", issueId: "issue", workspaceId: "workspace", cwd: "/original", kind: "thread", rootId: "root", agentId: "original-agent", title: "Task · Root" },
   ];
-  const h = await managementHarness(name => {
-    if (name === "issue.history.list") return { issues: [{ connectionKey: "old-connection", issueId: "issue", workspaceId: "workspace", title: "Read-only Task", status: "inaccessible", reason: "forbidden", lastSuccessAt: "2026-11-24T10:00:00Z", checkedAt: "2026-11-24T11:00:00Z", revision: "cache-revision" }] };
-    if (name === "issue.history.read") return { text: JSON.stringify({ title: "Read-only Task", description: "Preserved goal", discussions: [{ rootId: "root", title: "Original thread", rows: [{ id: "comment", role: "user", text: "Original cached comment" }] }], runs: [{ id: "run", agentName: "Original agent", status: "running", ownerRootId: "root", metadata: { error: "Cached task failure", work_dir: "/remote/cache/../original" }, messages: [{ task_id: "run", issue_id: "issue", seq: 1, type: "text", content: "Preserved output" }] }], deliveries: [], stops: [] }), nextOffset: null };
-    if (name === "connection.history") return { connections: [{ connectionKey: "old-connection", apiUrl: "https://original.example.test", user: { id: "original-user", name: "Original account", email: "" }, profiles: ["office"], projectCount: 1, issueCount: 2, hiddenCount: 1, pendingDeliveryCount: 1, stopWarningCount: 1 }] };
-    if (name === "stop.list") return { records: [{ connectionKey: "old-connection", issueId: "issue", rootId: "root", runId: "failed-run", title: "Closed Task", status: "running", cleanup: "unknown", retryable: true, message: "cancel failed" },
-      { connectionKey: "old-connection", issueId: "issue", rootId: "root", runId: "cancelled-run", title: "Stopped Task", status: "cancelled", cleanup: "pending", retryable: false }] };
-    if (name === "stop.retry") return { status: "ready" };
-    if (name === "delivery.list") return { records: [{ connectionKey: "old-connection", issueId: "issue", rootId: "main", clientMessageId: "native-input", idempotencyKey: "key", body: "Saved input", createdAt: "2026-11-24T10:00:00Z", status: "saved", threadRootId: "new-root", threadAgentId: "new-thread-agent" }, { connectionKey: "old-connection", issueId: "issue", rootId: "root", clientMessageId: "uncertain-input", idempotencyKey: "uncertain-key", body: "Please verify original", createdAt: "2026-11-24T10:00:00Z", status: "pending_verification" }] };
-    if (name === "delivery.verify") return { status: "pending_verification", message: "Original remains uncertain" };
-    if (name === "delivery.resend") return { clientMessageId: "new-input", idempotencyKey: "new-key" };
-    if (name === "delivery.targets") return { issues: [{ connectionKey: "old-connection", issueId: "issue", title: "Task" }] };
-    if (name === "delivery.mentions") return { agents: [{ id: "agent-id", name: "Agent A", reference: "[@Agent A](mention://agent/agent-id)" }] };
-    if (name === "hidden.list") return { objects };
+  const h = await settingsHarness(name => {
     if (name === "hidden.restore") return { status: "ready" };
     if (name === "workspace.list") return { workspaces: [] };
-    if (name === "sync.status") return empty(name, {});
-    return { status: "offline", message: "offline", profile: "", source: { api: "none", credentials: "none", app: "none" }, loginCommand: "multica login" };
+    return { hidden: objects, status: "offline", message: "offline", profile: "", source: { api: "none", credentials: "none", app: "none" }, loginCommand: "multica login" };
   });
   try {
     await vi.waitFor(() => { expect(h.render()).toContain("人工隐藏"); expect(h.render()).toContain("Task · Root"); });
-    await vi.waitFor(() => expect(h.render()).toContain("停止结果"));
-    const page = h.render();
-    for (const text of ["历史连接", "Original account", "https://original.example.test", "待核实输入 1", "cancel failed", "进程清理尚待确认", "评论已保存", "需要处理 · 1", "只读历史", "Read-only Task", "访问受限"])
-      expect(page).toContain(text);
-    // The stop that still needs a decision is listed before the settled one.
-    expect(page.indexOf("Closed Task")).toBeLessThan(page.indexOf("Stopped Task"));
-    h.action("读取缓存历史").onPress();
-    await vi.waitFor(() => expect(h.render()).toContain("Original cached comment"));
-    for (const text of ["Preserved output", "Preserved goal", "Cached task failure", "REMOTE · work_dir", "/remote/cache/../original", "运行中"]) expect(h.render()).toContain(text);
-    expect(h.calls).toContainEqual({ name: "issue.history.read", input: { connectionKey: "old-connection", issueId: "issue", revision: "cache-revision", offset: 0 } });
-    h.action("核实原投递").onPress();
-    await vi.waitFor(() => expect(h.calls).toContainEqual({ name: "delivery.verify", input: { connectionKey: "old-connection", issueId: "issue", rootId: "root", clientMessageId: "uncertain-input" } }));
     h.render();
-    h.action("重新发送…").onPress();
-    expect(h.render()).toContain("可能重复触发执行");
-    expect(h.calls.some(call => call.name === "delivery.resend")).toBe(false);
-    h.action("确认另发一次").onPress();
-    await vi.waitFor(() => expect(h.calls).toContainEqual({ name: "delivery.resend", input: expect.objectContaining({ connectionKey: "old-connection", issueId: "issue", rootId: "root", clientMessageId: "uncertain-input", acknowledgeDuplicateRisk: true, requestId: expect.any(String) }) }));
-    h.render();
-    expect(h.navigation).toEqual([]);
-    h.action("继续此 Thread").onPress();
-    expect(h.navigation).toEqual([{ agentId: "new-thread-agent", serverId: "host" }]);
-    h.selects.find(select => select.label === "任务")!.onValueChange(JSON.stringify(["old-connection", "issue"]));
-    await vi.waitFor(() => expect(h.render()).toContain("[@Agent A](mention://agent/agent-id)"));
-    h.action("复制引用").onPress();
-    await vi.waitFor(() => expect(h.copied).toEqual(["[@Agent A](mention://agent/agent-id)"]));
-    expect(h.render()).toContain("已复制");
-    h.action("重试此 Run").onPress();
-    await vi.waitFor(() => expect(h.calls).toContainEqual({ name: "stop.retry", input: { connectionKey: "old-connection", issueId: "issue", rootId: "root", runId: "failed-run" } }));
-    expect(h.actions.map(action => action.actionLabel)).toContain("仅恢复 Paseo 工作区");
-    h.action("恢复此讨论").onPress();
+    expect(h.actions.map(action => action.actionLabel)).toContain("恢复 Paseo 工作区");
+    h.action("恢复讨论").onPress();
     await vi.waitFor(() => expect(h.calls).toContainEqual({ name: "hidden.restore", input: { connectionKey: "old-connection", issueId: "issue", rootId: "root" } }));
   } finally { h.dispose(); }
 });
 
-it("management hides empty record sections, and settings links to management instead of loading records", async () => {
+it("settings shows only connection and rules when nothing is hidden", async () => {
   const answer: Answer = (name, input) => name === "connection.status" ? readyStatus : name === "workspace.list" ? { connectionKey: "current", workspaces: [] } : empty(name, input);
-  const management = await managementHarness(answer);
+  const settings = await settingsHarness(answer);
   try {
-    await vi.waitFor(() => expect(management.render()).toContain("当前没有可用的 Multica 工作区"));
-    const page = management.render();
-    for (const text of ["Multica 连接", "已连接", "Lin", "lin@example.test · ID me", "https://api.example.test", "Multica 工作区与筛选规则"]) expect(page).toContain(text);
-    for (const text of ["人工隐藏", "停止结果", "评论投递", "只读历史", "历史连接", "提及 Agent", "恢复 CLI 登录"]) expect(page).not.toContain(text);
-  } finally { management.dispose(); }
-  const settings = await managementHarness(answer);
-  try {
-    await vi.waitFor(() => expect(settings.render("settings")).toContain("当前没有可用的 Multica 工作区"));
-    expect(settings.render("settings")).toContain("Multica 连接");
-    expect(settings.calls.map(call => call.name).filter(name => ["delivery.list", "stop.list", "hidden.list", "issue.history.list", "connection.history", "delivery.targets"].includes(name))).toEqual([]);
-    settings.action("打开管理页").onPress();
-    expect(settings.opened).toEqual([{ screenId: "management" }]);
+    await vi.waitFor(() => expect(settings.render()).toContain("当前没有可用的 Multica 工作区"));
+    const page = settings.render();
+    expect(settings.calls.some(call => ["sync.status", "hidden.list"].includes(call.name))).toBe(false);
+    for (const text of ["Multica 连接", "已连接 · Lin", "https://api.example.test", "Multica 工作区与筛选规则"]) expect(page).toContain(text);
+    for (const text of ["人工隐藏", "停止结果", "评论投递", "只读历史", "历史连接", "提及 Agent", "恢复 CLI 登录", readyStatus.configPath, "凭据来源", "ID me"])
+      expect(page).not.toContain(text);
   } finally { settings.dispose(); }
-});
 
-it("management scrolls inside its own padded ScrollView; settings leaves scrolling to the host page", async () => {
-  // The host hands a plugin screen a bare flex box that neither scrolls nor pads, so a page taller
-  // than the window is unreachable until the screen provides the scroll area itself.
-  const h = await managementHarness(empty);
-  try {
-    expect(h.render()).toContain("Multica 连接");
-    expect(h.scrolls).toHaveLength(1);
-    expect(h.scrolls[0].style).toEqual({ flex: 1 });
-    expect(h.scrolls[0].contentContainerStyle).toEqual({ padding: 24 });
-    h.render("settings");
-    expect(h.scrolls).toHaveLength(0);
-    h.render("management", { layout: { compact: true, platform: "ios" } });
-    expect(h.scrolls).toHaveLength(1);
-    expect(h.scrolls[0].contentContainerStyle).toEqual({ padding: 16 });
-  } finally { h.dispose(); }
 });
 
 it("refreshing or toggling a Multica workspace keeps the connection, rules and an open filter editor on screen", async () => {
   let release: (() => void) | undefined;
   let statusReads = 0;
   const workspace = { id: "ws", name: "Team space", enabled: false, rule: defaultRule };
-  const h = await managementHarness(async (name, input) => {
+  const h = await settingsHarness(async (name, input) => {
     if (name === "connection.status") {
       // The refresh reading stays pending: the rows from the previous reading must stay put meanwhile.
       if (++statusReads > 1) await new Promise<void>(resolve => { release = resolve; });
@@ -729,7 +736,9 @@ it("refreshing or toggling a Multica workspace keeps the connection, rules and a
 it("does not report an empty Multica workspace list before the list has been read", async () => {
   // The connection reads ready before the workspace list arrives, so an empty list is first a pending read.
   let release: ((value: unknown) => void) | undefined;
-  const h = await managementHarness((name, input) => name === "workspace.list" ? new Promise(resolve => { release = resolve; }) : name === "connection.status" ? readyStatus : empty(name, input));
+  const h = await settingsHarness((name, input) => name === "workspace.list" ? new Promise(resolve => {
+    release = resolve;
+  }) : name === "connection.status" ? readyStatus : empty(name, input));
   try {
     await vi.waitFor(() => { h.render("settings"); expect(release).toBeDefined(); });
     let page = h.render("settings");
@@ -743,12 +752,13 @@ it("does not report an empty Multica workspace list before the list has been rea
   } finally { h.dispose(); }
 });
 
-it("the filter editor filters by category or by specific status, collapses long catalogs and saves the visible rule", async () => {
+it("the filter editor selects concrete default statuses, collapses catalogs and saves the visible rule", async () => {
   const labels = Array.from({ length: 10 }, (_, index) => ({ id: `label-${index}`, name: `Label ${index}` }));
-  const h = await managementHarness((name, input) => {
+  const h = await settingsHarness((name, input) => {
     if (name === "connection.status") return readyStatus;
     if (name === "workspace.list") return { connectionKey: "current", workspaces: [{ id: "ws", name: "Team space", enabled: true, rule: defaultRule }] };
-    if (name === "workspace.catalog") return { assignees: [], statuses: [{ key: "todo", name: "Todo", category: "unstarted" }], projects: [], labels };
+    if (name === "workspace.catalog")
+      return { assignees: [], statuses: [{ key: "todo", name: "Todo", category: "unstarted" }, { key: "doing", name: "Doing", category: "started" }, { key: "done", name: "Done", category: "done" }, { key: "closed", name: "Closed", category: "closed" }], projects: [], labels };
     if (name === "workspace.rule") return { status: "ready" };
     return empty(name, input);
   });
@@ -762,12 +772,14 @@ it("the filter editor filters by category or by specific status, collapses long 
     expect(page).toContain("另有 2 项未显示");
     h.action("显示全部").onPress();
     expect(h.render()).toContain("Label 9");
-    expect(h.switches.map(item => item.label)).toContain("未开始");
-    h.selects.find(select => select.label === "筛选方式")!.onValueChange("status");
-    page = h.render();
-    expect(h.switches.map(item => item.label)).not.toContain("未开始");
-    expect(page).toContain("不选表示不限状态");
-    h.switches.find(item => item.label === "Todo · 未开始")!.onValueChange(true);
+    expect(h.selects.some(select => select.label === "筛选方式")).toBe(false);
+    expect(page).not.toContain("另有状态类别限制");
+    expect(h.switches.find(item => item.label === "Todo · 未开始")!.value).toBe(true);
+    expect(h.switches.find(item => item.label === "Doing · 进行中")!.value).toBe(true);
+    expect(h.switches.find(item => item.label === "Done · 已完成")!.value).toBe(false);
+    expect(h.switches.find(item => item.label === "Closed · 已关闭")!.value).toBe(false);
+    expect(page).toContain("不选表示不限");
+    h.switches.find(item => item.label === "Doing · 进行中")!.onValueChange(false);
     h.render();
     h.action("保存筛选规则").onPress();
     await vi.waitFor(() => expect(h.calls).toContainEqual({ name: "workspace.rule", input: { workspaceId: "ws", connectionKey: "current", rule: { ...defaultRule, statusCategories: [], statuses: ["todo"] } } }));
@@ -777,13 +789,13 @@ it("the filter editor filters by category or by specific status, collapses long 
 });
 
 it("a lost CLI login shows the recovery command with a copy action instead of an empty connection", async () => {
-  const h = await managementHarness((name, input) => name === "connection.status"
+  const h = await settingsHarness((name, input) => name === "connection.status"
     ? { status: "not_logged_in", message: "CLI 未登录", profile: "work", configPath: "/home/user/.multica/profiles/work/config.json", source: { api: "config", credentials: "none", app: "none" }, loginCommand: "multica --profile work login" }
     : empty(name, input));
   try {
     await vi.waitFor(() => expect(h.render()).toContain("恢复 CLI 登录"));
     const page = h.render();
-    for (const text of ["未登录", "multica --profile work login", "尚未验证", "连接就绪后可配置"]) expect(page).toContain(text);
+    for (const text of ["未登录", "multica --profile work login", "CLI 配置", "连接就绪后可配置"]) expect(page).toContain(text);
     h.action("复制命令").onPress();
     await vi.waitFor(() => expect(h.copied).toEqual(["multica --profile work login"]));
     expect(h.render()).toContain("已复制");
@@ -791,42 +803,7 @@ it("a lost CLI login shows the recovery command with a copy action instead of an
 });
 
 
-it("an opened description observes current cached content and stops observing when unmounted", async () => {
-  const effects: Array<() => unknown> = [];
-  const renderers: Array<{ kind: string; Component: (props: any) => any }> = [];
-  const calls: string[] = [];
-  const state: unknown[] = [];
-  let cursor = 0;
-  const setup = await bundledContribution("../index.client.tsx", {
-    react: { useEffect: (effect: () => unknown) => effects.push(effect), useState: (initial: unknown) => {
-      const index = cursor++;
-      if (!(index in state)) state[index] = initial;
-      return [state[index], (value: unknown) => { state[index] = value; }];
-    } },
-    "@getpaseo/plugin/client": { useRpc: (contract: { name: string }) => async () => {
-      calls.push(contract.name);
-      return { connectionKey: "connection", issueId: "issue", revision: "current", preview: "Current cached goal", truncated: false };
-    } },
-    "@getpaseo/plugin/client/ui": { Markdown: ({ children }: { children: string }) => children },
-    "react-native": { Text: "Text", View: "View" },
-  });
-  vi.useFakeTimers();
-  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: any) => { renderers.push(renderer); return () => {}; } });
-  try {
-    const renderer = renderers.find(renderer => renderer.kind === "task-description")!;
-    const render = () => { cursor = 0; return renderedText(renderer.Component({ item: { data: { connectionKey: "connection", issueId: "issue", revision: "old", preview: "Old goal", truncated: false } }, theme: { colors: { foregroundMuted: "gray" } } })); };
-    expect(render()).toContain("Old goal");
-    const unmount = effects.splice(0).map(effect => effect()).filter((value): value is () => void => typeof value === "function");
-    await Promise.resolve();
-    expect(render()).toContain("Current cached goal");
-    expect(calls).toEqual(["description.observe"]);
-    for (const cleanup of unmount) cleanup();
-    await vi.advanceTimersByTimeAsync(20_000);
-    expect(calls).toHaveLength(1);
-  } finally { dispose(); vi.useRealTimers(); }
-});
-
-it("the native discussion shows the same daemon sync failure and cached-history status as management", async () => {
+it("the native discussion shows only thread-open failures", async () => {
   const effects: Array<() => unknown> = [];
   const renderers: Array<{ kind: string; Component: (props: any) => any }> = [];
   const state: unknown[] = [];
@@ -836,29 +813,33 @@ it("the native discussion shows the same daemon sync failure and cached-history 
       const index = cursor++; if (!(index in state)) state[index] = initial;
       return [state[index], (value: unknown) => { state[index] = value; }];
     } },
-    "@getpaseo/plugin/client": { useRpc: (contract: { name: string }) => async () => contract.name === "sync.status"
-      ? { status: "unavailable", stage: "issues", completedWorkspaces: 0, enabledWorkspaces: 1, lastSuccessAt: "2026-11-24T10:00:00Z", message: "保留已读缓存" }
-      : { status: "cached", message: "可阅读已读历史" } },
+    "@getpaseo/plugin/client": { useRpc: () => async () => ({ status: "cached", message: "可阅读已读历史" }) },
     "react-native": { Text: "Text", View: "View", Pressable: "Pressable" },
     "@getpaseo/plugin/client/ui": {},
   });
-  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: any) => { renderers.push(renderer); return () => {}; } });
+  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: any) => {
+    renderers.push(renderer);
+    return () => {};
+  } });
   try {
     const renderer = renderers.find(renderer => renderer.kind === "thread")!;
-    const render = () => { cursor = 0; return renderedText(renderer.Component({ item: { data: { connectionKey: "connection", issueId: "issue", rootId: "root" } }, theme: { colors: { foreground: "black", foregroundMuted: "gray" } } })); };
+    const render = () => {
+      cursor = 0;
+      return renderedText(renderer.Component({ item: { data: { connectionKey: "connection", issueId: "issue", rootId: "root" } }, theme: { colors: { foreground: "black", foregroundMuted: "gray" } } }));
+    };
     render();
     const unmount = effects.splice(0).map(effect => effect()).filter((value): value is () => void => typeof value === "function");
     await Promise.resolve();
-    expect(render()).toContain("同步未完成");
-    expect(render()).toContain("保留已读缓存");
-    expect(render()).toContain(`上次完成核对：${formatTime("2026-11-24T10:00:00Z")}`);
+    expect(render()).not.toContain("同步未完成");
+    expect(render()).toContain("可阅读已读历史");
+    expect(render()).not.toContain("上次完成核对");
     for (const cleanup of unmount) cleanup();
   } finally { dispose(); }
 });
 
 it.each([
   ["pending", {}, ["待答"]],
-  ["pending", { delivery: { status: "pending_verification", clientMessageId: "answer", message: "响应无法核实" } }, ["待核实", "响应无法核实", "核实原投递", "重新发送"]],
+  ["pending", { delivery: { status: "failed", clientMessageId: "answer", message: "回答发送失败" } }, ["回答发送失败"]],
   ["answered", { answer: { commentId: "reply", content: "**确认结果**\n\n1. **理由**：已核对", actorId: "reviewer", actorType: "member" } }, ["已答", "reviewer", "已核对"]],
   ["skipped", { skippedAt: "2026-11-24T10:00:00Z", skippedBy: "operator" }, ["已跳过", "operator"]],
   ["invalid", { error: "附件超过 64 KiB 上限。" }, ["不可解析", "64 KiB"]],
@@ -909,23 +890,6 @@ it("the compiled askuser card loads complete warning details only on explicit re
   } finally { dispose(); }
 });
 
-it("compiled cache-only history renders a complete askuser card without requesting CLI or remote card data", async () => {
-  const h = await managementHarness((name, input) => {
-    if (name === "issue.history.list") return { issues: [{ connectionKey: "old", issueId: "issue", workspaceId: "workspace", title: "History", status: "inaccessible", revision: "history-v1" }] };
-    if (name === "issue.history.read") return { text: JSON.stringify({ title: "History", description: "", discussions: [], runs: [], deliveries: [], stops: [], askuserCards: [
-      { connectionKey: "old", issueId: "issue", rootId: "root", commentId: "card", attachmentId: "file", revision: "v1", title: "历史提问", description: "完整历史警示说明", questions: [{ id: "reason", title: "说明原因", type: "text" }], status: "answered", readOnly: true, offline: true, truncated: false, answer: { commentId: "answer", actorId: "original-user", content: "已确认完整回答" } },
-      { connectionKey: "old", issueId: "issue", rootId: "root", commentId: "skipped", attachmentId: "skipped-file", revision: "v1", title: "历史跳过卡片", description: "跳过前的完整警示", questions: [{ id: "scope", title: "历史范围", type: "single", options: [{ id: "canary", label: "仅灰度" }] }], status: "skipped", skippedBy: "skip-operator", readOnly: true, offline: true, truncated: false },
-      { connectionKey: "old", issueId: "issue", rootId: "root", commentId: "pending", attachmentId: "pending-file", revision: "v1", title: "历史待答卡片", description: "待答完整警示", questions: [{ id: "reason", title: "补充理由", type: "text", required: false }], status: "pending", collapsed: true, readOnly: true, offline: true, truncated: false },
-    ] }), nextOffset: null };
-    return empty(name, input) ?? { status: "offline", message: "offline", profile: "", source: { api: "none", credentials: "none", app: "none" }, loginCommand: "multica login" };
-  });
-  try {
-    await vi.waitFor(() => expect(h.render()).toContain("History")); h.action("读取缓存历史").onPress();
-    await vi.waitFor(() => expect(h.render()).toContain("历史提问"));
-    for (const text of ["完整历史警示说明", "说明原因", "只读", "离线缓存", "original-user", "已确认完整回答", "历史跳过卡片", "跳过前的完整警示", "历史范围", "仅灰度", "已跳过", "skip-operator", "历史待答卡片", "待答完整警示", "补充理由", "已在本地收起"]) expect(h.render()).toContain(text);
-    expect(h.calls.some(call => call.name.startsWith("askuser."))).toBe(false);
-  } finally { h.dispose(); }
-});
 
 async function askuserActionHarness(answer: Answer, extra: Record<string, unknown> = {}) {
   const tree = componentTree();
@@ -948,6 +912,7 @@ async function askuserActionHarness(answer: Answer, extra: Record<string, unknow
   const render = () => { buttons.length = 0; return tree.render(createElement(renderer.Component as FunctionComponent<any>, { item: { data: renderer.schema.parse(base) }, theme: { colors: { foreground: "fg", foregroundMuted: "muted", statusDanger: "danger" } } })); };
   return { calls, buttons, render, button: (label: string) => { render(); const button = buttons.find(button => button.accessibilityLabel === label); expect(button, label).toBeDefined(); return button!; }, dispose: () => { tree.unmount(); dispose(); } };
 }
+
 
 it("the compiled askuser card reopens locally collapsed forms and requires a separate confirmation before remote skip", async () => {
   const h = await askuserActionHarness((name) => ({ connectionKey: "connection", issueId: "issue", rootId: "root", commentId: "card", attachmentId: "file", revision: "v2", title: "发布确认", questions: [], status: name === "askuser.skip" ? "skipped" : "pending", collapsed: false, readOnly: name === "askuser.skip", offline: false, truncated: false }));
@@ -992,13 +957,13 @@ it.each([{ readOnly: true, readOnlyReason: "仅指定用户 other 可作答。" 
   } finally { h.dispose(); }
 });
 
-it("the compiled uncertain-answer card opens delivery management and explains conditions with question titles and labels", async () => {
+it("the compiled failed-answer card reports its error and explains conditions with question titles and labels", async () => {
   const renderers: PluginTimelineRendererContribution[] = [];
   const pressables: Array<{ onPress(): void }> = [];
   const opened: unknown[] = [];
   const tree = componentTree();
   const data = { connectionKey: "connection", issueId: "issue", rootId: "root", commentId: "card", attachmentId: "file", revision: "revision", title: "发布确认", status: "pending", readOnly: true, offline: false, truncated: false,
-    delivery: { status: "pending_verification", clientMessageId: "answer", message: "响应丢失" },
+    delivery: { status: "failed", clientMessageId: "answer", message: "回答发送失败" },
     questions: [{ id: "choice", type: "single", title: "发布范围", options: [{ id: "all", label: "全量" }, { id: "small", label: "灰度" }] }, { id: "detail", type: "text", title: "理由", required_when: { question_id: "choice", option_ids: ["all"] } }] };
   const setup = await bundledContribution("../index.client.tsx", {
     react: tree.react, "@getpaseo/plugin/client": { useRpc: () => async () => data },
@@ -1009,7 +974,33 @@ it("the compiled uncertain-answer card opens delivery management and explains co
   try {
     const renderer = renderers.find(value => value.kind === "askuser")!;
     const text = tree.render(createElement(renderer.Component as FunctionComponent<any>, { item: { type: "plugin", kind: "askuser", version: 1, data: renderer.schema.parse(data) }, theme: { colors: {} } }));
-    expect(text).toContain("「发布范围」选择「全量」时必填"); expect(text).toContain("待核实");
-    expect(pressables).toHaveLength(1); pressables[0].onPress(); expect(opened).toEqual([{ screenId: "management" }]);
+    expect(text).toContain("「发布范围」选择「全量」时必填"); expect(text).toContain("回答发送失败");
+    expect(pressables).toHaveLength(0); expect(opened).toEqual([]);
   } finally { tree.unmount(); dispose(); }
+});
+
+it.each([
+  { categories: ["done"], statuses: [], selected: ["done"] },
+  { categories: [], statuses: ["done"], selected: ["done"] },
+  { categories: ["unstarted", "started"], statuses: ["todo", "done"], selected: ["todo"] },
+  { categories: [], statuses: [], selected: [] },
+])("saves concrete statuses from an existing rule: %j", async example => {
+  const rule = { ...defaultRule, statusCategories: example.categories, statuses: example.statuses };
+  const h = await settingsHarness((name, input) => {
+    if (name === "connection.status") return readyStatus;
+    if (name === "workspace.list") return { connectionKey: "current", workspaces: [{ id: "ws", name: "Team space", enabled: true, rule }] };
+    if (name === "workspace.catalog")
+      return { assignees: [], statuses: [{ key: "todo", name: "Todo", category: "unstarted" }, { key: "doing", name: "Doing", category: "started" }, { key: "done", name: "Done", category: "done" }], projects: [], labels: [] };
+    if (name === "workspace.rule") return { status: "ready" };
+    return empty(name, input);
+  });
+  try {
+    await vi.waitFor(() => expect(h.render()).toContain("Team space"));
+    h.action("配置筛选条件").onPress();
+    await vi.waitFor(() => expect(h.render()).toContain("Todo · 未开始"));
+    const choices = h.switches.filter(item => item.label.includes(" · "));
+    expect(choices.filter(item => item.value).map(item => ({ "Todo · 未开始": "todo", "Doing · 进行中": "doing", "Done · 已完成": "done" })[item.label])).toEqual(example.selected);
+    h.action("保存筛选规则").onPress();
+    await vi.waitFor(() => expect(h.calls).toContainEqual({ name: "workspace.rule", input: { workspaceId: "ws", connectionKey: "current", rule: { ...rule, statusCategories: [], statuses: example.selected } } }));
+  } finally { h.dispose(); }
 });

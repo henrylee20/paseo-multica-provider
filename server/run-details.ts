@@ -1,14 +1,12 @@
-import { createHash } from "node:crypto";
 import { z } from "zod";
-import { runAddress, runMessageSchema } from "../shared/runs.js";
+import { runAddress, runMessageSchema, type runRead } from "../shared/runs.js";
 import type { AuthenticatedConnection } from "./connection.js";
-import { StateStore } from "./state.js";
-import { remoteJson, workspaceSchema, type RemoteWorkspace } from "./sync.js";
-import { assertWritableIssue } from "./access.js";
+import { StateStore, cachedWorkspace } from "./state.js";
+import { remoteJson } from "./sync.js";
+import { readText, textRevision } from "./chunked-text.js";
 
 type Address = z.infer<typeof runAddress>;
 const key = (address: Address) => JSON.stringify([address.connectionKey, address.issueId, address.rootId, address.runId]);
-const revision = (text: string) => createHash("sha256").update(text).digest("hex");
 
 /** Only explicit expansion refreshes output. Cached reads never need CLI login. */
 export class RunDetails {
@@ -33,21 +31,17 @@ export class RunDetails {
       await operation;
     } catch { status = "cached"; }
     const { cache, metadata } = await this.cached(address);
-    const metadataRevision = metadata && Object.keys(metadata).length ? revision(JSON.stringify(metadata)) : undefined;
+    const metadataRevision = metadata && Object.keys(metadata).length ? textRevision(JSON.stringify(metadata)) : undefined;
     if (!cache) return { status: metadataRevision ? "cached" : "unavailable", metadataRevision, message: "无法读取执行消息；尚无已读消息缓存。" };
-    return { status, revision: revision(JSON.stringify(cache.messages)), metadataRevision, ...(status === "cached" ? { message: "远端执行明细暂不可用，正在显示已读缓存。" } : {}) };
+    return { status, revision: textRevision(JSON.stringify(cache.messages)), metadataRevision,
+      ...(status === "cached" ? { message: "远端执行明细暂不可用，正在显示已读缓存。" } : {}) };
   }
   private async refresh(address: Address) {
     const { issue, cache } = await this.cached(address);
-    assertWritableIssue(issue);
-    // Resolve /api/me anew before every remote output read. A cached mapping is
-    // sufficient for local history, never authority to reuse another login.
+    // Resolve the current CLI context; cached history cannot authorize another login.
     const connection = await this.connection();
     if (connection.connectionKey !== address.connectionKey) throw new Error("Connection identity changed");
-    const workspaces = await remoteJson(connection, "/api/workspaces", z.array(workspaceSchema)) as RemoteWorkspace[];
-    const workspace = workspaces.find(value => value.id === issue.remoteWorkspaceId);
-    if (!workspace) throw new Error("Workspace unavailable");
-    assertWritableIssue((await this.store.read()).connections[address.connectionKey]?.issues[address.issueId]);
+    const workspace = cachedWorkspace(await this.store.read(), address.connectionKey, issue);
     const known = new Set(cache?.messages.map(message => message.seq));
     // Strict seq > since. Never advance across a missing sequence, including
     // the first message; old/partial sources are safe to reread in full.
@@ -63,21 +57,11 @@ export class RunDetails {
       state.connections[address.connectionKey].issues[address.issueId].runDetails[address.runId] = { messages: [...unique.values()].sort((a, b) => a.seq - b.seq) };
     });
   }
-  async read(address: Address & { revision: string; offset: number }) {
-    const { cache } = await this.cached(address);
-    if (!cache) throw new Error("Run details unavailable");
-    const text = JSON.stringify(cache.messages);
-    if (revision(text) !== address.revision || address.offset > text.length) throw new Error("Run details changed; reopen the execution segment");
-    const end = Math.min(text.length, address.offset + 8192);
-    return { text: text.slice(address.offset, end), nextOffset: end < text.length ? end : null };
-  }
-  async readMetadata(address: Address & { revision: string; offset: number }) {
-    const { metadata } = await this.cached(address);
-    if (!metadata) throw new Error("Run metadata unavailable");
-    const text = JSON.stringify(metadata);
-    if (revision(text) !== address.revision || address.offset > text.length) throw new Error("Run metadata changed; reopen the execution segment");
-    const end = Math.min(text.length, address.offset + 8192);
-    return { text: text.slice(address.offset, end), nextOffset: end < text.length ? end : null };
+  async read(address: z.infer<typeof runRead.input>) {
+    const { cache, metadata } = await this.cached(address);
+    const value = address.kind === "messages" ? cache?.messages : metadata;
+    if (!value) throw new Error("Run cached content unavailable");
+    return readText(JSON.stringify(value), address);
   }
   async close() { await Promise.allSettled(this.pending.values()); }
 }

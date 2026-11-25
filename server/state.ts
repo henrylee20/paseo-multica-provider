@@ -3,29 +3,24 @@ import { join } from "node:path";
 import { z } from "zod";
 import { storedRunSchema } from "./run-state.js";
 import { runMessageSchema } from "../shared/runs.js";
-import { stopRecordSchema } from "./stop-state.js";
 import { threadSchema } from "./thread-state.js";
-import { deliveryRecordSchema } from "./delivery-state.js";
-import { connectionIdentitySchema, taskRuleSchema } from "../shared/contracts.js";
+import { taskRuleSchema } from "../shared/contracts.js";
 import { askuserAttachmentSchema, storedAskuserCardSchema } from "./askuser-state.js";
-import { issueAccessSchema } from "../shared/access.js";
 
-const projectSchema = z.object({ cwd: z.string(), name: z.string(), projectId: z.string().optional(), removed: z.boolean().optional() });
-const issueSchema = z.object({
+const projectSchema = z.object({ cwd: z.string(), name: z.string(), slug: z.string().optional(), projectId: z.string().optional(), removed: z.boolean().optional() });
+export const issueSchema = z.object({
   remoteWorkspaceId: z.string(), workspaceId: z.string(), cwd: z.string(), title: z.string(),
   projectId: z.string().optional(),
   description: z.string(), updatedAt: z.string().optional(), workspaceCreated: z.boolean().default(false), mainAgentId: z.string().optional(),
-  access: issueAccessSchema.optional(),
-  archiveReason: z.enum(["rule_disabled", "filter_exit", "inaccessible"]).optional(), ruleArchivedAgentIds: z.array(z.string()).default([]), archivePending: z.boolean().default(false),
+  // "inaccessible" is accepted only so states written before OPT-08 remain readable.
+  archiveReason: z.enum(["rule_disabled", "filter_exit", "inaccessible"]).optional(), ruleArchivedAgentIds: z.array(z.string()).default([]),
   manualHidden: z.object({ workspace: z.boolean(), discussions: z.array(z.string()) }).default({ workspace: false, discussions: [] }),
   threads: z.record(z.string(), threadSchema).default({}),
   runs: z.record(z.string(), storedRunSchema).default({}),
   runDetails: z.record(z.string(), z.object({ messages: z.array(runMessageSchema) })).default({}),
-  stopEpochs: z.record(z.string(), z.number().int().nonnegative()).default({}),
-  stopRecords: z.record(z.string(), stopRecordSchema).default({}),
   askuserAttachments: z.record(z.string(), askuserAttachmentSchema).optional(),
   askuserCards: z.record(z.string(), storedAskuserCardSchema).optional(),
-  deliveries: z.record(z.string(), deliveryRecordSchema).default({}),
+  commentInputs: z.record(z.string(), z.object({ commentId: z.string(), rootId: z.string() })).default({}),
   commentSourceTaskIds: z.record(z.string(), z.string()).default({}),
   commentCreatedAt: z.record(z.string(), z.string()).default({}),
   commentRoots: z.record(z.string(), z.string()).default({}),
@@ -34,7 +29,6 @@ const issueSchema = z.object({
   mainHistory: threadSchema.default({ title: "主讨论", historyLoaded: false, rows: [], observed: {} }),
 });
 const connectionSchema = z.object({
-  identity: connectionIdentitySchema.optional(),
   rules: z.record(z.string(), taskRuleSchema.extend({ enabled: z.boolean() })),
   projects: z.record(z.string(), projectSchema), issues: z.record(z.string(), issueSchema),
 });
@@ -48,24 +42,31 @@ export class StateStore {
   private pending: Promise<unknown> = Promise.resolve();
   private readonly listeners = new Set<(state: LocalState) => void>();
   subscribe(listener: (state: LocalState) => void) { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
+  private cached?: Promise<LocalState>;
   constructor(readonly directory: string) {}
+  /** Shared read-only snapshot; all changes must go through update(). */
   async read(): Promise<LocalState> {
     await this.pending;
-    return this.load();
+    return this.cached ??= this.load();
   }
   private async load(): Promise<LocalState> {
     try { return stateSchema.parse(JSON.parse(await readFile(join(this.directory, "state.json"), "utf8"))); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return { version: 1, connections: {} }; throw error; }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return { version: 1, connections: {} };
+      this.cached = undefined;
+      throw error;
+    }
   }
   update(change: (state: LocalState) => void): Promise<void> {
     const operation = this.pending.then(async () => {
-      const state = await this.load();
+      const state = structuredClone(await (this.cached ??= this.load()));
       change(state);
       const validated = stateSchema.parse(state);
       await mkdir(this.directory, { recursive: true, mode: 0o700 });
       const temporary = join(this.directory, "state.json.next");
       await writeFile(temporary, JSON.stringify(validated), { mode: 0o600 });
       await rename(temporary, join(this.directory, "state.json"));
+      this.cached = Promise.resolve(validated);
       for (const listener of this.listeners) listener(validated);
     });
     this.pending = operation.catch(() => {});
@@ -75,4 +76,10 @@ export class StateStore {
 
 export function connectionState(state: LocalState, key: string): ConnectionState {
   return state.connections[key] ??= { rules: {}, projects: {}, issues: {} };
+}
+
+export function cachedWorkspace(state: LocalState, connectionKey: string, issue: IssueMapping) {
+  const project = state.connections[connectionKey]?.projects[issue.remoteWorkspaceId];
+  if (!project?.slug) throw new Error("Multica 工作区不可用。");
+  return { id: issue.remoteWorkspaceId, name: project.name, slug: project.slug };
 }

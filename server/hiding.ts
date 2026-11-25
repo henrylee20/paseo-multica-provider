@@ -1,7 +1,7 @@
 import type { PluginHookAgent } from "@getpaseo/plugin/server";
 import { StateStore, type IssueMapping } from "./state.js";
 import { archiveClosedDiscussion, ensureWorkspaceActive, restoreMappedDiscussion, type NativeHost } from "./native-host.js";
-import { assertWritableIssue } from "./access.js";
+import type { DiscussionMetadata } from "./discussion-metadata.js";
 import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
 
 export function discussionAgent(issue: IssueMapping, rootId: string) {
@@ -39,7 +39,7 @@ export async function restoreWorkspacePreservingHidden(host: NativeHost, lifecyc
 /** Native hooks carry no bulk-archive cause. Preserve every explicit tab hide;
  * a workspace restore therefore leaves its discussions available for separate restore. */
 export class ManualHiding {
-  constructor(private readonly store: StateStore, private readonly lifecycle: DiscussionLifecycle) {}
+  constructor(private readonly store: StateStore, private readonly lifecycle: DiscussionLifecycle, private readonly metadata: DiscussionMetadata) {}
   async archivedAgent(agent: PluginHookAgent) {
     if (agent.provider !== "multica") return;
     await this.store.update(state => {
@@ -64,20 +64,21 @@ export class ManualHiding {
       return [
         ...(issue.manualHidden.workspace ? [{ ...address, kind: "workspace" as const, title: issue.title }] : []),
         ...issue.manualHidden.discussions.map(rootId => ({ ...address, kind: rootId === "main" ? "main" as const : "thread" as const,
-          rootId, agentId: discussionAgent(issue, rootId), title: `${issue.title} · ${rootId === "main" ? "主讨论" : issue.threads[rootId]?.title ?? "Thread"}` })),
+          rootId, agentId: discussionAgent(issue, rootId),
+          title: `${issue.title} · ${rootId === "main" ? "主讨论" : issue.threads[rootId]?.title ?? "Thread"}` })),
       ];
     })) };
   }
   async restore(input: { connectionKey: string; issueId: string; rootId?: string }, host: NativeHost) {
     const issue = (await this.store.read()).connections[input.connectionKey]?.issues[input.issueId];
     if (!issue?.workspaceCreated) throw new Error("Mapped workspace unavailable");
-    assertWritableIssue(issue);
     if (issue.archiveReason) throw new Error("任务目前已退出筛选范围；请先启用并调整 Multica 工作区规则，再恢复隐藏对象。");
     const agentId = input.rootId === undefined ? undefined : discussionAgent(issue, input.rootId);
     if (input.rootId !== undefined && !agentId) throw new Error("Mapped discussion unavailable");
     await restoreWorkspacePreservingHidden(host, this.lifecycle, issue, input, input.rootId);
     if (agentId) {
       await restoreMappedDiscussion(host, this.lifecycle, agentId, issue, input);
+      await this.metadata.write(agentId, input.connectionKey, input.issueId);
     }
     await this.store.update(state => {
       const saved = state.connections[input.connectionKey].issues[input.issueId];

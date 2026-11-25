@@ -2,8 +2,7 @@ import { AskuserCard } from "./client/askuser-card.js";
 import { askuserCardSchema } from "./shared/askuser.js";
 import { RunSummary } from "./client/run-summary.js";
 import { runSummarySchema } from "./shared/runs.js";
-import type { PluginClientContext, PluginSidebarItemProps } from "@getpaseo/plugin/client";
-import { SidebarRow } from "@getpaseo/plugin/client/ui";
+import type { PluginClientContext } from "@getpaseo/plugin/client";
 import { ConnectionScreen } from "./client/connection-screen.js";
 import { syncBootstrap } from "./shared/contracts.js";
 import { TaskDescription } from "./client/task-description.js";
@@ -13,11 +12,6 @@ import { commentEventSchema, threadSummarySchema } from "./shared/threads.js";
 import { DeliveryStatus } from "./client/delivery-status.js";
 import { deliverySummary } from "./shared/delivery.js";
 import { MentionPicker, composerItemRegistrar } from "./client/mention-picker.js";
-
-function MulticaItem({ currentScreen, openScreen }: PluginSidebarItemProps) {
-  return <SidebarRow icon="MessagesSquare" active={currentScreen?.screenId === "management"}
-    onPress={() => openScreen({ screenId: "management" })} />;
-}
 
 export default function contribute(client: PluginClientContext) {
   let disposed = false;
@@ -29,24 +23,29 @@ export default function contribute(client: PluginClientContext) {
     finally { inFlight = false; }
   }
   void bootstrap();
-  // Client setup survives reconnects. Keep retrying even when management was never opened.
+  // The contribution survives reconnects; a restarted daemon needs bootstrap again.
   const timer = setInterval(() => { void bootstrap(); }, 10_000);
-  const openManagement = () => client.openScreen({ screenId: "management" });
-  // The composer's agent picker needs Paseo 0.16; an older host keeps the copied-reference route only.
+  // The composer's agent picker needs Paseo 0.16.
   const composerItem = composerItemRegistrar(client);
   const removeMention = composerItem ? composerItem({ id: "multica-mention", Component: MentionPicker }) : () => {};
-  // Settings configures the connection and rules; the sidebar screen also holds records that need handling.
-  const removeSettings = client.addSettingsScreen({ id: "multica", title: "Multica", icon: "MessagesSquare",
-    Component: props => <ConnectionScreen {...props} scope="settings" openManagement={openManagement} /> });
-  const removeScreen = client.addScreen({ id: "management", title: "Multica",
-    Component: props => <ConnectionScreen {...props} scope="management" mentionPicker={composerItem !== null} /> });
-  const removeItem = client.addSidebarHeaderItem({ id: "multica", title: "Multica", Component: MulticaItem });
+  const removeSettings = client.addSettingsScreen({ id: "multica", title: "Multica", icon: "MessagesSquare", Component: ConnectionScreen });
   const removeDescription = client.addTimelineRenderer({ kind: taskDescriptionKind, version: taskDescriptionVersion,
     schema: taskDescriptionSchema, Component: TaskDescription });
   const removeThread = client.addTimelineRenderer({ kind: "thread", version: 1, schema: threadSummarySchema, Component: ThreadSummary });
   const removeRun = client.addTimelineRenderer({ kind: "run-summary", version: 1, schema: runSummarySchema, Component: RunSummary });
   const removeEvent = client.addTimelineRenderer({ kind: "comment-event", version: 1, schema: commentEventSchema, Component: CommentEvent });
-  const removeAskuser = client.addTimelineRenderer({ kind: "askuser", version: 1, schema: askuserCardSchema, Component: props => <AskuserCard {...props} openManagement={openManagement} /> });
-  const removeDelivery = client.addTimelineRenderer({ kind: "comment-delivery", version: 1, schema: deliverySummary, Component: props => <DeliveryStatus {...props} openManagement={openManagement} /> });
-  return () => { disposed = true; clearInterval(timer); removeAskuser(); removeDelivery(); removeRun(); removeEvent(); removeThread(); removeDescription(); removeMention(); removeItem(); removeScreen(); removeSettings(); };
+  const removeAskuser = client.addTimelineRenderer({ kind: "askuser", version: 1, schema: askuserCardSchema, Component: AskuserCard });
+  const removeDelivery = client.addTimelineRenderer({ kind: "comment-delivery", version: 1, schema: deliverySummary, Component: DeliveryStatus });
+  return () => {
+    disposed = true;
+    clearInterval(timer);
+    removeAskuser();
+    removeDelivery();
+    removeRun();
+    removeEvent();
+    removeThread();
+    removeDescription();
+    removeMention();
+    removeSettings();
+  };
 }
