@@ -7,6 +7,7 @@ import { stopRecordSchema } from "./stop-state.js";
 import { threadSchema } from "./thread-state.js";
 import { deliveryRecordSchema } from "./delivery-state.js";
 import { connectionIdentitySchema, taskRuleSchema } from "../shared/contracts.js";
+import { askuserAttachmentSchema, storedAskuserCardSchema } from "./askuser-state.js";
 import { issueAccessSchema } from "../shared/access.js";
 
 const projectSchema = z.object({ cwd: z.string(), name: z.string(), projectId: z.string().optional(), removed: z.boolean().optional() });
@@ -22,6 +23,8 @@ const issueSchema = z.object({
   runDetails: z.record(z.string(), z.object({ messages: z.array(runMessageSchema) })).default({}),
   stopEpochs: z.record(z.string(), z.number().int().nonnegative()).default({}),
   stopRecords: z.record(z.string(), stopRecordSchema).default({}),
+  askuserAttachments: z.record(z.string(), askuserAttachmentSchema).optional(),
+  askuserCards: z.record(z.string(), storedAskuserCardSchema).optional(),
   deliveries: z.record(z.string(), deliveryRecordSchema).default({}),
   commentSourceTaskIds: z.record(z.string(), z.string()).default({}),
   commentCreatedAt: z.record(z.string(), z.string()).default({}),

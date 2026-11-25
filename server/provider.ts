@@ -1,3 +1,4 @@
+import type { AskUsers } from "./askuser.js";
 import { randomUUID } from "node:crypto";
 import { isActiveRun, runSummary, type RunSynchronizer } from "./runs.js";
 import { z } from "zod";
@@ -19,7 +20,7 @@ const persistenceSchema = z.object({ version: z.literal(1), data: z.object({
 const supported = ["prompt.message", "prompt.steer", "session.persistence", "session.list", "timeline.plugin", "session.archive", "session.unarchive"];
 
 /** A Multica discussion projection, never a local code execution engine. */
-export function createMulticaProvider(store: StateStore, threads: ThreadSynchronizer, runs: RunSynchronizer, stops: StopCoordinator, deliveries: CommentDelivery, descriptions: TaskDescriptions, lifecycle: DiscussionLifecycle): ProviderRegistration {
+export function createMulticaProvider(store: StateStore, threads: ThreadSynchronizer, runs: RunSynchronizer, stops: StopCoordinator, deliveries: CommentDelivery, descriptions: TaskDescriptions, lifecycle: DiscussionLifecycle, askusers: AskUsers): ProviderRegistration {
   return {
     id: providerId, label: "Multica", description: "Multica 任务讨论（目录仅为本地占位目录）",
     status: async () => ({ available: true }),
@@ -32,6 +33,7 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
       const runSubscriptions = new Map<string, () => void>();
       const descriptionSubscriptions = new Map<string, () => void>();
       const subscriptions = new Map<string, () => void>();
+      const askuserSubscriptions = new Map<string, () => void>();
       const deliverySubscriptions = new Map<string, () => void>();
       const activeTurns = new Map<string, string>();
       const lifecycleSubscriptions = new Map<string, () => void>();
@@ -40,6 +42,7 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
       let closed = false;
       const emit = (event: ProviderEvent) => { if (!closed) for (const listener of listeners) listener(event); };
       const releaseSession = (sessionId: string) => {
+        askuserSubscriptions.get(sessionId)?.(); askuserSubscriptions.delete(sessionId);
         sessions.delete(sessionId);
         emittedRows.delete(sessionId);
         originalIdentities.delete(sessionId);
@@ -142,6 +145,8 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
             }
             const address = { connectionKey: parsed.data.data.connectionKey, issueId: parsed.data.data.issueId, rootId: parsed.data.data.discussion === "thread" ? parsed.data.data.rootId : "main" };
             addresses.set(input.sessionId, address);
+            for (const item of await askusers.rows(address)) emit({ type: "timeline.item", sessionId: input.sessionId, item });
+            askuserSubscriptions.set(input.sessionId, askusers.subscribe(address, item => emit({ type: "timeline.item", sessionId: input.sessionId, item })));
             lifecycleSubscriptions.set(input.sessionId, lifecycle.subscribe(address, async () => {
               // A Stop accepted before this resource began closing retains its
               // result before session.closed rejects outstanding host requests.

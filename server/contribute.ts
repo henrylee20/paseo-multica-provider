@@ -24,6 +24,8 @@ import { stopList, stopRetry } from "../shared/stops.js";
 import { CommentDelivery } from "./delivery.js";
 import { deliveryList, deliveryRead, deliveryTargets, deliveryMentions, deliveryVerify, deliveryResend } from "../shared/delivery.js";
 import { issueHistoryList, issueHistoryRead } from "../shared/access.js";
+import { AskUsers } from "./askuser.js";
+import { askuserObserve, askuserRead } from "../shared/askuser.js";
 import { IssueHistory } from "./access.js";
 
 export interface ServerDependencies extends ConnectionDependencies {
@@ -75,7 +77,10 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
         pendingDeliveryCount: issues.reduce((count, issue) => count + Object.values(issue.deliveries).filter(record => record.status === "received" || record.status === "pending_verification").length, 0),
         stopWarningCount: issues.reduce((count, issue) => count + Object.values(issue.stopRecords).filter(record => record.retryable || record.cleanup === "pending" || record.cleanup === "unconfirmed").length, 0) };
     }) }));
-    const threads = new ThreadSynchronizer(store, connection);
+    const askusers = new AskUsers(store, connection);
+    server.handle(askuserObserve, input => askusers.observe(input));
+    server.handle(askuserRead, input => askusers.read(input));
+    const threads = new ThreadSynchronizer(store, connection, askusers);
     const metadata = new DiscussionMetadata(store);
     const history = new IssueHistory(store);
     server.handle(issueHistoryList, () => history.list());
@@ -102,7 +107,7 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       catch (error) { return { status: "unavailable" as const, message: error instanceof Error ? error.message : "停止重试失败。" }; }
     });
     const descriptions = new TaskDescriptions(store);
-    server.registerProvider(createMulticaProvider(store, threads, runs, stops, deliveries, descriptions, lifecycle));
+    server.registerProvider(createMulticaProvider(store, threads, runs, stops, deliveries, descriptions, lifecycle, askusers));
     server.handle(observeTaskDescription, input => descriptions.observe(input));
     server.handle(readTaskDescription, async input => {
       // The host authenticates this RPC. Cached history belongs to its persisted
@@ -175,6 +180,6 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       try { await synchronizer.rule(context.paseo, input.workspaceId, input.rule, input.connectionKey); return { status: "ready" as const }; }
       catch { return { status: "unavailable" as const, message: "筛选规则保存或同步失败，请检查连接后重试。" }; }
     });
-    return async () => { await deliveries.close(); await synchronizer.close(); await metadata.close(); await stops.close(); await threads.close(); await runDetails.close(); runs.close(); descriptions.close(); };
+    return async () => { await deliveries.close(); await synchronizer.close(); await metadata.close(); await stops.close(); await threads.close(); await askusers.close(); await runDetails.close(); runs.close(); descriptions.close(); };
   };
 }
