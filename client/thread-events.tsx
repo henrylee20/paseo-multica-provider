@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { useRpc, type PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import type { z } from "zod";
-import { threadOpen, threadSummarySchema, commentEventSchema, commentEventDetail } from "../shared/threads.js";
+import { threadOpen, threadSummarySchema, commentEventSchema, commentEventDetail, commentDividerSchema } from "../shared/threads.js";
 
 export function ThreadSummary({ item, theme }: PluginTimelineItemProps<z.infer<typeof threadSummarySchema>>) {
   const open = useRpc(threadOpen);
@@ -21,6 +21,10 @@ export function ThreadSummary({ item, theme }: PluginTimelineItemProps<z.infer<t
     {message ? <Text style={{ color: theme.colors.foregroundMuted }}>{message}</Text> : null}
     <Pressable accessibilityRole="button" onPress={() => setAttempt(value => value + 1)}><Text style={{ color: theme.colors.foreground }}>重新读取历史</Text></Pressable>
   </View>;
+}
+
+export function CommentDivider({ theme }: PluginTimelineItemProps<z.infer<typeof commentDividerSchema>>) {
+  return <View style={{ height: 1, backgroundColor: theme.colors.border, marginVertical: 6, width: "100%" }} />;
 }
 
 const labels = { system: "系统事件", correction: "评论更正", deletion: "评论删除", source: "评论来源" };

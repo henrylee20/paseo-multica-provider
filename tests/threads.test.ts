@@ -21,7 +21,7 @@ const comment = (id: string, parent_id: string | null, content: string, author_i
 });
 type Comment = ReturnType<typeof comment>;
 function conversationRows(rows: ProviderTimelineItem[] | undefined) {
-  return rows?.filter(row => row.type !== "plugin" || !row.data || typeof row.data !== "object" || Array.isArray(row.data) || row.data.category !== "source");
+  return rows?.filter(row => row.type !== "plugin" || (row.kind !== "comment-divider" && (!row.data || typeof row.data !== "object" || Array.isArray(row.data) || row.data.category !== "source")));
 }
 
 
@@ -733,4 +733,55 @@ it("shows a historical Run's terminal state when its execution messages cannot b
   await provider.send({ type: "session.open", requestId: "offline-open", sessionId: parent.id, history: "skip", persistence: JSON.parse(parent.handle.slice(7)), config: { cwd: parent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
   await expect.poll(() => f.requests.some(request => request.url.includes("/tasks/offline/messages"))).toBe(true);
   expect(f.providerEvents.filter(event => event.type === "session.turn" && event.sessionId === `${parent.id}:run:offline`)).toMatchObject([{ state: "started" }, { state: "completed" }]);
+});
+
+it("places dividers only between native comments during live import and replay, preserving exact originals", async () => {
+  const f = await fixture();
+  f.comments.push({ ...comment("event", "root", "Status changed", "system", "system"), type: "status_change" });
+  const parent = f.native.agents[1], address = JSON.parse(parent.handle.slice(7)).data;
+  const visible = (rows: ProviderTimelineItem[]) => rows.filter(row => row.type === "user_message" || row.type === "assistant_message" || (row.type === "plugin" && row.kind === "comment-divider"));
+  await f.server.rpc(threadOpen, address, f.paseo);
+  const rows = visible(f.timelines.get(parent.id)!);
+  expect(rows).toEqual([
+    expect.objectContaining({ type: "user_message", text: "**Root**", messageId: "root" }),
+    { type: "plugin", id: "multica:divider:child", pluginId: "multica", kind: "comment-divider", version: 1, data: {} },
+    expect.objectContaining({ type: "assistant_message", text: "River: \n\nChild", messageId: "child" }),
+    { type: "plugin", id: "multica:divider:grandchild", pluginId: "multica", kind: "comment-divider", version: 1, data: {} },
+    expect.objectContaining({ type: "assistant_message", text: "Lin Agent: \n\nGrandchild", messageId: "grandchild" }),
+  ]);
+  const connection = await f.server.providers.get("multica")!.connect({ versions: [1], capabilities: ["session.persistence", "timeline.plugin"] });
+  cleanup.push(() => connection.close());
+  const replay: ProviderTimelineItem[] = [];
+  connection.onEvent(event => { if (event.type === "timeline.item") replay.push(event.item); });
+  await connection.send({ type: "session.open", requestId: "replay-dividers", sessionId: "replay-dividers", history: "replay", persistence: JSON.parse(parent.handle.slice(7)), config: { cwd: parent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
+  expect(visible(replay)).toEqual(rows);
+});
+
+it("does not put a divider before a lone comment or around system events", async () => {
+  const f = await fixture();
+  f.comments.splice(1);
+  f.comments.push({ ...comment("event", "root", "Status changed", "system", "system"), type: "status_change" });
+  const parent = f.native.agents[1];
+  await f.server.rpc(threadOpen, JSON.parse(parent.handle.slice(7)).data, f.paseo);
+  expect(f.timelines.get(parent.id)!.filter(row => row.type === "plugin" && row.kind === "comment-divider")).toEqual([]);
+});
+
+it("skip restoration acknowledges existing comments without retroactive dividers and separates a new comment once", async () => {
+  const f = await fixture();
+  const parent = f.native.agents[1];
+  await f.server.rpc(threadOpen, JSON.parse(parent.handle.slice(7)).data, f.paseo);
+  await f.dispose(); const restarted = f.start();
+  const boundary = f.providerEvents.length;
+  await f.reconnect();
+  expect(await resync(restarted.server, f.paseo, "remote-workspace")).toMatchObject({ status: "ready" });
+  const dividers = () => f.providerEvents.slice(boundary).filter(event => event.type === "timeline.item" && event.sessionId === parent.id && event.item.type === "plugin" && event.item.kind === "comment-divider");
+  expect(dividers()).toEqual([]);
+  await restarted.server.rpc(threadOpen, JSON.parse(parent.handle.slice(7)).data, f.paseo);
+  expect(dividers()).toEqual([]);
+  f.comments.push(comment("late", "root", "New comment", "member-other"));
+  await resync(restarted.server, f.paseo, "remote-workspace");
+  await resync(restarted.server, f.paseo, "remote-workspace");
+  expect(dividers()).toMatchObject([{ item: { id: "multica:divider:late" } }]);
+  const rows = f.timelines.get(parent.id)!;
+  expect(rows.slice(-2)).toMatchObject([{ type: "plugin", kind: "comment-divider" }, { type: "assistant_message", text: "River: \n\nNew comment" }]);
 });

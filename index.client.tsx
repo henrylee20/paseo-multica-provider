@@ -5,8 +5,8 @@ import { ConnectionScreen } from "./client/connection-screen.js";
 import { syncBootstrap } from "./shared/contracts.js";
 import { TaskDescription } from "./client/task-description.js";
 import { taskDescriptionKind, taskDescriptionSchema, taskDescriptionVersion } from "./shared/description.js";
-import { CommentEvent, ThreadSummary } from "./client/thread-events.js";
-import { commentEventSchema, threadSummarySchema } from "./shared/threads.js";
+import { CommentDivider, CommentEvent, ThreadSummary } from "./client/thread-events.js";
+import { commentDividerSchema, commentEventSchema, threadSummarySchema } from "./shared/threads.js";
 import { DeliveryStatus } from "./client/delivery-status.js";
 import { deliverySummary } from "./shared/delivery.js";
 import { MentionPicker, composerItemRegistrar } from "./client/mention-picker.js";
@@ -30,6 +30,7 @@ export default function contribute(client: PluginClientContext) {
   const removeDescription = client.addTimelineRenderer({ kind: taskDescriptionKind, version: taskDescriptionVersion,
     schema: taskDescriptionSchema, Component: TaskDescription });
   const removeThread = client.addTimelineRenderer({ kind: "thread", version: 1, schema: threadSummarySchema, Component: ThreadSummary });
+  const removeDivider = client.addTimelineRenderer({ kind: "comment-divider", version: 1, schema: commentDividerSchema, Component: CommentDivider });
   const removeEvent = client.addTimelineRenderer({ kind: "comment-event", version: 1, schema: commentEventSchema, Component: CommentEvent });
   const removeAskuser = client.addTimelineRenderer({ kind: "askuser", version: 1, schema: askuserCardSchema, Component: AskuserCard });
   const removeDelivery = client.addTimelineRenderer({ kind: "comment-delivery", version: 1, schema: deliverySummary, Component: DeliveryStatus });
@@ -39,6 +40,7 @@ export default function contribute(client: PluginClientContext) {
     removeAskuser();
     removeDelivery();
     removeEvent();
+    removeDivider();
     removeThread();
     removeDescription();
     removeMention();

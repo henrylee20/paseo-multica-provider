@@ -333,7 +333,7 @@ it.each(["root", "main"])("the invisible %s thread renderer still opens history 
   });
   const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {},
     addTimelineRenderer: (renderer: any) => { renderers.push(renderer); return () => {}; } });
-  expect(renderers.map(renderer => renderer.kind)).toEqual(["task-description", "thread", "comment-event", "askuser", "comment-delivery"]);
+  expect(renderers.map(renderer => renderer.kind)).toEqual(["task-description", "thread", "comment-divider", "comment-event", "askuser", "comment-delivery"]);
   expect(calls).toEqual([]);
   const address = { connectionKey: "connection", issueId: "issue", rootId };
   const theme = { colors: { foreground: "black", foregroundMuted: "gray" } };
@@ -1543,4 +1543,23 @@ it("disables data rebuild until profile cleanup completes, even when the new ide
     await vi.waitFor(() => { h.render(); expect(h.action("重建数据").disabled).toBe(true); expect(h.render()).toContain("请等待旧 profile 本地数据清理完成"); });
     expect(h.calls.some(call => call.name === "rebuild.start" || call.name === "rebuild.preflight")).toBe(false);
   } finally { h.dispose(); }
+});
+
+it("registers and disposes a minimal themed comment-divider renderer", async () => {
+  const renderers: Array<{ kind: string; version: number; schema: zod.ZodType; Component: (props: any) => any }> = [];
+  const removed: string[] = [];
+  const setup = await bundledContribution("../index.client.tsx", { "@getpaseo/plugin/client": {}, "@getpaseo/plugin/client/ui": {}, "react-native": { View: "View" } });
+  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {},
+    addTimelineRenderer: (renderer: typeof renderers[number]) => { renderers.push(renderer); return () => { removed.push(renderer.kind); }; } });
+  try {
+    const renderer = renderers.find(renderer => renderer.kind === "comment-divider")!;
+    expect(renderer.version).toBe(1);
+    const item = { data: renderer.schema.parse({}) };
+    expect(item.data).toEqual({});
+    const line = renderer.Component({ item, theme: { colors: { border: "theme-border" } } });
+    expect(line.type).toBe("View");
+    expect(line.props.style).toEqual({ height: 1, backgroundColor: "theme-border", marginVertical: 6, width: "100%" });
+    expect(line.props.children).toBeUndefined();
+  } finally { dispose(); }
+  expect(removed).toContain("comment-divider");
 });

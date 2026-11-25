@@ -28,6 +28,8 @@ interface SessionContext {
   address: RunAddress;
   emittedRows: Set<string>;
   originalIdentities: Set<string>;
+  hasComment: boolean;
+  inputComments: Set<string>;
   subscriptions: Array<() => void>;
   interrupts: Set<Promise<void>>;
   permissions: Map<string, AskuserCardData>;
@@ -61,6 +63,15 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
         for (const key of keys) identities.add(key);
         return !seen;
       };
+      const beforeComment = (sessionId: string, id: string, clientMessageId?: string) => {
+        const session = sessions.get(sessionId);
+        if (!session || (clientMessageId && session.inputComments.has(clientMessageId))) return;
+        if (session.hasComment) emit({ type: "timeline.item", sessionId, item: {
+          type: "plugin", id, pluginId: providerId, kind: "comment-divider", version: 1, data: {},
+        } });
+        session.hasComment = true;
+        if (clientMessageId) session.inputComments.add(clientMessageId);
+      };
       const emitRow = (sessionId: string, row: StoredRow, includeOriginal = true) => {
         const session = sessions.get(sessionId);
         if (!session || session.emittedRows.has(row.id)) return;
@@ -68,6 +79,10 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
         const timestamp = row.role === "event" ? row.sourceUpdatedAt ?? row.sourceCreatedAt : row.sourceCreatedAt;
         // Canonical recovery acknowledges originals it skips, including native input IDs.
         const firstOriginal = row.role === "event" || rememberOriginal(session, row);
+        if (row.role !== "event") {
+          if (includeOriginal && firstOriginal) beforeComment(sessionId, `multica:divider:${row.commentId}`, row.clientMessageId);
+          else session.hasComment = true;
+        }
         if ((includeOriginal && firstOriginal) || row.role === "event")
           emit({ type: "timeline.item", sessionId, item: projectRow(session.address, row),
             ...(timestamp && Number.isFinite(Date.parse(timestamp)) ? { timestamp } : {}) });
@@ -106,7 +121,7 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
               emit({ type: "request.failed", requestId: input.requestId, error: { code: "unmapped_issue", message: "请在 Multica 设置启用任务工作区后打开已导入的主讨论。" } });
               return;
             }
-            const session: SessionContext = { address: openingAddress, emittedRows: new Set(), originalIdentities: new Set(), subscriptions: [], interrupts: new Set(), permissions: new Map() };
+            const session: SessionContext = { address: openingAddress, emittedRows: new Set(), originalIdentities: new Set(), hasComment: false, inputComments: new Set(), subscriptions: [], interrupts: new Set(), permissions: new Map() };
             sessions.set(input.sessionId, session);
             const address = session.address;
             emit({ type: "session.opened", requestId: input.requestId, sessionId: input.sessionId, capabilities,
@@ -267,7 +282,10 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
             if (input.response.behavior === "deny" || isLocalAskuserDismiss(card, input.response.updatedInput)) { await askusers.collapse(target); return; }
             const record = await askusers.submit(target, input.response.updatedInput, deliveries);
             const row = { id: `multica:comment:${record.commentId}`, role: "user" as const, commentId: record.commentId, clientMessageId: record.clientMessageId, text: record.body };
-            if (rememberOriginal(session, row)) emit({ type: "timeline.item", sessionId: input.sessionId, item: projectRow(address, row) });
+            if (rememberOriginal(session, row)) {
+              beforeComment(input.sessionId, `multica:divider:input:${record.clientMessageId}`, record.clientMessageId);
+              emit({ type: "timeline.item", sessionId: input.sessionId, item: projectRow(address, row) });
+            }
             if (session.permissions.delete(input.permissionId)) emit({ type: "session.permission_resolved", sessionId: input.sessionId, permissionId: input.permissionId });
             return;
           }
@@ -285,6 +303,7 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
               const issue = (await store.read()).connections[address.connectionKey]?.issues[address.issueId];
               if (!issue || (address.rootId !== "main" && !issue.threads[address.rootId])) throw new Error("此任务或 Thread 尚未映射。");
               if ("clearPendingPermissions" in input.prompt && input.prompt.clearPendingPermissions === true) await askusers.collapsePending(address);
+              beforeComment(input.sessionId, `multica:divider:input:${input.prompt.clientMessageId}`, input.prompt.clientMessageId);
               emit({ type: "timeline.item", sessionId: input.sessionId, item: {
                 type: "user_message", id: `multica:input:${input.prompt.clientMessageId}`, messageId: `multica:input:${input.prompt.clientMessageId}`,
                 clientMessageId: input.prompt.clientMessageId, text: body,

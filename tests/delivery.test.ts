@@ -159,6 +159,8 @@ it("matches a saved reply to its native input through sync, duplicate dispatch a
   await resync(f.server, f.paseo, "workspace");
   expect(f.posts).toHaveLength(1);
   expect(f.canonical.get(thread.id)?.filter(entry => entry.item.clientMessageId === "reply")).toHaveLength(1);
+  expect(f.events.filter(event => event.type === "timeline.item" && event.sessionId === thread.id && event.item.type === "plugin" && event.item.kind === "comment-divider").map(event => event.type === "timeline.item" ? event.item.id : "")).toEqual(["multica:divider:input:reply"]);
+  expect(f.canonical.get(thread.id)?.find(entry => entry.item.clientMessageId === "reply")?.item.text).toBe("A reply");
   const state = JSON.parse(await readFile(join(f.home, "multica-provider/state.json"), "utf8"));
   expect(state.connections[address.connectionKey].issues.issue.commentInputs).toEqual({ reply: { commentId: "saved-1", rootId: "root" } });
   expect(state.connections[address.connectionKey].issues.issue).not.toHaveProperty("deliveries");
@@ -327,4 +329,15 @@ it("mentions and sending reuse the cached workspace slug without listing workspa
   await expect.poll(() => f.events.some(event => event.type === "timeline.item" && event.item.type === "error")).toBe(true);
   expect(f.requests.filter(path => path === "/api/workspaces")).toHaveLength(before);
   expect(f.posts[0].slug).toBe("product");
+});
+
+it("leaves the first optimistic main input unseparated and divides the next input once", async () => {
+  const f = await fixture();
+  const main = f.agents.find(agent => agent.labels["multica.discussion"] === "main")!;
+  const dividers = () => f.events.filter(event => event.type === "timeline.item" && event.sessionId === main.id && event.item.type === "plugin" && event.item.kind === "comment-divider");
+  await f.send("main", "First input", "main-first");
+  expect(dividers()).toEqual([]);
+  await f.send("main", "Second input", "main-second");
+  await expect.poll(() => f.posts.length).toBe(2);
+  expect(dividers()).toMatchObject([{ item: { id: "multica:divider:input:main-second" } }]);
 });

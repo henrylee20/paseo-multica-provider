@@ -13,7 +13,7 @@ manifest 仅声明 Paseo `>=0.15.3`，不设最高版本；开发 SDK 固定 `0.
 - Multica 工作区 → Paseo 项目，Issue → Paseo 工作区，Thread → agent tab；主讨论展示描述、系统事件和首次完全无关联的 Run。
 - daemon 只读复用 CLI 配置，保留环境覆盖和任务隔离；`profile.list` 按 CLI 0.6.3 目录布局枚举已登录 profile（不返回凭据、不访问 `/api/me`，任务隔离直接返回空列表）。凭据不写入插件状态或 RPC；服务地址和真实用户 ID 组成连接键，同一 profile 下同账号 Token 轮换续用映射，同一 profile 下经 CLI 换身份使用独立空规则且不自动删除。切换 CLI profile 时由持久归属 `state.owner.profile` 驱动可续跑清理（经 `settings.subscribe`、bootstrap、sync 和规则写入入口触发并门禁），依次释放会话与缓存、hold 并 `deleteAgent`（不取消远端 Run）、按用户自建工作区核对执行 `removeProject` 或仅归档插件工作区、校验路径后清理 `placeholders/` 并原子更新 `owner`，见 ADR 0010；旧版本缺少 `owner` 时采用当前 profile，升级不删数据。
 - 每次远端请求发送前核对 profile 和有效服务／凭据。旧连接不能借新登录写入。CLI 文件按 mtime／大小缓存；同凭据 `/api/me` 结果最多缓存 60 秒，配置变化或 401／403 失效。
-- 原生评论保留初次读取内容；后续编辑、删除追加事件。成功评论只保存 clientMessageId → commentId／rootId 关联，用于同步回声去重；新 Thread 是独立原生会话。
+- 原生评论之间追加独立 comment-divider 细线，首尾不加线；正文及 hasNativeOriginal 精确比对保持，history:skip 已存评论不补线，乐观输入与回声共用输入分隔标记。原生评论保留初次读取内容；后续编辑、删除追加事件。成功评论只保存 clientMessageId → commentId／rootId 关联，用于同步回声去重；新 Thread 是独立原生会话。
 - `session.prompt` 先校验文本、附件、空正文、outputSchema 与任务／Thread 映射，在 prompt_result 前直接 emit 原生输入。仅网络发送异步；steer 保留接收时捕获的 turnId，失败追加一个原生错误。
 - Run 优先触发评论、再按真实来源时间选最早关联评论，缺父链或时间时等待，只有确实零关联才归 main；owner 首次固定后不迁移。五类关联及 RFC3339Nano 比较保留，见 ADR 0003。
 - 原生 Stop 固定当前 root 的活跃 Run 集合并逐项取消；成功结束捕获的宿主 turn，新出现 Run 使用新周期，失败返回 request.failed。纯 session.close、整工作区归档与贡献清理不取消远端。

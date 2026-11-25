@@ -2,6 +2,7 @@ import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 
 export const threadAddress = z.object({ connectionKey: z.string(), issueId: z.string(), rootId: z.string() });
+export const commentDividerSchema = z.object({});
 export const threadSummarySchema = threadAddress.extend({ title: z.string() });
 export const threadOpen = defineRpc({ name: "thread.open", input: threadAddress, output: z.object({
   status: z.enum(["ready", "cached", "unavailable"]), message: z.string().optional(),

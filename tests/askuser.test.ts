@@ -924,3 +924,19 @@ it.each(["parent_id", "askuser_answer_to"])("rejects an answer receipt with mism
   await expect(answer(f, ["检查回执目标"])).rejects.toThrow("不匹配");
   expect(f.cards()[0].data).toMatchObject({ status: "pending", delivery: { status: "failed" } });
 });
+
+it("adds one input divider before a native AskUser answer and no second divider for its echo", async () => {
+  const f = await fixture();
+  f.comments[0].attachments = [attachment("answer-divider")]; f.documents.set("answer-divider", card);
+  await f.sync();
+  await f.server.rpc(threadOpen, f.address(), f.paseo);
+  const parent = f.agents[1].id;
+  await answer(f, ["Keep the exact answer"]);
+  const reply = f.rows.get(parent)!.find(row => row.type === "user_message" && row.clientMessageId);
+  if (reply?.type !== "user_message") throw new Error("Missing native AskUser answer");
+  expect(reply.text).toBe("**确认结果**\n\n1. **理由**：Keep the exact answer");
+  const dividers = () => f.events.filter(event => event.type === "timeline.item" && event.sessionId === parent && event.item.type === "plugin" && event.item.kind === "comment-divider");
+  expect(dividers()).toMatchObject([{ item: { id: `multica:divider:input:${reply.clientMessageId}` } }]);
+  await f.sync(); await f.sync();
+  expect(dividers()).toHaveLength(1);
+});
