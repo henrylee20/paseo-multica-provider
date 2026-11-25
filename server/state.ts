@@ -48,24 +48,31 @@ export class StateStore {
   private pending: Promise<unknown> = Promise.resolve();
   private readonly listeners = new Set<(state: LocalState) => void>();
   subscribe(listener: (state: LocalState) => void) { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
+  private cached?: Promise<LocalState>;
   constructor(readonly directory: string) {}
+  /** Shared read-only snapshot; all changes must go through update(). */
   async read(): Promise<LocalState> {
     await this.pending;
-    return this.load();
+    return this.cached ??= this.load();
   }
   private async load(): Promise<LocalState> {
     try { return stateSchema.parse(JSON.parse(await readFile(join(this.directory, "state.json"), "utf8"))); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return { version: 1, connections: {} }; throw error; }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return { version: 1, connections: {} };
+      this.cached = undefined;
+      throw error;
+    }
   }
   update(change: (state: LocalState) => void): Promise<void> {
     const operation = this.pending.then(async () => {
-      const state = await this.load();
+      const state = structuredClone(await (this.cached ??= this.load()));
       change(state);
       const validated = stateSchema.parse(state);
       await mkdir(this.directory, { recursive: true, mode: 0o700 });
       const temporary = join(this.directory, "state.json.next");
       await writeFile(temporary, JSON.stringify(validated), { mode: 0o600 });
       await rename(temporary, join(this.directory, "state.json"));
+      this.cached = Promise.resolve(validated);
       for (const listener of this.listeners) listener(validated);
     });
     this.pending = operation.catch(() => {});
