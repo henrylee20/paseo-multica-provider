@@ -1,5 +1,6 @@
+import { expect } from "vitest";
 import type { PaseoApi } from "@getpaseo/client";
-import { workspaceList, workspaceRule, connectionStatus } from "../../shared/contracts.js";
+import { workspaceList, workspaceRule, connectionStatus, type SyncStatus } from "../../shared/contracts.js";
 import type { PluginRpcContract, SettingsDefinition } from "@getpaseo/plugin";
 import type {
   PluginHookContext, PluginHookPayload, PluginHookResult, PluginHooks,
@@ -52,6 +53,13 @@ export class FakeServer {
     return contract.output.parse(await handler(value, paseo));
   }
 
+  /** Existing projection tests explicitly wait; rpc() retains the real nonblocking contract. */
+  async syncRpc<I extends ZodType, O extends ZodType>(contract: PluginRpcContract<I, O>, value: input<I>, paseo: PaseoApi) {
+    const result = await this.rpc(contract, value, paseo) as { status: string };
+    if (result.status === "unavailable") return { status: "unavailable" };
+    return { status: (await waitForSync(this, paseo)).status };
+  }
+
   async hook<Name extends keyof PluginHooks>(name: Name, payload: PluginHookPayload<Name>, paseo: PaseoApi): Promise<PluginHookResult<Name>> {
     let result: unknown;
     for (const handler of this.hooks.get(name) ?? []) {
@@ -61,13 +69,26 @@ export class FakeServer {
   }
 }
 
+/** Wait for the background pass without weakening assertions about its native effects. */
+export async function waitForSync(server: FakeServer, paseo: PaseoApi) {
+  let status: SyncStatus | undefined;
+  await expect.poll(async () => {
+    const next = (await server.rpc(connectionStatus, {}, paseo)).sync;
+    // Also let the 20ms workspace-event debounce settle before the next test action.
+    const settled = next.status !== "syncing" && next.status === status?.status;
+    status = next;
+    return settled;
+  }, { interval: 50, timeout: 4_000 }).toBe(true);
+  return status!;
+}
+
 /** Reapplying the current rule explicitly requests a fresh snapshot after bootstrap becomes idempotent. */
 export async function resync(server: FakeServer, paseo: PaseoApi, workspaceId: string) {
-  try {
-    const workspace = (await server.rpc(workspaceList, {}, paseo)).workspaces.find(item => item.id === workspaceId);
-    if (!workspace) return { status: "unavailable" as const };
-    return await server.rpc(workspaceRule, { workspaceId, rule: workspace.rule }, paseo);
-  } catch { return { status: "unavailable" as const }; }
+  let workspace;
+  try { workspace = (await server.rpc(workspaceList, {}, paseo)).workspaces.find(item => item.id === workspaceId); }
+  catch { return { status: "unavailable" as const }; }
+  if (!workspace) return { status: "unavailable" as const };
+  return server.syncRpc(workspaceRule, { workspaceId, rule: workspace.rule }, paseo);
 }
 
 export async function hiddenObjects(server: FakeServer, paseo: PaseoApi) { return (await server.rpc(connectionStatus, {}, paseo)).hidden; }

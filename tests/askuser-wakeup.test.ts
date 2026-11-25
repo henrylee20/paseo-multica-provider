@@ -114,7 +114,7 @@ async function fixture() {
   };
   const started = start();
   cleanup.push(async () => { await provider?.close(); });
-  await server!.rpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, paseo);
+  await server!.syncRpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, paseo);
   const thread = (root = "root", issueId = "issue") => agents.find(a => a.labels["multica.discussion"] === root && a.labels["multica.issue"] === issueId)!;
   const question = (root = "root", issueId = "issue", document: unknown = card) => {
     const source = comments.get(issueId)!.find(c => c.id === root)!; source.attachments = [attachment(root)]; documents.set(root, document);
@@ -284,8 +284,8 @@ it.each(["tab hidden", "workspace hidden", "rule disabled", "filter exit", "atta
     thread.archivedAt = stamp;
   }
   if (state === "workspace hidden") await f.server.hook("workspace.archive.after", { workspace: { id: thread.workspaceId, cwd: thread.cwd, projectId: "project", name: "Task", archivedAt: stamp } }, f.paseo);
-  if (state === "rule disabled") await f.server.rpc(workspaceEnable, { workspaceId: "workspace", enabled: false }, f.paseo);
-  if (state === "filter exit") { f.issues.length = 0; await f.server.rpc(workspaceRule, { workspaceId: "workspace", rule: { statusCategories: ["started"] } }, f.paseo); }
+  if (state === "rule disabled") await f.server.syncRpc(workspaceEnable, { workspaceId: "workspace", enabled: false }, f.paseo);
+  if (state === "filter exit") { f.issues.length = 0; await f.server.syncRpc(workspaceRule, { workspaceId: "workspace", rule: { statusCategories: ["started"] } }, f.paseo); }
   if (state === "attachment forbidden") f.remote.issueStatus = 403;
   if (state === "native archived") thread.archivedAt = stamp;
   if (state === "native workspace archived") f.workspaces[0].archivedAt = stamp;

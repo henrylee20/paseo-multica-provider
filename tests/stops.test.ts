@@ -170,7 +170,7 @@ async function fixture(initialRuns: Run[] = []) {
   const started = start();
   cleanup.push(async () => { await provider?.close(); });
   const paseo = { hosts: { list: async () => ({ self: { serverId: "owning-daemon" } }) } } as unknown as PaseoApi;
-  await server!.rpc(workspaceEnable, { workspaceId: "remote-workspace", enabled: true }, paseo);
+  await server!.syncRpc(workspaceEnable, { workspaceId: "remote-workspace", enabled: true }, paseo);
   return { ...started, beforeAgents: (handler: () => Promise<void>) => {
     beforeAgents = handler;
   }, matching: (value: boolean) => {
@@ -340,7 +340,7 @@ it("never cancels when filtering a running Issue out or disabling its workspace 
   f.matching(false);
   await resync(f.server, f.paseo, "remote-workspace");
   f.matching(true);
-  await f.server.rpc(workspaceEnable, { workspaceId: "remote-workspace", enabled: false }, f.paseo);
+  await f.server.syncRpc(workspaceEnable, { workspaceId: "remote-workspace", enabled: false }, f.paseo);
   await f.dispose();
   expect(f.requests.filter(request => request.method !== "GET")).toEqual([]);
   expect(f.runs[0].status).toBe("running");

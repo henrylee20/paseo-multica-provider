@@ -141,7 +141,7 @@ async function fixture() {
   };
   const started = start();
   cleanup.push(async () => { await provider?.close(); });
-  await server!.rpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, paseo);
+  await server!.syncRpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, paseo);
   const address = () => ({ connectionKey: agents[1].labels["multica.connection"], issueId: "issue", rootId: "root" });
   const cards = () => (rows.get(agents[1].id) ?? []).filter(row => row.type === "plugin" && row.kind === "askuser") as Array<Extract<ProviderTimelineItem, { type: "plugin" }> & { data: Record<string, any> }>;
   return { ...started, start, connect, events, posts, skips, receipts, setClock: (value: Date) => { clock = value; }, comments, timeline, runs, documents, requests, remote, rows, agents, cards, address, open, home, configPath, paseo, refreshLogin,
@@ -714,7 +714,7 @@ it.each(["thread hide", "workspace hide", "rule disabled", "filter exit"])("imme
   if (reason === "thread hide") await f.server.hook("agent.archive.after", { agent: { ...agent, provider: "multica" } } as never, f.paseo);
   if (reason === "workspace hide") await f.server.hook("workspace.archive.after", { workspace: { id: agent.workspaceId } } as never, f.paseo);
   if (reason === "filter exit") { f.remote.visible = false; await f.sync(); }
-  if (reason === "rule disabled") await f.server.rpc(workspaceEnable, { workspaceId: "workspace", enabled: false }, f.paseo);
+  if (reason === "rule disabled") await f.server.syncRpc(workspaceEnable, { workspaceId: "workspace", enabled: false }, f.paseo);
   expect(f.events.filter(event => event.type === "session.permission_resolved").map(event => event.sessionId).sort()).toEqual([agent.id, "second"].sort());
   expect(f.cards()[0].data).toMatchObject({ status: "pending", readOnly: true, questions: card.questions });
   expect(f.skips).toEqual([]); expect(f.posts).toEqual([]);
@@ -795,7 +795,7 @@ it("isolates the specified stable permission ID by provider session and connecti
   const f = await fixture(); f.comments[0].attachments = [attachment("same-id")]; f.documents.set("same-id", card); await f.sync();
   const original = pendingQuestion(f);
   f.remote.userId = "another-account"; await f.refreshLogin();
-  await f.server.rpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, f.paseo);
+  await f.server.syncRpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, f.paseo);
   const next = pendingQuestion(f);
   expect(next.sessionId).not.toBe(original.sessionId);
   expect(next.request.id).toBe(original.request.id);

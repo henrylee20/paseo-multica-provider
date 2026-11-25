@@ -765,8 +765,8 @@ async function filterHarness({ rule = defaultRule, catalog = filterCatalog, enab
     if (name === "workspace.list") return { connectionKey: "current", workspaces: [workspace] };
     if (name === "workspace.catalog") return catalog;
     if (name === "workspace.preview") return { total: 2, imported: workspace.importedCount, entering: 2 - workspace.importedCount, leaving: [] };
-    if (name === "workspace.rule") { workspace.rule = (input as { rule: TaskRule }).rule; return { status: "ready" }; }
-    if (name === "workspace.enable") { workspace.enabled = (input as { enabled: boolean }).enabled; return { status: "ready" }; }
+    if (name === "workspace.rule") { workspace.rule = (input as { rule: TaskRule }).rule; return { status: "saved" }; }
+    if (name === "workspace.enable") { workspace.enabled = (input as { enabled: boolean }).enabled; return { status: "saved" }; }
     return empty(name, input);
   });
 }
@@ -868,7 +868,7 @@ it("search ignores case, keeps selected and missing values visible, and allows c
 
 it("enabling opens the same editor and saves the rule before enabling; an enable failure retries only enable", async () => {
   let attempts = 0;
-  const h = await filterHarness({ enabled: false, answer: name => name === "workspace.enable" ? (++attempts === 1 ? { status: "unavailable", message: "启用失败，规则已保存" } : { status: "ready" }) : undefined });
+  const h = await filterHarness({ enabled: false, answer: name => name === "workspace.enable" ? (++attempts === 1 ? { status: "unavailable", message: "启用失败，规则已保存" } : { status: "saved" }) : undefined });
   try {
     await vi.waitFor(() => expect(h.render()).toContain("未启用 · 不导入任务"));
     expect(h.switches).toEqual([]);
@@ -938,7 +938,7 @@ it("disabling needs confirmation and disables only that workspace while saving",
     expect(h.calls).toContainEqual({ name: "workspace.enable", input: { connectionKey: "current", workspaceId: "ws", enabled: false } });
     release!({ status: "unavailable", message: "停用失败" });
     await vi.waitFor(() => expect(h.render()).toContain("停用失败"));
-    h.press("停用"); release!({ status: "ready" });
+    h.press("停用"); release!({ status: "saved" });
     await vi.waitFor(() => { h.render(); expect(h.modals).toHaveLength(0); });
   } finally { h.dispose(); }
 });
@@ -1320,7 +1320,7 @@ it.each([
     if (name === "workspace.list") return { connectionKey: "current", workspaces: [{ id: "ws", name: "Team space", enabled: true, rule, importedCount: 0 }] };
     if (name === "workspace.catalog")
       return { assignees: [], statuses: [{ key: "todo", name: "Todo", category: "unstarted" }, { key: "doing", name: "Doing", category: "started" }, { key: "done", name: "Done", category: "done" }], projects: [], labels: [] };
-    if (name === "workspace.rule") return { status: "ready" };
+    if (name === "workspace.rule") return { status: "saved" };
     return empty(name, input);
   });
   try {
@@ -1331,5 +1331,124 @@ it.each([
       expect(h.checkbox(label).accessibilityState?.checked).toBe(example.selected.includes(key));
     await h.save();
     await vi.waitFor(() => expect(h.calls).toContainEqual({ name: "workspace.rule", input: { workspaceId: "ws", connectionKey: "current", rule: { ...rule, statusCategories: example.whole, statuses: [] } } }));
+  } finally { h.dispose(); }
+});
+
+it.each(["rule", "enable", "disable"])("keeps the saved %s visible when background sync fails and shows progress separately", async action => {
+  const workspace = { id: "ws", name: "Team space", enabled: action !== "enable", rule: defaultRule, importedCount: 2 };
+  let sync = { status: "ready", stage: "idle", completedWorkspaces: 1, enabledWorkspaces: 1, completedArchives: 0, pendingArchives: 0, message: "" };
+  const h = await settingsHarness((name, input) => {
+    if (name === "connection.status") return { ...readyStatus, sync };
+    if (name === "workspace.list") return { connectionKey: "current", workspaces: [workspace] };
+    if (name === "workspace.catalog") return filterCatalog;
+    if (name === "workspace.preview") return { total: 2, imported: 2, entering: 0, leaving: [] };
+    if (name === "workspace.rule" || name === "workspace.enable") {
+      if (name === "workspace.rule") workspace.rule = (input as { rule: TaskRule }).rule;
+      else workspace.enabled = (input as { enabled: boolean }).enabled;
+      sync = { ...sync, status: "syncing", stage: action === "disable" ? "archiving" : "issues", completedWorkspaces: 0, pendingArchives: action === "disable" ? 2 : 0 };
+      return { status: "saved", sync };
+    }
+    return empty(name, input);
+  });
+  try {
+    await vi.waitFor(() => expect(h.render()).toContain("Team space"));
+    if (action === "disable") {
+      h.switches[0].onValueChange(false); h.render(); h.press("停用");
+    } else {
+      h.action(action === "enable" ? "启用…" : "编辑筛选").onPress();
+      await vi.waitFor(() => expect(h.render()).toContain("Bug"));
+      h.press("Bug"); h.render(); await h.save(action === "enable" ? "启用并导入" : "保存");
+    }
+    await vi.waitFor(() => { h.render(); expect(h.modals).toHaveLength(0); });
+    const page = h.render();
+    expect(page).toContain(action === "disable" ? "已关闭同步，本地任务正在后台归档" : action === "enable" ? "已启用，后台正在同步任务" : "筛选规则已保存，后台同步进行中");
+    expect(page).toContain(action === "disable" ? "本地任务归档 · 已归档 0 项 · 剩余 2 项" : "任务与筛选核对 · Multica 工作区 0/1");
+    if (action === "disable") expect(h.action("启用…").hint).toContain("正在归档本地任务（剩余 2 项）");
+    sync = { ...sync, status: "unavailable", message: "同步失败，后台将重试" };
+    h.press("刷新");
+    await vi.waitFor(() => expect(h.render()).toContain("同步失败，后台将重试"));
+    expect(h.modals).toHaveLength(0);
+    const savedReceipt = action === "disable" ? "已关闭同步。" : action === "enable" ? "已启用。" : "筛选规则已保存。";
+    for (const state of ["unavailable", "ready"]) {
+      sync = { ...sync, status: state, stage: state === "ready" ? "idle" : sync.stage, pendingArchives: state === "ready" ? 0 : sync.pendingArchives };
+      h.press("刷新");
+      await vi.waitFor(() => {
+        const page = h.render();
+        expect(page).toContain(savedReceipt);
+        expect(page).toContain(state === "ready" ? "已完成" : "同步失败");
+        for (const ongoing of ["后台同步进行中", "后台正在同步任务", "本地任务正在后台归档"]) expect(page).not.toContain(ongoing);
+      });
+    }
+    if (action === "disable") expect(h.action("启用…").hint).toContain("待归档 2 项，后台将重试");
+    else {
+      expect(h.switches[0].value).toBe(true);
+      h.action("编辑筛选").onPress();
+      await vi.waitFor(() => { h.render(); expect(h.checkbox("Bug").accessibilityState?.checked).toBe(true); });
+    }
+  } finally { h.dispose(); }
+});
+
+it("polls settings every two seconds during sync and returns to ten seconds when ready", async () => {
+  let syncing = true;
+  const h = await settingsHarness(name => name === "connection.status"
+    ? { ...readyStatus, sync: { status: syncing ? "syncing" : "ready", stage: syncing ? "issues" : "idle", completedWorkspaces: 0, enabledWorkspaces: 1 } }
+    : { connectionKey: "current", workspaces: [] });
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  const reads = () => h.calls.filter(call => call.name === "connection.status").length;
+  try {
+    h.render();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.render()).toContain("任务与筛选核对 · Multica 工作区 0/1");
+    expect(reads()).toBe(1);
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(reads()).toBe(1);
+    syncing = false;
+    await vi.advanceTimersByTimeAsync(1);
+    expect(reads()).toBe(2);
+    h.render();
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(reads()).toBe(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(reads()).toBe(3);
+  } finally { h.dispose(); vi.useRealTimers(); }
+});
+
+it("shows the daemon read error even when the previous status was syncing", async () => {
+  let failed = false;
+  const h = await settingsHarness(name => {
+    if (name === "connection.status") {
+      if (failed) throw new Error("daemon disconnected");
+      return { ...readyStatus, sync: { status: "syncing", stage: "issues", completedWorkspaces: 0, enabledWorkspaces: 1 } };
+    }
+    return { connectionKey: "current", workspaces: [] };
+  });
+  try {
+    await vi.waitFor(() => expect(h.render()).toContain("任务与筛选核对"));
+    failed = true; h.press("刷新");
+    await vi.waitFor(() => expect(h.render()).toContain("已读历史仍可阅读。"));
+  } finally { h.dispose(); }
+});
+
+it("does not announce task archiving when disabling a workspace with no imported tasks", async () => {
+  const workspace = { id: "ws", name: "Empty space", enabled: true, rule: defaultRule, importedCount: 0 };
+  let sync = { status: "ready", stage: "idle", completedWorkspaces: 1, enabledWorkspaces: 1 };
+  const h = await settingsHarness((name, input) => {
+    if (name === "connection.status") return { ...readyStatus, sync };
+    if (name === "workspace.list") return { connectionKey: "current", workspaces: [workspace] };
+    if (name === "workspace.catalog") return filterCatalog;
+    if (name === "workspace.enable") {
+      workspace.enabled = false;
+      sync = { ...sync, status: "syncing", stage: "connection", completedWorkspaces: 0 };
+      return { status: "saved", sync };
+    }
+    return empty(name, input);
+  });
+  try {
+    await vi.waitFor(() => expect(h.render()).toContain("Empty space"));
+    h.switches[0].onValueChange(false); h.render(); h.press("停用");
+    await vi.waitFor(() => { h.render(); expect(h.modals).toHaveLength(0); });
+    expect(h.render()).toContain("已关闭同步。");
+    expect(h.render()).not.toContain("本地任务正在后台归档");
+    expect(h.action("启用…").hint).toBeUndefined();
   } finally { h.dispose(); }
 });

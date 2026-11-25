@@ -117,7 +117,7 @@ async function fixture() {
     return { server, dispose };
   }
   const started = await start();
-  await server!.rpc(workspaceEnable, { workspaceId: "remote", enabled: true }, paseo);
+  await server!.syncRpc(workspaceEnable, { workspaceId: "remote", enabled: true }, paseo);
   return { ...started, start, paseo, native, remote, requests, host, archiveAgent, archiveWorkspace, provider: () => provider, providerEvents, eventsReady, signal };
 }
 

@@ -195,7 +195,7 @@ async function fixture(active = false, idempotent = false) {
     return { server, dispose };
   };
   const started = start(); cleanup.push(async () => { await provider?.close(); });
-  await server!.rpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, paseo);
+  await server!.syncRpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, paseo);
   const send = async (rootId: string, text: string, clientMessageId: string, delivery: "auto" | "steer" = "auto") => {
     const agent = agents.find(agent => agent.labels["multica.discussion"] === rootId)!;
     await (await connect()).send({ type: "session.prompt", sessionId: agent.id, prompt: { clientMessageId, delivery, input: { type: "message", content: [{ type: "text", text }] } } });
@@ -288,7 +288,7 @@ it.each(["filter_exit", "rule_disabled"])("reconciles native reopen after %s acr
   const f = await fixture(true);
   const identities = f.agents.map(agent => ({ id: agent.id, cwd: agent.cwd, handle: agent.handle }));
   const main = f.agents.find(agent => agent.labels["multica.discussion"] === "main")!;
-  if (reason === "rule_disabled") await f.server.rpc(workspaceEnable, { workspaceId: "workspace", enabled: false }, f.paseo);
+  if (reason === "rule_disabled") await f.server.syncRpc(workspaceEnable, { workspaceId: "workspace", enabled: false }, f.paseo);
   else {
     f.remote.visible = false;
     await resync(f.server, f.paseo, "workspace");
@@ -301,7 +301,7 @@ it.each(["filter_exit", "rule_disabled"])("reconciles native reopen after %s acr
   expect(f.agents.every(agent => !!agent.archivedAt)).toBe(true);
   expect(f.posts).toEqual([]);
   f.remote.visible = true; f.remote.objectStatus = 200;
-  if (reason === "rule_disabled") await restarted.server.rpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, f.paseo);
+  if (reason === "rule_disabled") await restarted.server.syncRpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, f.paseo);
   else await resync(restarted.server, f.paseo, "workspace");
   expect(f.native.archived).toBe(false);
   expect(f.agents.every(agent => !agent.archivedAt)).toBe(true);

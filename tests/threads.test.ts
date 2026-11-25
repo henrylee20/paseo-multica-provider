@@ -176,7 +176,7 @@ async function fixture(initialRuns: Run[] = []) {
   const started = start();
   cleanup.push(async () => { await provider?.close(); });
   const paseo = { hosts: { list: async () => ({ self: { serverId: "owning-daemon" } }) } } as unknown as PaseoApi;
-  await server!.rpc(workspaceEnable, { workspaceId: "remote-workspace", enabled: true }, paseo);
+  await server!.syncRpc(workspaceEnable, { workspaceId: "remote-workspace", enabled: true }, paseo);
   return { ...started, native, timelines, droppedOriginals, nativeHistory, reconnect, comments, requests, paseo, home, start, connect, eventsReady, signal, runs, messages, providerEvents, failMessages: (value: boolean) => {
     failMessages = value;
   }, identity: async (value: string) => {
@@ -213,7 +213,7 @@ it("discovers one stable native tab for a root and recursive replies without loa
 it("bootstrap copies the task into every discussion tab's metadata, Thread tabs included, for the composer's agent picker", async () => {
   const f = await fixture();
   const host = metadataHost(f.native.agents);
-  expect(await f.server.rpc(syncBootstrap, {}, host.paseo)).toEqual({ status: "ready" });
+  expect(await f.server.syncRpc(syncBootstrap, {}, host.paseo)).toEqual({ status: "ready" });
   await vi.waitFor(() => expect(host.writes.map(write => write.agentId)).toEqual(f.native.agents.map(agent => agent.id)));
   expect(host.writes.map(write => write.patch)).toEqual(f.native.agents.map(agent => ({ "multica.connection": agent.labels["multica.connection"], "multica.issue": "issue" })));
 });

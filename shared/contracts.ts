@@ -21,6 +21,16 @@ export const connectionStatusSchema = z.object({
 });
 export type ConnectionStatus = z.output<typeof connectionStatusSchema>;
 
+export const syncStatusSchema = z.object({
+  status: z.enum(["idle", "syncing", "ready", "unavailable"]),
+  stage: z.enum(["idle", "connection", "workspaces", "issues", "history", "archiving"]),
+  connectionKey: z.string().optional(), lastSuccessAt: z.string().optional(),
+  completedWorkspaces: z.number().int().nonnegative(), enabledWorkspaces: z.number().int().nonnegative(),
+  completedArchives: z.number().int().nonnegative().optional(), pendingArchives: z.number().int().nonnegative().optional(),
+  message: z.string().optional(),
+});
+export type SyncStatus = z.output<typeof syncStatusSchema>;
+
 export const syncBootstrap = defineRpc({ name: "sync.bootstrap", input: z.object({}), output: z.object({
   status: z.enum(["ready", "unavailable"]), message: z.string().optional(),
 }) });
@@ -32,7 +42,9 @@ export const taskRuleSchema = z.object({
   projectIds: z.array(filterValue).default([]), labelIds: z.array(filterValue).default([]),
 });
 export type TaskRule = z.output<typeof taskRuleSchema>;
-export const workspaceRule = defineRpc({ name: "workspace.rule", input: z.object({ connectionKey: z.string().optional(), workspaceId: z.string().min(1), rule: taskRuleSchema }), output: syncBootstrap.output });
+export const workspaceRule = defineRpc({ name: "workspace.rule", input: z.object({ connectionKey: z.string().optional(), workspaceId: z.string().min(1), rule: taskRuleSchema }), output: z.object({
+  status: z.enum(["saved", "unavailable"]), message: z.string().optional(), sync: syncStatusSchema.optional(),
+}) });
 export const workspacePreview = defineRpc({ name: "workspace.preview", input: workspaceRule.input, output: z.object({
   total: z.number().int().nonnegative(), imported: z.number().int().nonnegative(), entering: z.number().int().nonnegative(),
   leaving: z.array(z.object({ id: z.string(), title: z.string() })),
@@ -46,15 +58,6 @@ export const workspaceList = defineRpc({ name: "workspace.list", input: z.object
   connectionKey: z.string(),
   workspaces: z.array(z.object({ id: z.string(), name: z.string(), enabled: z.boolean(), rule: taskRuleSchema, importedCount: z.number().int().nonnegative() })),
 }) });
-export const workspaceEnable = defineRpc({ name: "workspace.enable", input: z.object({ connectionKey: z.string().optional(), workspaceId: z.string().min(1), enabled: z.boolean() }), output: syncBootstrap.output });
-
-export const syncStatusSchema = z.object({
-  status: z.enum(["idle", "syncing", "ready", "unavailable"]),
-  stage: z.enum(["idle", "connection", "workspaces", "issues", "history"]),
-  connectionKey: z.string().optional(), lastSuccessAt: z.string().optional(),
-  completedWorkspaces: z.number().int().nonnegative(), enabledWorkspaces: z.number().int().nonnegative(),
-  message: z.string().optional(),
-});
-export type SyncStatus = z.output<typeof syncStatusSchema>;
+export const workspaceEnable = defineRpc({ name: "workspace.enable", input: z.object({ connectionKey: z.string().optional(), workspaceId: z.string().min(1), enabled: z.boolean() }), output: workspaceRule.output });
 
 export const connectionStatus = defineRpc({ name: "connection.status", input: z.object({}), output: connectionStatusSchema.extend({ sync: syncStatusSchema, hidden: hiddenObjectsSchema }) });

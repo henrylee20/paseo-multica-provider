@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { Pressable, Text, View } from "react-native";
 import { useRpc, type PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { Icon, Modal, ScrollView, TextInput } from "@getpaseo/plugin/client/ui";
-import { workspaceCatalog, workspaceEnable, workspacePreview, workspaceRule, type TaskRule } from "../shared/contracts.js";
+import { workspaceCatalog, workspaceEnable, workspacePreview, workspaceRule, type TaskRule, type SyncStatus } from "../shared/contracts.js";
 import { RuleButton } from "./ui-kit.js";
 import type { z } from "zod";
 
@@ -154,7 +154,7 @@ function StatusChoices({ value, onChange, catalog, disabled, theme }: { value: S
 
 type EditorProps = {
   workspaceId: string; workspaceName: string; connectionKey: string; initialRule: TaskRule; theme: Theme; userId?: string; enabling: boolean;
-  onRuleSaved(rule: TaskRule): void; onSaved(rule: TaskRule): void; onCancel(): void; onSavingChange(value: boolean): void;
+  onRuleSaved(rule: TaskRule): void; onSync(sync?: SyncStatus): void; onSaved(rule: TaskRule): void; onCancel(): void; onSavingChange(value: boolean): void;
 };
 
 export function WorkspaceRuleEditor(props: EditorProps & { catalog?: Catalog; catalogFailed?: boolean; onRetry(): void }) {
@@ -168,7 +168,7 @@ export function WorkspaceRuleEditor(props: EditorProps & { catalog?: Catalog; ca
   </Modal>;
 }
 
-function RuleEditor({ workspaceId, workspaceName, connectionKey, initialRule, catalog, theme, userId, enabling, onRuleSaved, onSaved, onCancel, onSavingChange }: EditorProps & { catalog: Catalog }) {
+function RuleEditor({ workspaceId, workspaceName, connectionKey, initialRule, catalog, theme, userId, enabling, onRuleSaved, onSync, onSaved, onCancel, onSavingChange }: EditorProps & { catalog: Catalog }) {
   const save = useRpc(workspaceRule), enable = useRpc(workspaceEnable);
   const readPreview = useRpc(workspacePreview);
   const [rule, setRule] = useState(initialRule);
@@ -210,12 +210,13 @@ function RuleEditor({ workspaceId, workspaceName, connectionKey, initialRule, ca
       // An enable failure can retry only that step while the saved rule is unchanged.
       if (!saved || fingerprint(current) !== fingerprint(saved)) {
         const result = await save({ workspaceId, connectionKey, rule: current });
-        if (result.status !== "ready") { setSaveFailure(result.message ?? "规则保存或同步失败，请重试。"); return; }
-        setSaved(current); onRuleSaved(current);
+        if (result.status !== "saved") { setSaveFailure(result.message ?? "规则保存失败，请重试。"); return; }
+        setSaved(current); onRuleSaved(current); onSync(result.sync);
       }
       if (enabling) {
         const result = await enable({ workspaceId, connectionKey, enabled: true });
-        if (result.status !== "ready") { setSaveFailure(result.message ?? "规则已保存，启用失败，请重试启用。"); return; }
+        if (result.status !== "saved") { setSaveFailure(result.message ?? "规则已保存，启用失败，请重试启用。"); return; }
+        onSync(result.sync);
       }
       onSaved(current);
     } catch { setSaveFailure("保存或启用失败，请重试。"); }
