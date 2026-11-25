@@ -29,3 +29,7 @@ Multica 的一个 Run 可能处理多个 Thread 的评论，但 Paseo 只在一�
 ## 修订：合并 Run 缓存分块读取（OPT-18）
 
 消息与任务元数据统一经 `run.read` 的 kind 选择读取，共用描述读取的版本校验和有界文本切片；仍分别返回消息数组与元数据对象的 JSON，保留独立 revision 和归属校验。评论事件保持现有的单次读取。
+
+## 修订：展示归属决定 subagent 的父讨论（ADR 0010）
+
+首次展示归属仲裁、聚合活动 turn 与 Stop 边界保持；归属讨论改为承载该 Run 的 provider subagent 与一个静态位置标记，不再承载执行段插件行。`multica:run:<runId>` 行、展开读取及 `run.read` 被移除，执行内容改为在讨论打开时推送，见 [ADR 0010](./0010-run-as-provider-subagent.md)。
