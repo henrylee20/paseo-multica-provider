@@ -32,7 +32,8 @@ export function CommentEvent({ item, theme }: PluginTimelineItemProps<z.infer<ty
   return <View style={{ gap: 6 }}>
     <Text style={{ color: theme.colors.foregroundMuted }}>{labels[data.category]} · {data.commentId}</Text>
     {data.sourceCreatedAt ? <Text style={{ color: theme.colors.foregroundMuted }}>发言时间：{data.sourceCreatedAt}</Text> : null}
-    {data.sourceUpdatedAt && data.sourceUpdatedAt !== data.sourceCreatedAt ? <Text style={{ color: theme.colors.foregroundMuted }}>来源更新时间：{data.sourceUpdatedAt}</Text> : null}
+    {data.sourceUpdatedAt && data.sourceUpdatedAt !== data.sourceCreatedAt
+      ? <Text style={{ color: theme.colors.foregroundMuted }}>来源更新时间：{data.sourceUpdatedAt}</Text> : null}
     <Text selectable style={{ color: theme.colors.foreground }}>{fullText ?? data.text}</Text>
     {data.truncated && fullText === null ? <Pressable accessibilityRole="button" onPress={() => {
       void detail({ connectionKey: data.connectionKey, issueId: data.issueId, rootId: data.rootId, recordId: data.recordId })

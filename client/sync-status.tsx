@@ -20,7 +20,9 @@ export interface SyncDescription {
 export function describeSync(status: SyncStatus | null, disconnected: boolean): SyncDescription {
   if (disconnected) return { label: "无法读取 daemon 同步状态；已读历史仍可阅读。", short: "无法读取", message: "已读历史仍可阅读。", tone: "danger" };
   if (!status) return { label: "正在读取同步状态…", short: "读取中", tone: "muted" };
-  const progress = [stages[status.stage], status.status === "syncing" ? `Multica 工作区 ${status.completedWorkspaces}/${status.enabledWorkspaces}` : ""].filter(Boolean).join(" · ") || undefined;
+  const progress = [stages[status.stage],
+    status.status === "syncing" ? `Multica 工作区 ${status.completedWorkspaces}/${status.enabledWorkspaces}` : ""
+  ].filter(Boolean).join(" · ") || undefined;
   return {
     label: [labels[status.status], progress].filter(Boolean).join(" · "), short: shortLabels[status.status], progress,
     message: status.message || undefined, lastSuccess: formatTime(status.lastSuccessAt),

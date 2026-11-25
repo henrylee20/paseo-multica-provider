@@ -10,7 +10,8 @@ export function textSlice(text: string, offset: number, length: number): string 
 }
 
 export function readText(text: string, request: { revision: string; offset: number }) {
-  if (textRevision(text) !== request.revision || request.offset > text.length) throw new Error("Cached text changed; reopen the discussion or execution segment");
+  if (textRevision(text) !== request.revision || request.offset > text.length)
+    throw new Error("Cached text changed; reopen the discussion or execution segment");
   const chunk = textSlice(text, request.offset, 8192);
   const end = request.offset + chunk.length;
   return { text: chunk, nextOffset: end < text.length ? end : null };

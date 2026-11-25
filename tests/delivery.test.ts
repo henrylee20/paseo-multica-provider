@@ -52,7 +52,8 @@ async function fixture(active = false, idempotent = false) {
         if (result.disconnect) { response.destroy(); return; } response.statusCode = result.status ?? 200; body = result.body ?? {}; }
     } else if (url.pathname === "/api/me") { await beforeMe?.(); body = { id: identity, name: "Lin" }; }
     else if (url.pathname === "/api/workspaces") body = [{ id: "workspace", name: "Product", slug: "product" }];
-    else if (url.pathname === "/api/issues") body = { issues: [{ id: "issue", workspace_id: "workspace", title: "Task", description: "Description", status: "todo" }], total: 1 };
+    else if (url.pathname === "/api/issues")
+      body = { issues: [{ id: "issue", workspace_id: "workspace", title: "Task", description: "Description", status: "todo" }], total: 1 };
     else if (url.pathname === "/api/issues/issue/task-runs") body = runs;
     else if (url.pathname === "/api/issues/issue/comments/idempotent" && idempotent) {
       const key = request.headers["idempotency-key"] as string; lookups.push(key); await beforeLookup?.(key);
@@ -62,8 +63,10 @@ async function fixture(active = false, idempotent = false) {
       else if (receipt) { response.setHeader("Idempotent-Replayed", "true"); body = receipt; }
       else { response.statusCode = 404; body = { error: "no comment has been posted with this Idempotency-Key" }; }
     }
-    else if (url.pathname === "/api/issues/issue/comments") body = url.searchParams.has("thread") ? comments.filter(c => c.id === url.searchParams.get("thread") || c.parent_id === url.searchParams.get("thread")) : comments;
-    else if (url.pathname === "/api/agents") body = [{ id: "12345678-1234-4234-9234-123456789abc", name: "Agent [A]" }, { id: "22345678-1234-4234-9234-123456789abc", name: "Agent [A]" }, { id: "32345678-1234-4234-9234-123456789abc", name: "Archived agent", archived_at: stamp }];
+    else if (url.pathname === "/api/issues/issue/comments")
+      body = url.searchParams.has("thread") ? comments.filter(c => c.id === url.searchParams.get("thread") || c.parent_id === url.searchParams.get("thread")) : comments;
+    else if (url.pathname === "/api/agents")
+      body = [{ id: "12345678-1234-4234-9234-123456789abc", name: "Agent [A]" }, { id: "22345678-1234-4234-9234-123456789abc", name: "Agent [A]" }, { id: "32345678-1234-4234-9234-123456789abc", name: "Archived agent", archived_at: stamp }];
     else { response.statusCode = 404; body = {}; }
     response.end(JSON.stringify(body));
   });
@@ -100,19 +103,40 @@ async function fixture(active = false, idempotent = false) {
     fetchAgents: async () => ({ entries: agents.map(agent => ({ agent: { provider: "multica", ...agent } })), pageInfo: { hasMore: false } }),
     fetchAgentTimeline: async (agentId: string) => ({ agentId, epoch: "epoch", entries: canonical.get(agentId) ?? [], hasOlder: false, hasNewer: false }),
     importAgent: async (input: { workspaceId: string; cwd: string; labels: Record<string, string>; providerHandleId: string }) => {
-      const agent = { id: `native-${agents.length}`, workspaceId: input.workspaceId, cwd: input.cwd, labels: input.labels, handle: input.providerHandleId }; agents.push(agent);
-      await (await connect()).send({ type: "session.open", requestId: agent.id, sessionId: agent.id, history: "replay", persistence: JSON.parse(agent.handle.slice(7)), config: { cwd: agent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } }); return agent;
+      const agent = { id: `native-${agents.length}`, workspaceId: input.workspaceId, cwd: input.cwd, labels: input.labels, handle: input.providerHandleId };
+      agents.push(agent);
+      await (await connect()).send({ type: "session.open", requestId: agent.id, sessionId: agent.id, history: "replay", persistence: JSON.parse(agent.handle.slice(7)), config: { cwd: agent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
+      return agent;
     }, updateAgent: async () => {}, close: async () => {},
   } as unknown as DaemonClient;
   const paseo = { hosts: { list: async () => ({ self: { serverId: "daemon" } }) } } as unknown as PaseoApi;
-  const start = () => { provider = undefined; server = new FakeServer(); const dispose = createServerContribution({ homeDirectory: home, workingDirectory: home, environment: { PASEO_HOME: home }, connectHost: async () => host })(server.context); cleanup.push(dispose); return { server, dispose }; };
+  const start = () => {
+    provider = undefined;
+    server = new FakeServer();
+    const dispose = createServerContribution({ homeDirectory: home, workingDirectory: home, environment: { PASEO_HOME: home }, connectHost: async () => host })(server.context);
+    cleanup.push(dispose);
+    return { server, dispose };
+  };
   const started = start(); cleanup.push(async () => { await provider?.close(); });
   await server!.rpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, paseo);
   const send = async (rootId: string, text: string, clientMessageId: string, delivery: "auto" | "steer" = "auto") => {
     const agent = agents.find(agent => agent.labels["multica.discussion"] === rootId)!;
     await (await connect()).send({ type: "session.prompt", sessionId: agent.id, prompt: { clientMessageId, delivery, input: { type: "message", content: [{ type: "text", text }] } } });
   };
-  return { ...started, home, paseo, agents, events, canonical, nativeHistory, comments, runs, posts, requests, lookups, receipts, deletedReceipts, connect, send, start, lookupFailure: (status?: number) => { lookupFailure = status; }, advance: (milliseconds: number) => { clock = new Date(clock.getTime() + milliseconds); }, beforeLookup: (handler: typeof beforeLookup) => { beforeLookup = handler; }, identity: async (id: string) => { identity = id; await writeFile(join(home, ".multica/config.json"), JSON.stringify({ server_url: `http://127.0.0.1:${(http.address() as { port: number }).port}`, token: `synthetic-${id}` })); }, beforeMe: (handler?: () => Promise<void>) => { beforeMe = handler; }, post: (handler: typeof post) => { post = handler; } };
+  return { ...started, home, paseo, agents, events, canonical, nativeHistory, comments, runs, posts, requests, lookups, receipts, deletedReceipts, connect, send, start, lookupFailure: (status?: number) => {
+    lookupFailure = status;
+  }, advance: (milliseconds: number) => {
+    clock = new Date(clock.getTime() + milliseconds);
+  }, beforeLookup: (handler: typeof beforeLookup) => {
+    beforeLookup = handler;
+  }, identity: async (id: string) => {
+    identity = id;
+    await writeFile(join(home, ".multica/config.json"), JSON.stringify({ server_url: `http://127.0.0.1:${(http.address() as { port: number }).port}`, token: `synthetic-${id}` }));
+  }, beforeMe: (handler?: () => Promise<void>) => {
+    beforeMe = handler;
+  }, post: (handler: typeof post) => {
+    post = handler;
+  } };
 }
 
 it("main input creates an ordinary Thread and shows only its brief success hint", async () => {
@@ -195,7 +219,14 @@ it("waits for an in-flight receipt before projecting an echo that arrives throug
   const address = JSON.parse(thread.handle.slice(7)).data;
   await f.server.rpc(threadOpen, address, f.paseo);
   let release!: () => void;
-  f.post(async body => { const saved = comment("racing", "root", body.content); f.comments.push(saved); await new Promise<void>(resolve => { release = resolve; }); return { body: saved }; });
+  f.post(async body => {
+    const saved = comment("racing", "root", body.content);
+    f.comments.push(saved);
+    await new Promise<void>(resolve => {
+      release = resolve;
+    });
+    return { body: saved };
+  });
   await f.send("root", "Racing echo", "racing-input");
   await expect.poll(() => f.comments.some(comment => comment.id === "racing")).toBe(true);
   const reading = f.server.rpc(threadOpen, address, f.paseo);

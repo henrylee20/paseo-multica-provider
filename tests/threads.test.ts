@@ -51,7 +51,8 @@ async function fixture(initialRuns: Run[] = []) {
     let body: unknown;
     if (url.pathname === "/api/me") body = { id: identity, name: "Lin" };
     else if (url.pathname === "/api/workspaces") body = [{ id: "remote-workspace", name: "Product", slug: "product" }];
-    else if (url.pathname === "/api/issues") body = { issues: [{ id: "issue", workspace_id: "remote-workspace", title: "Task", description: "Task description", status: "todo" }], total: 1 };
+    else if (url.pathname === "/api/issues")
+      body = { issues: [{ id: "issue", workspace_id: "remote-workspace", title: "Task", description: "Task description", status: "todo" }], total: 1 };
     else if (url.pathname === "/api/workspaces/remote-workspace/members") body = [{ id: "membership-other", user_id: "member-other", name: "River" }];
     else if (url.pathname === "/api/agents") body = [{ id: "owned-agent", name: "Lin Agent", owner_id: "member-me" }];
     else if (url.pathname === "/api/issues/issue/task-runs") {
@@ -84,7 +85,10 @@ async function fixture(initialRuns: Run[] = []) {
         }
       } else if (discoveryPages) {
         const index = Number(url.searchParams.get("before_id") ?? "0");
-        if (index + 1 < discoveryPages.length) { response.setHeader("X-Multica-Next-Before", stamp); response.setHeader("X-Multica-Next-Before-Id", String(index + 1)); }
+        if (index + 1 < discoveryPages.length) {
+          response.setHeader("X-Multica-Next-Before", stamp);
+          response.setHeader("X-Multica-Next-Before-Id", String(index + 1));
+        }
         body = discoveryPages[index];
       } else body = comments.map(item => ({ ...item, content: item.parent_id ? "summary" : item.content, content_truncated: !!item.parent_id }));
     } else { response.statusCode = 404; body = {}; }
@@ -161,7 +165,8 @@ async function fixture(initialRuns: Run[] = []) {
   const reconnect = async () => {
     await provider?.close(); provider = undefined;
     const connection = await connect();
-    for (const agent of native.agents) await connection.send({ type: "session.open", requestId: `restart-${agent.id}`, sessionId: agent.id, history: "skip", persistence: JSON.parse(agent.handle.slice(7)), config: { cwd: agent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
+    for (const agent of native.agents)
+      await connection.send({ type: "session.open", requestId: `restart-${agent.id}`, sessionId: agent.id, history: "skip", persistence: JSON.parse(agent.handle.slice(7)), config: { cwd: agent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
   };
   const start = () => {
     server = new FakeServer();
@@ -173,7 +178,24 @@ async function fixture(initialRuns: Run[] = []) {
   cleanup.push(async () => { await provider?.close(); });
   const paseo = { hosts: { list: async () => ({ self: { serverId: "owning-daemon" } }) } } as unknown as PaseoApi;
   await server!.rpc(workspaceEnable, { workspaceId: "remote-workspace", enabled: true }, paseo);
-  return { ...started, native, timelines, droppedOriginals, nativeHistory, reconnect, comments, requests, paseo, home, start, connect, eventsReady, signal, runs, messages, providerEvents, failMessages: (value: boolean) => { failMessages = value; }, identity: async (value: string) => { identity = value; await writeFile(join(home, ".multica/config.json"), JSON.stringify({ server_url: `http://127.0.0.1:${(http.address() as { port: number }).port}`, token: `synthetic-${value}` })); }, failRuns: (value: boolean) => { failRuns = value; }, failDiscovery: (value: boolean) => { failDiscovery = value; }, discoveryPages: (pages: Comment[][]) => { discoveryPages = pages; }, truncated: (value: boolean) => { truncated = value; }, paginate: () => { paginate = true; }, failHistory: (value: boolean) => { failHistory = value; } };
+  return { ...started, native, timelines, droppedOriginals, nativeHistory, reconnect, comments, requests, paseo, home, start, connect, eventsReady, signal, runs, messages, providerEvents, failMessages: (value: boolean) => {
+    failMessages = value;
+  }, identity: async (value: string) => {
+    identity = value;
+    await writeFile(join(home, ".multica/config.json"), JSON.stringify({ server_url: `http://127.0.0.1:${(http.address() as { port: number }).port}`, token: `synthetic-${value}` }));
+  }, failRuns: (value: boolean) => {
+    failRuns = value;
+  }, failDiscovery: (value: boolean) => {
+    failDiscovery = value;
+  }, discoveryPages: (pages: Comment[][]) => {
+    discoveryPages = pages;
+  }, truncated: (value: boolean) => {
+    truncated = value;
+  }, paginate: () => {
+    paginate = true;
+  }, failHistory: (value: boolean) => {
+    failHistory = value;
+  } };
 }
 
 it("discovers one stable native tab for a root and recursive replies without loading full background history", async () => {
@@ -440,7 +462,8 @@ it("fixes first ownership across cross-Thread coalescing, later associations and
   const provider = await restarted.server.providers.get("multica")!.connect({ versions: [1], capabilities: ["session.persistence"] });
   const replay: ProviderEvent[] = [];
   provider.onEvent(event => replay.push(event));
-  for (const agent of f.native.agents) await provider.send({ type: "session.open", requestId: `replay-${agent.id}`, sessionId: agent.id, history: "replay", persistence: JSON.parse(agent.handle.slice(7)), config: { cwd: agent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
+  for (const agent of f.native.agents)
+    await provider.send({ type: "session.open", requestId: `replay-${agent.id}`, sessionId: agent.id, history: "replay", persistence: JSON.parse(agent.handle.slice(7)), config: { cwd: agent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
   const owners = (runId: string) => replay.flatMap(event => event.type === "timeline.item" && event.item.id === `multica:run:${runId}` ? [f.native.agents.find(agent => agent.id === event.sessionId)!.labels["multica.discussion"]] : []);
   expect(owners("earliest")).toEqual(["z-earliest"]);
   expect(owners("unanchored")).toEqual(["main"]);

@@ -43,8 +43,12 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     server.handle(connectionStatus, async () => {
       const details = { sync: synchronizer.status(), hidden: (await hiding.list()).objects };
       const state = await settings.read();
-      if (state.status !== "ready") { resolve.invalidate(); await askusers.connectionChanged(); return { ...details, status: "invalid_settings", profile: "", source: { api: "none", credentials: "none", app: "none" },
-        message: "Multica 插件设置无效，请重新选择 CLI profile。", loginCommand: "multica login" } as const; }
+      if (state.status !== "ready") {
+        resolve.invalidate();
+        await askusers.connectionChanged();
+        return { ...details, status: "invalid_settings", profile: "", source: { api: "none", credentials: "none", app: "none" },
+        message: "Multica 插件设置无效，请重新选择 CLI profile。", loginCommand: "multica login" } as const;
+      }
       return { ...await resolveStatus(state.values.profile), ...details };
     });
     async function connection() {
@@ -152,7 +156,10 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       const context = await connection();
       const workspaces = await synchronizer.workspaces(context);
       const rules = (await store.read()).connections[context.connectionKey]?.rules;
-      return { connectionKey: context.connectionKey, workspaces: workspaces.map(workspace => ({ id: workspace.id, name: workspace.name, enabled: rules?.[workspace.id]?.enabled ?? false, rule: taskRuleSchema.parse(rules?.[workspace.id] ?? {}) })) };
+      return { connectionKey: context.connectionKey, workspaces: workspaces.map(workspace => ({
+        id: workspace.id, name: workspace.name, enabled: rules?.[workspace.id]?.enabled ?? false,
+        rule: taskRuleSchema.parse(rules?.[workspace.id] ?? {})
+      })) };
     });
     server.handle(workspaceEnable, async (input, context) => {
       try { await synchronizer.enable(context.paseo, input.workspaceId, input.enabled, input.connectionKey); return { status: "ready" as const }; }
@@ -169,6 +176,18 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       try { await synchronizer.rule(context.paseo, input.workspaceId, input.rule, input.connectionKey); return { status: "ready" as const }; }
       catch { return { status: "unavailable" as const, message: "筛选规则保存或同步失败，请检查连接后重试。" }; }
     });
-    return async () => { shuttingDown = true; await Promise.allSettled(identityRefreshes); await deliveries.close(); await synchronizer.close(); await metadata.close(); await stops.close(); await threads.close(); await askusers.close(); await runDetails.close(); runs.close(); descriptions.close(); };
+    return async () => {
+      shuttingDown = true;
+      await Promise.allSettled(identityRefreshes);
+      await deliveries.close();
+      await synchronizer.close();
+      await metadata.close();
+      await stops.close();
+      await threads.close();
+      await askusers.close();
+      await runDetails.close();
+      runs.close();
+      descriptions.close();
+    };
   };
 }

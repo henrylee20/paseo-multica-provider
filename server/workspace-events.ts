@@ -51,7 +51,8 @@ export class WorkspaceEvents {
             authenticated = true;
             // There is no replay cursor: every authenticated connection requires a snapshot.
             notify("auth_ack");
-          } else if (authenticated && typeof event.type === "string" && /^(issue:|issue_[a-z_]+:|comment:|member:|agent:|squad:|project:|label:|workspace:|task:)/.test(event.type)) {
+          } else if (authenticated && typeof event.type === "string" &&
+            /^(issue:|issue_[a-z_]+:|comment:|member:|agent:|squad:|project:|label:|workspace:|task:)/.test(event.type)) {
             notify(event.type, event.payload);
           }
         });
@@ -61,7 +62,10 @@ export class WorkspaceEvents {
         });
       };
       connection.signal?.addEventListener("abort", retire, { once: true });
-      this.subscriptions.set(key, { fingerprint, signal: connection.signal, close: () => { connection.signal?.removeEventListener("abort", retire); retire(); } });
+      this.subscriptions.set(key, { fingerprint, signal: connection.signal, close: () => {
+        connection.signal?.removeEventListener("abort", retire);
+        retire();
+      } });
       void connect();
     }
   }

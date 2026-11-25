@@ -27,7 +27,9 @@ export function describeRule(rule: TaskRule) {
   return parts.join(" · ");
 }
 
-function Choices({ title, values, choices, onChange, disabled, theme }: { title: string; values: string[]; choices: Choice[]; onChange(values: string[]): void; disabled: boolean; theme: Theme }) {
+function Choices({ title, values, choices, onChange, disabled, theme }: {
+  title: string; values: string[]; choices: Choice[]; onChange(values: string[]): void; disabled: boolean; theme: Theme
+}) {
   const [expanded, setExpanded] = useState(false);
   const all = [...choices, ...values.filter(id => !choices.some(item => item.id === id)).map(id => ({ id, name: `${id}（当前目录不可用）` }))];
   const visible = expanded ? all : all.filter((item, index) => index < collapsedLimit || values.includes(item.id));
@@ -44,7 +46,8 @@ function Choices({ title, values, choices, onChange, disabled, theme }: { title:
 }
 
 export function WorkspaceRuleEditor({ workspaceId, connectionKey, initialRule, theme, onSaved, onCancel, onDirtyChange }: {
-  workspaceId: string; connectionKey?: string; initialRule: TaskRule; theme: Theme; onSaved(rule: TaskRule): void; onCancel(): void; onDirtyChange?(dirty: boolean): void;
+  workspaceId: string; connectionKey?: string; initialRule: TaskRule; theme: Theme;
+  onSaved(rule: TaskRule): void; onCancel(): void; onDirtyChange?(dirty: boolean): void;
 }) {
   const load = useRpc(workspaceCatalog);
   const save = useRpc(workspaceRule);
@@ -56,7 +59,15 @@ export function WorkspaceRuleEditor({ workspaceId, connectionKey, initialRule, t
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     let active = true;
-    void load({ workspaceId, connectionKey }).then(result => { if (active) { setCatalog(result); setCatalogFailed(false); } }, () => { if (active) setCatalogFailed(true); });
+    void load({ workspaceId, connectionKey }).then(result => {
+      if (active) {
+        setCatalog(result);
+        setCatalogFailed(false);
+      }
+    }, () => {
+      if (active)
+        setCatalogFailed(true);
+    });
     return () => { active = false; };
   }, [load, workspaceId, connectionKey, attempt]);
   function update(next: TaskRule) {
@@ -84,11 +95,15 @@ export function WorkspaceRuleEditor({ workspaceId, connectionKey, initialRule, t
   return <View style={{ gap: 16 }}>
     <Text style={muted}>字段之间同时满足；同一字段多选时任一命中；不选表示不限。</Text>
     <Choices title="状态" theme={theme} values={statuses} disabled={saving}
-      choices={catalog.statuses.map(item => ({ id: item.key, name: `${item.name} · ${categories.find(category => category.id === item.category)?.name ?? item.category}` }))}
+      choices={catalog.statuses.map(item => ({ id: item.key,
+        name: `${item.name} · ${categories.find(category => category.id === item.category)?.name ?? item.category}` }))}
       onChange={statuses => update({ ...rule, statuses, statusCategories: [] })} />
     <Choices title="负责人" theme={theme} disabled={saving} values={rule.assignees.map(item => `${item.type}:${item.id}`)}
       choices={catalog.assignees.map(item => ({ id: `${item.type}:${item.id}`, name: `${actorName[item.type]} · ${item.name}` }))}
-      onChange={values => update({ ...rule, assignees: values.map(value => { const index = value.indexOf(":"); return { type: value.slice(0, index) as TaskRule["assignees"][number]["type"], id: value.slice(index + 1) }; }) })} />
+      onChange={values => update({ ...rule, assignees: values.map(value => {
+        const index = value.indexOf(":");
+        return { type: value.slice(0, index) as TaskRule["assignees"][number]["type"], id: value.slice(index + 1) };
+      }) })} />
     <Choices title="Multica 项目" theme={theme} choices={catalog.projects} values={rule.projectIds} disabled={saving} onChange={projectIds => update({ ...rule, projectIds })} />
     <Choices title="标签" theme={theme} choices={catalog.labels} values={rule.labelIds} disabled={saving} onChange={labelIds => update({ ...rule, labelIds })} />
     <SettingsCard>

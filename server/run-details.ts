@@ -33,7 +33,8 @@ export class RunDetails {
     const { cache, metadata } = await this.cached(address);
     const metadataRevision = metadata && Object.keys(metadata).length ? textRevision(JSON.stringify(metadata)) : undefined;
     if (!cache) return { status: metadataRevision ? "cached" : "unavailable", metadataRevision, message: "无法读取执行消息；尚无已读消息缓存。" };
-    return { status, revision: textRevision(JSON.stringify(cache.messages)), metadataRevision, ...(status === "cached" ? { message: "远端执行明细暂不可用，正在显示已读缓存。" } : {}) };
+    return { status, revision: textRevision(JSON.stringify(cache.messages)), metadataRevision,
+      ...(status === "cached" ? { message: "远端执行明细暂不可用，正在显示已读缓存。" } : {}) };
   }
   private async refresh(address: Address) {
     const { issue, cache } = await this.cached(address);

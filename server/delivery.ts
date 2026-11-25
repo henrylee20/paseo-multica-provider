@@ -38,8 +38,14 @@ export class CommentDelivery {
         } catch (error) { if (attempt === 2) throw error; }
         if (response?.ok) {
           const comment = receiptSchema.parse(await response.json());
-          if (comment.issue_id !== address.issueId || (comment.parent_id ?? null) !== (target.parent_id ?? (address.rootId === "main" ? null : address.rootId)) || (comment.askuser_answer_to ?? null) !== (target.askuser_answer_to ?? null) || comment.content !== body || comment.author_id !== connection.userId) throw new Error("评论回执与原输入不匹配。");
-          await this.store.update(state => { state.connections[address.connectionKey].issues[address.issueId].commentInputs[clientMessageId] = { commentId: comment.id, rootId: address.rootId }; });
+          if (comment.issue_id !== address.issueId ||
+            (comment.parent_id ?? null) !== (target.parent_id ?? (address.rootId === "main" ? null : address.rootId)) ||
+            (comment.askuser_answer_to ?? null) !== (target.askuser_answer_to ?? null) ||
+            comment.content !== body || comment.author_id !== connection.userId)
+            throw new Error("评论回执与原输入不匹配。");
+          await this.store.update(state => {
+            state.connections[address.connectionKey].issues[address.issueId].commentInputs[clientMessageId] = { commentId: comment.id, rootId: address.rootId };
+          });
           return comment.id;
         }
         if (response && (response.status < 500 || attempt === 2)) {

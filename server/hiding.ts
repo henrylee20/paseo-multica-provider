@@ -64,7 +64,8 @@ export class ManualHiding {
       return [
         ...(issue.manualHidden.workspace ? [{ ...address, kind: "workspace" as const, title: issue.title }] : []),
         ...issue.manualHidden.discussions.map(rootId => ({ ...address, kind: rootId === "main" ? "main" as const : "thread" as const,
-          rootId, agentId: discussionAgent(issue, rootId), title: `${issue.title} · ${rootId === "main" ? "主讨论" : issue.threads[rootId]?.title ?? "Thread"}` })),
+          rootId, agentId: discussionAgent(issue, rootId),
+          title: `${issue.title} · ${rootId === "main" ? "主讨论" : issue.threads[rootId]?.title ?? "Thread"}` })),
       ];
     })) };
   }

@@ -40,7 +40,15 @@ export function ConnectionScreen({ host, theme }: PluginSurfaceProps) {
 
   useEffect(() => { if (configuredProfile !== undefined) setDraft(configuredProfile); }, [configuredProfile]);
   // Another host or profile may be another identity: never keep showing the previous one's status or rules.
-  useEffect(() => { setStatus(null); setHidden([]); setWorkspaces([]); setWorkspacesRead(false); setEditingWorkspace(null); setEditorDirty(false); setCopied(null); }, [host.id, configuredProfile]);
+  useEffect(() => {
+    setStatus(null);
+    setHidden([]);
+    setWorkspaces([]);
+    setWorkspacesRead(false);
+    setEditingWorkspace(null);
+    setEditorDirty(false);
+    setCopied(null);
+  }, [host.id, configuredProfile]);
   useEffect(() => {
     // Refreshes and rule changes keep the current rows on screen until the next reading replaces them.
     let active = true;
@@ -52,7 +60,12 @@ export function ConnectionScreen({ host, theme }: PluginSurfaceProps) {
         if (next.status === "ready") {
           try {
             const result = await listWorkspaces({});
-            if (active) { setWorkspaces(result.connectionKey === next.connectionKey ? result.workspaces.map(workspace => ({ ...workspace, connectionKey: result.connectionKey })) : []); setWorkspacesRead(true); setWorkspaceFailure(null); }
+            if (active) {
+              setWorkspaces(result.connectionKey === next.connectionKey
+                ? result.workspaces.map(workspace => ({ ...workspace, connectionKey: result.connectionKey })) : []);
+              setWorkspacesRead(true);
+              setWorkspaceFailure(null);
+            }
           } catch { if (active) setWorkspaceFailure("无法读取 Multica 工作区，请检查连接后刷新。"); }
         } else if (active) setWorkspaces([]);
       } catch {
@@ -78,7 +91,8 @@ export function ConnectionScreen({ host, theme }: PluginSurfaceProps) {
       const result = await enableWorkspace({ connectionKey: workspace.connectionKey, workspaceId: workspace.id, enabled: !workspace.enabled });
       if (result.status !== "ready") { setWorkspaceFailure(result.message ?? "同步暂不可用，请重试。"); return; }
       setWorkspaceFailure(null);
-      setWorkspaces(list => list.map(item => item.connectionKey === workspace.connectionKey && item.id === workspace.id ? { ...item, enabled: !workspace.enabled } : item));
+      setWorkspaces(list => list.map(item => item.connectionKey === workspace.connectionKey && item.id === workspace.id
+        ? { ...item, enabled: !workspace.enabled } : item));
       setAttempt(value => value + 1);
     } catch { setWorkspaceFailure("Multica 工作区规则保存或同步失败，请重试。"); }
     finally { setSavingWorkspace(null); }
@@ -101,7 +115,9 @@ export function ConnectionScreen({ host, theme }: PluginSurfaceProps) {
     info={`复用 daemon 主机 ${host.label} 上的 Multica CLI 登录。`}>
     <SettingsCard>
       <SettingsRow label={status?.apiUrl ?? "状态"} hint={status?.status !== "ready" ? status?.message : undefined} error={failure}>
-        <Text style={{ color: status ? statusColor(status.status) : theme.colors.foregroundMuted }}>{status ? [labels[status.status], status.status === "ready" ? status.user?.name || status.user?.email : undefined].filter(Boolean).join(" · ") : failure ? "无法读取" : "正在验证…"}</Text>
+        <Text style={{ color: status ? statusColor(status.status) : theme.colors.foregroundMuted }}>{status
+          ? [labels[status.status], status.status === "ready" ? status.user?.name || status.user?.email : undefined].filter(Boolean).join(" · ")
+          : failure ? "无法读取" : "正在验证…"}</Text>
       </SettingsRow>
       {status && status.status !== "ready" ? <SettingsAction label="恢复 CLI 登录" hint={`在 daemon 主机执行 ${status.loginCommand} 后刷新。`}
         actionLabel={copied === "done" ? "已复制" : "复制命令"} error={copied === "failed" ? "无法写入剪贴板，请手动输入上面的命令。" : null}

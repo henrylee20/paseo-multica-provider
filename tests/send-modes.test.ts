@@ -48,10 +48,12 @@ async function fixture() {
       }
     } else if (url.pathname === "/api/me") body = { id: "me", name: "Lin" };
     else if (url.pathname === "/api/workspaces") body = [{ id: "workspace", name: "Product", slug: "product" }];
-    else if (url.pathname === "/api/issues") body = { issues: [{ id: "issue", workspace_id: "workspace", title: "Task", description: "Goal", status: "todo" }], total: 1 };
+    else if (url.pathname === "/api/issues")
+      body = { issues: [{ id: "issue", workspace_id: "workspace", title: "Task", description: "Goal", status: "todo" }], total: 1 };
     else if (url.pathname === "/api/issues/issue/task-runs") body = runs;
     else if (url.pathname === "/api/agents") body = [{ id: "agent-a", name: "Agent A" }, { id: "agent-b", name: "Agent B" }];
-    else if (url.pathname === "/api/issues/issue/comments") body = url.searchParams.has("thread") ? comments.filter(comment => comment.id === url.searchParams.get("thread") || comment.parent_id === url.searchParams.get("thread")) : comments;
+    else if (url.pathname === "/api/issues/issue/comments")
+      body = url.searchParams.has("thread") ? comments.filter(comment => comment.id === url.searchParams.get("thread") || comment.parent_id === url.searchParams.get("thread")) : comments;
     else { response.statusCode = 404; body = {}; }
     response.end(JSON.stringify(body));
   });
@@ -70,7 +72,8 @@ async function fixture() {
     createWorkspace: async (input: { workspaceId: string }) => ({ workspace: { id: input.workspaceId } }), setWorkspaceTitle: async () => {},
     fetchAgents: async () => ({ entries: agents.map(agent => ({ agent: { provider: "multica", ...agent } })), pageInfo: { hasMore: false } }),
     importAgent: async (input: { workspaceId: string; cwd: string; labels: Record<string, string>; providerHandleId: string }) => {
-      const agent = { id: `native-${agents.length}`, workspaceId: input.workspaceId, cwd: input.cwd, labels: input.labels, handle: input.providerHandleId }; agents.push(agent);
+      const agent = { id: `native-${agents.length}`, workspaceId: input.workspaceId, cwd: input.cwd, labels: input.labels, handle: input.providerHandleId };
+      agents.push(agent);
       await provider.send({ type: "session.open", requestId: agent.id, sessionId: agent.id, history: "replay", persistence: JSON.parse(agent.handle.slice(7)), config: { cwd: agent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
       return agent;
     }, updateAgent: async () => {}, close: async () => {},

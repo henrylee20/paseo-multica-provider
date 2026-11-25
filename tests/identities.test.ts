@@ -48,9 +48,12 @@ async function fixture() {
         response.statusCode = 503; body = {};
       } else if (url.pathname === "/api/me") { await beforeIdentity?.(); body = { id: actor, name: actor === "me" ? "Lin" : "Kai" }; }
       else if (url.pathname === "/api/workspaces") { body = [{ id: "workspace", name: "Product", slug: "product" }]; }
-      else if (url.pathname === "/api/issues") body = { issues: [{ id: "issue", workspace_id: "workspace", title: "Task", description: "Description", status: "todo" }], total: 1 };
-      else if (url.pathname === "/api/issues/issue/task-runs") body = [{ id: "run", issue_id: "issue", agent_id: "agent", status: "running", trigger_comment_id: "root" }];
-      else if (url.pathname === "/api/issues/issue/comments") body = [{ id: "root", issue_id: "issue", parent_id: null, content: "Original Lin comment", author_id: "me", author_type: "member", type: "comment", created_at: "2026-11-24T10:00:00Z", updated_at: "2026-11-24T10:00:00Z", attachments: [] }];
+      else if (url.pathname === "/api/issues")
+        body = { issues: [{ id: "issue", workspace_id: "workspace", title: "Task", description: "Description", status: "todo" }], total: 1 };
+      else if (url.pathname === "/api/issues/issue/task-runs")
+        body = [{ id: "run", issue_id: "issue", agent_id: "agent", status: "running", trigger_comment_id: "root" }];
+      else if (url.pathname === "/api/issues/issue/comments")
+        body = [{ id: "root", issue_id: "issue", parent_id: null, content: "Original Lin comment", author_id: "me", author_type: "member", type: "comment", created_at: "2026-11-24T10:00:00Z", updated_at: "2026-11-24T10:00:00Z", attachments: [] }];
       else if (url.pathname === "/api/agents") body = [{ id: "agent", name: "Agent" }];
       else if (url.pathname.endsWith("/members")) body = [{ user_id: "me", name: "Lin" }];
       else { response.statusCode = 404; body = {}; }
@@ -83,21 +86,38 @@ async function fixture() {
   let provider: ProviderConnection | undefined;
   const server = new FakeServer();
   const connect = async () => {
-    if (!provider) { provider = await server.providers.get("multica")!.connect({ versions: [1], capabilities: ["session.persistence", "prompt.message", "prompt.steer", "timeline.plugin"] }); provider.onEvent(event => { events.push(event); }); }
+    if (!provider) {
+      provider = await server.providers.get("multica")!.connect({ versions: [1], capabilities: ["session.persistence", "prompt.message", "prompt.steer", "timeline.plugin"] });
+      provider.onEvent(event => {
+        events.push(event);
+      });
+    }
     return provider;
   };
   const host = {
     listHosts: async () => ({ self: { serverId: "daemon" } }),
     listProjects: async () => ({ projects: [] }),
-    addProject: async (cwd: string) => { let project = projects.find(value => value.cwd === cwd); if (!project) { project = { projectId: `project-${projects.length}`, cwd }; projects.push(project); } return { project: { ...project, projectKind: "non_git" } }; },
+    addProject: async (cwd: string) => {
+      let project = projects.find(value => value.cwd === cwd);
+      if (!project) {
+        project = { projectId: `project-${projects.length}`, cwd };
+        projects.push(project);
+      }
+      return { project: { ...project, projectKind: "non_git" } };
+    },
     renameProject: async () => {}, fetchWorkspaces: async () => ({ entries: workspaces, pageInfo: { hasMore: false } }),
-    createWorkspace: async (input: { workspaceId: string }) => { const workspace = { id: input.workspaceId }; workspaces.push(workspace); return { workspace }; }, setWorkspaceTitle: async () => {},
+    createWorkspace: async (input: { workspaceId: string }) => {
+      const workspace = { id: input.workspaceId };
+      workspaces.push(workspace);
+      return { workspace };
+    }, setWorkspaceTitle: async () => {},
     fetchAgents: async () => ({ entries: agents.map(agent => ({ agent: { provider: "multica", ...agent } })), pageInfo: { hasMore: false } }),
     fetchAgent: async (id: string) => ({ agent: agents.find(agent => agent.id === id)! }),
     fetchAgentTimeline: async (agentId: string) => ({ agentId, epoch: "epoch", entries: [], hasOlder: false, hasNewer: false }),
     importAgent: async (input: { workspaceId: string; cwd: string; labels: Record<string, string>; providerHandleId: string }) => {
       const agent = { id: `native-${agents.length}`, workspaceId: input.workspaceId, cwd: input.cwd, labels: input.labels }; agents.push(agent);
-      await (await connect()).send({ type: "session.open", requestId: agent.id, sessionId: agent.id, history: "replay", persistence: JSON.parse(input.providerHandleId.slice(7)), config: { cwd: agent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } }); return agent;
+      await (await connect()).send({ type: "session.open", requestId: agent.id, sessionId: agent.id, history: "replay", persistence: JSON.parse(input.providerHandleId.slice(7)), config: { cwd: agent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
+      return agent;
     }, updateAgent: async () => {}, close: async () => {},
   } as unknown as DaemonClient;
   const paseo = { agents: { ref: () => ({}) }, hosts: { list: async () => ({ self: { serverId: "daemon" } }) } } as unknown as PaseoApi;

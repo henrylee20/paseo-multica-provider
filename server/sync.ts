@@ -271,7 +271,9 @@ export class SidebarSynchronizer {
       if (added.error || !added.project || added.project.projectKind === "git") throw new Error("Could not register non-Git native project");
       const projectId = added.project.projectId;
       await this.host.renameProject(projectId, workspace.name);
-      await this.options.store.update(state => { connectionState(state, connection.connectionKey).projects[workspaceId] = { cwd: projectDirectory, projectId, name: workspace.name, slug: workspace.slug }; });
+      await this.options.store.update(state => {
+        connectionState(state, connection.connectionKey).projects[workspaceId] = { cwd: projectDirectory, projectId, name: workspace.name, slug: workspace.slug };
+      });
       for (const issue of issues) {
         const previous = (await this.options.store.read()).connections[connection.connectionKey]?.issues[issue.id];
         const title = [issue.identifier, issue.title].filter(Boolean).join(" ");

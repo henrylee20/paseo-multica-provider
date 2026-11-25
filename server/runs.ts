@@ -42,7 +42,9 @@ function owner(issue: IssueMapping, run: z.infer<typeof remoteRunSchema>, genera
 export function runSummary(address: RunAddress, runId: string, run: StoredRun): ProviderTimelineItem {
   return { type: "plugin", id: `multica:run:${runId}`, pluginId: "multica", kind: "run-summary", version: 1,
     data: runSummarySchema.parse({ ...address, runId, agentId: run.agentId, agentName: [...run.agentName].slice(0, 1000).join(""), status: run.status,
-      ...(run.createdAt ? { createdAt: run.createdAt } : {}), ...(run.startedAt ? { startedAt: run.startedAt } : {}), ...(run.completedAt ? { completedAt: run.completedAt } : {}) }) };
+      ...(run.createdAt ? { createdAt: run.createdAt } : {}),
+      ...(run.startedAt ? { startedAt: run.startedAt } : {}),
+      ...(run.completedAt ? { completedAt: run.completedAt } : {}) }) };
 }
 
 /** Fixed display ownership and summary projection. Never reads detailed run output. */
@@ -57,7 +59,8 @@ export class RunSynchronizer {
   }
   async discover(connection: AuthenticatedConnection, workspace: RemoteWorkspace, issueId: string) {
     const records = await remoteJson(connection, `/api/issues/${encodeURIComponent(issueId)}/task-runs?view=timeline`, z.array(remoteRunSchema), workspace) as Array<z.infer<typeof remoteRunSchema>>;
-    if (records.some(run => run.issue_id !== issueId) || new Set(records.map(run => run.id)).size !== records.length) throw new Error("Invalid issue run snapshot");
+    if (records.some(run => run.issue_id !== issueId) || new Set(records.map(run => run.id)).size !== records.length)
+      throw new Error("Invalid issue run snapshot");
     const agents = records.length ? await workspaceAgents(connection, workspace) : [];
     await this.store.update(state => {
       const issue = state.connections[connection.connectionKey].issues[issueId];
@@ -66,9 +69,11 @@ export class RunSynchronizer {
         // A Run ID is one execution: a stale read must not reopen its terminal cycle.
         const staleActive = previous && !isActiveRun(previous.status) && isActiveRun(run.status);
         const generatedCommentIds = Object.entries(issue.commentSourceTaskIds).filter(([, taskId]) => taskId === run.id).map(([commentId]) => commentId);
-        issue.runs[run.id] = { agentId: run.agent_id, agentName: agents.find(agent => agent.id === run.agent_id)?.name ?? `Agent ${run.agent_id}`, status: staleActive ? previous.status : run.status,
+        issue.runs[run.id] = { agentId: run.agent_id, agentName: agents.find(agent => agent.id === run.agent_id)?.name ?? `Agent ${run.agent_id}`,
+          status: staleActive ? previous.status : run.status,
           ownerRootId: previous?.ownerRootId ?? owner(issue, run, generatedCommentIds), generatedCommentIds, triggerCommentId: run.trigger_comment_id,
-          coalescedCommentIds: run.coalesced_comment_ids ?? [], deliveredCommentIds: run.delivered_comment_ids ?? undefined, supplementCommentIds: run.supplement_comment_ids ?? [],
+          coalescedCommentIds: run.coalesced_comment_ids ?? [], deliveredCommentIds: run.delivered_comment_ids ?? undefined,
+          supplementCommentIds: run.supplement_comment_ids ?? [],
           createdAt: run.created_at, startedAt: run.started_at ?? undefined, completedAt: staleActive ? previous.completedAt : run.completed_at ?? undefined,
           // Omission is no new evidence; explicit null/empty values are. A
           // stale active snapshot must not replace terminal failure metadata.

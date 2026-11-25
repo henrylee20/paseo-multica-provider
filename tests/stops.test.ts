@@ -34,7 +34,11 @@ async function fixture(initialRuns: Run[] = []) {
   const requests: Array<{ url: string; method: string; slug?: string }> = [];
   const comments: Comment[] = [comment("root", null, "**Root**"), comment("child", "root", "Child", "member-other"), comment("grandchild", "child", "Grandchild", "owned-agent", "agent")];
   const runs = [...initialRuns];
-  let cancel: (id: string) => Promise<{status?: number; body: unknown}> = async id => { const run = runs.find(run => run.id === id)!; run.status = "cancelled"; return { body: run }; };
+  let cancel: (id: string) => Promise<{status?: number; body: unknown}> = async id => {
+    const run = runs.find(run => run.id === id)!;
+    run.status = "cancelled";
+    return { body: run };
+  };
   let beforeAgents: (() => Promise<void>) | undefined;
   let failRuns = false;
   let failDiscovery = false;
@@ -52,7 +56,8 @@ async function fixture(initialRuns: Run[] = []) {
     }
     else if (url.pathname === "/api/me") body = { id: "member-me", name: "Lin" };
     else if (url.pathname === "/api/workspaces") body = [{ id: "remote-workspace", name: "Product", slug: "product" }];
-    else if (url.pathname === "/api/issues") body = { issues: matching ? [{ id: "issue", workspace_id: "remote-workspace", title: "Task", description: "Task description", status: "todo" }] : [], total: matching ? 1 : 0 };
+    else if (url.pathname === "/api/issues")
+      body = { issues: matching ? [{ id: "issue", workspace_id: "remote-workspace", title: "Task", description: "Task description", status: "todo" }] : [], total: matching ? 1 : 0 };
     else if (url.pathname === "/api/workspaces/remote-workspace/members") body = [{ id: "membership-other", user_id: "member-other", name: "River" }];
     else if (url.pathname === "/api/agents") { await beforeAgents?.(); body = [{ id: "owned-agent", name: "Lin Agent", owner_id: "member-me" }]; }
     else if (url.pathname === "/api/issues/issue/task-runs") {
@@ -81,7 +86,10 @@ async function fixture(initialRuns: Run[] = []) {
         }
       } else if (discoveryPages) {
         const index = Number(url.searchParams.get("before_id") ?? "0");
-        if (index + 1 < discoveryPages.length) { response.setHeader("X-Multica-Next-Before", stamp); response.setHeader("X-Multica-Next-Before-Id", String(index + 1)); }
+        if (index + 1 < discoveryPages.length) {
+          response.setHeader("X-Multica-Next-Before", stamp);
+          response.setHeader("X-Multica-Next-Before-Id", String(index + 1));
+        }
         body = discoveryPages[index];
       } else body = comments.map(item => ({ ...item, content: item.parent_id ? "summary" : item.content, content_truncated: !!item.parent_id }));
     } else { response.statusCode = 404; body = {}; }
@@ -143,7 +151,12 @@ async function fixture(initialRuns: Run[] = []) {
       return agent;
     },
     updateAgent: async (id: string, updates: { name: string }) => { native.agents.find(agent => agent.id === id)!.name = updates.name; },
-    archiveWorkspace: async (id: string) => { for (const agent of native.agents.filter(agent => agent.workspaceId === id)) await archiveAgent(agent.id); await server.hook("workspace.archive.after", { workspace: { id, cwd: native.agents[0].cwd, projectId: "project", name: "Task", archivedAt: stamp } }, paseo); return { error: null }; },
+    archiveWorkspace: async (id: string) => {
+      for (const agent of native.agents.filter(agent => agent.workspaceId === id))
+        await archiveAgent(agent.id);
+      await server.hook("workspace.archive.after", { workspace: { id, cwd: native.agents[0].cwd, projectId: "project", name: "Task", archivedAt: stamp } }, paseo);
+      return { error: null };
+    },
     restoreWorkspace: async () => { native.effects.push("restore"); },
     refreshAgent: async () => { native.effects.push("refresh"); },
     close: async () => {},
@@ -165,7 +178,25 @@ async function fixture(initialRuns: Run[] = []) {
   cleanup.push(async () => { await provider?.close(); });
   const paseo = { hosts: { list: async () => ({ self: { serverId: "owning-daemon" } }) } } as unknown as PaseoApi;
   await server!.rpc(workspaceEnable, { workspaceId: "remote-workspace", enabled: true }, paseo);
-  return { ...started, beforeAgents: (handler: () => Promise<void>) => { beforeAgents = handler; }, matching: (value: boolean) => { matching = value; }, host, archiveAgent, cancel: (handler: typeof cancel) => { cancel = handler; }, native, timelines, comments, requests, paseo, home, start, connect, eventsReady, signal, runs, providerEvents, failRuns: (value: boolean) => { failRuns = value; }, failDiscovery: (value: boolean) => { failDiscovery = value; }, discoveryPages: (pages: Comment[][]) => { discoveryPages = pages; }, truncated: (value: boolean) => { truncated = value; }, paginate: () => { paginate = true; }, failHistory: (value: boolean) => { failHistory = value; } };
+  return { ...started, beforeAgents: (handler: () => Promise<void>) => {
+    beforeAgents = handler;
+  }, matching: (value: boolean) => {
+    matching = value;
+  }, host, archiveAgent, cancel: (handler: typeof cancel) => {
+    cancel = handler;
+  }, native, timelines, comments, requests, paseo, home, start, connect, eventsReady, signal, runs, providerEvents, failRuns: (value: boolean) => {
+    failRuns = value;
+  }, failDiscovery: (value: boolean) => {
+    failDiscovery = value;
+  }, discoveryPages: (pages: Comment[][]) => {
+    discoveryPages = pages;
+  }, truncated: (value: boolean) => {
+    truncated = value;
+  }, paginate: () => {
+    paginate = true;
+  }, failHistory: (value: boolean) => {
+    failHistory = value;
+  } };
 }
 
 const run = (id: string, status: string, root = "root"): Run => ({ id, status, issue_id: "issue", agent_id: "owned-agent", trigger_comment_id: root });

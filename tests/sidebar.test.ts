@@ -99,7 +99,10 @@ async function fixture(syncIntervalMs = 15_000, homePrefix = "multica-sidebar-")
     listHosts: async () => ({ self: { serverId: "owning-daemon" } }),
     addProject: async (cwd: string) => {
       let project = native.projects.find(item => item.cwd === cwd);
-      if (!project) { project = { projectId: projectSequence++ ? `native-project-${projectSequence}` : "native-project", cwd, name: "" }; native.projects.push(project); }
+      if (!project) {
+        project = { projectId: projectSequence++ ? `native-project-${projectSequence}` : "native-project", cwd, name: "" };
+        native.projects.push(project);
+      }
       return { project, error: null };
     },
     listProjects: async () => ({ projects: native.projects.map(project => ({ projectId: project.projectId, projectRootPath: project.cwd, projectKind: "non_git" })) }),

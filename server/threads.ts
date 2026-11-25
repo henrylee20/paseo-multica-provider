@@ -61,7 +61,9 @@ function body(comment: Comment, apiUrl: string): string {
 }
 
 export function projectRow(address: Address, row: StoredRow): ProviderTimelineItem {
-  if (row.role === "user") return { type: "user_message", id: row.id, messageId: row.commentId, text: row.text, ...(row.clientMessageId ? { clientMessageId: row.clientMessageId } : {}) };
+  if (row.role === "user")
+    return { type: "user_message", id: row.id, messageId: row.commentId, text: row.text,
+      ...(row.clientMessageId ? { clientMessageId: row.clientMessageId } : {}) };
   if (row.role === "assistant") return { type: "assistant_message", id: row.id, messageId: row.commentId, text: row.text };
   // Row payloads stay below the host's 64 KiB limit; full correction text stays available via RPC.
   const preview = [...row.text].slice(0, 6000).join("");
@@ -112,7 +114,10 @@ export class ThreadSynchronizer {
       const query = new URLSearchParams({ ...mode, ...cursor });
       const response = await remoteFetch(connection, `/api/issues/${encodeURIComponent(issueId)}/comments?${query}`, { headers: { "X-Workspace-Slug": workspace.slug } });
       if (!response.ok) { await response.body?.cancel(); throw new Error("Comment history unavailable"); }
-      if (response.headers.get("X-Comments-Truncated")?.toLowerCase() === "true") { await response.body?.cancel(); throw new Error("Remote comments were truncated"); }
+      if (response.headers.get("X-Comments-Truncated")?.toLowerCase() === "true") {
+        await response.body?.cancel();
+        throw new Error("Remote comments were truncated");
+      }
       const page = z.array(commentSchema).parse(await response.json());
       for (const comment of page) {
         if (comment.issue_id !== issueId) throw new Error("Comment belongs to another issue");
@@ -183,7 +188,8 @@ export class ThreadSynchronizer {
       const address = { connectionKey: connection.connectionKey, issueId, rootId: root.id };
       if (mapping.historyLoaded && this.opened.has(key(address))) await this.refresh(connection, workspace, address, false);
     }
-    if (this.opened.has(key({ connectionKey: connection.connectionKey, issueId, rootId: "main" })) && (await this.store.read()).connections[connection.connectionKey].issues[issueId].mainHistory.historyLoaded) {
+    if (this.opened.has(key({ connectionKey: connection.connectionKey, issueId, rootId: "main" })) &&
+      (await this.store.read()).connections[connection.connectionKey].issues[issueId].mainHistory.historyLoaded) {
       await this.refresh(connection, workspace, { connectionKey: connection.connectionKey, issueId, rootId: "main" }, false);
     }
   }
@@ -206,9 +212,12 @@ export class ThreadSynchronizer {
       const issue = (await this.store.read()).connections[address.connectionKey].issues[address.issueId];
         const rootIds = address.rootId === "main" ? issue.systemRootIds : [address.rootId];
       const comments = new Map<string, Comment>();
-      for (const rootId of rootIds) for (const [id, comment] of await this.pages(connection, workspace, address.issueId, { thread: rootId, tail: "100" })) comments.set(id, comment);
+      for (const rootId of rootIds)
+        for (const [id, comment] of await this.pages(connection, workspace, address.issueId, { thread: rootId, tail: "100" }))
+          comments.set(id, comment);
       const roots = rootsOf(comments);
-      if (rootIds.some(rootId => !comments.has(rootId)) || [...comments.values()].some(comment => comment.content_truncated || !rootIds.includes(roots.get(comment.id) ?? ""))) {
+      if (rootIds.some(rootId => !comments.has(rootId)) ||
+        [...comments.values()].some(comment => comment.content_truncated || !rootIds.includes(roots.get(comment.id) ?? ""))) {
         throw new Error("Thread snapshot is incomplete");
       }
       const [members, agents] = await Promise.all([
@@ -246,15 +255,18 @@ export class ThreadSynchronizer {
           if (deleted || previous) {
             const category = deleted ? "deletion" : "correction";
             const revision = comment.revision ?? hash([fingerprint, comment.updated_at]);
-            append({ ...source, id: `multica:${category}:${comment.id}:${revision}`, role: "event", category, text: deleted ? "此评论已在 Multica 删除；保留先前读到的原始记录（如有）。" : text });
+            append({ ...source, id: `multica:${category}:${comment.id}:${revision}`, role: "event", category,
+              text: deleted ? "此评论已在 Multica 删除；保留先前读到的原始记录（如有）。" : text });
           } else if (comment.author_type === "system" || comment.type !== "comment") {
             append({ ...source, id: `multica:comment:${comment.id}`, role: "event", category: "system", text });
           } else {
             const own = comment.author_type === "member" && comment.author_id === connection.userId;
-            const outgoing = own ? Object.entries(issue.commentInputs).find(([, input]) => input.rootId === address.rootId && input.commentId === comment.id)?.[0] : undefined;
+            const outgoing = own
+              ? Object.entries(issue.commentInputs).find(([, input]) => input.rootId === address.rootId && input.commentId === comment.id)?.[0] : undefined;
             const name = comment.author_type === "member" ? members.find(member => member.user_id === comment.author_id)?.name ?? `成员 ${comment.author_id}`
               : agents.find(agent => agent.id === comment.author_id)?.name ?? `Agent ${comment.author_id}`;
-            append({ ...source, id: `multica:comment:${comment.id}`, role: own ? "user" : "assistant", text: own ? text : `${name}: \n\n${text}`, ...(outgoing ? { clientMessageId: outgoing } : {}) });
+            append({ ...source, id: `multica:comment:${comment.id}`, role: own ? "user" : "assistant",
+              text: own ? text : `${name}: \n\n${text}`, ...(outgoing ? { clientMessageId: outgoing } : {}) });
           }
           thread.observed[comment.id] = { fingerprint, deleted, revision: comment.revision, updatedAt: comment.updated_at };
         }

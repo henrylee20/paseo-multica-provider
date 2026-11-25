@@ -53,7 +53,12 @@ it("client bootstrap keeps running through successful connections and daemon res
   vi.useFakeTimers();
   try {
     const calls: string[] = [];
-    const dispose = setup({ rpc: async (contract: { name: string }) => { calls.push(contract.name); if (calls.length === 1 || calls.length === 4) throw new Error("daemon restarted"); return { status: "ready" }; },
+    const dispose = setup({ rpc: async (contract: { name: string }) => {
+      calls.push(contract.name);
+      if (calls.length === 1 || calls.length === 4)
+        throw new Error("daemon restarted");
+      return { status: "ready" };
+    },
       addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: () => () => {} });
     await Promise.resolve();
     expect(calls).toEqual(["sync.bootstrap"]);
@@ -88,7 +93,10 @@ async function pickerHarness(answer: (input: unknown) => Promise<{ agents: unkno
   expect(items.map(item => item.id)).toEqual(["multica-mention"]);
   return {
     calls, inserted, focused, dispose, items,
-    render: () => { cursor = 0; return items[0].Component({ theme: { colors: {} }, host: { id: "host", label: "Host" }, layout: { compact: false, platform: "web" } }) as unknown as { props: { title: string; icon: string; value: null; search(event: { query: string }): Promise<readonly PickerItem[]>; onSelect(event: { item: PickerItem }): Promise<void> } } | null; },
+    render: () => {
+      cursor = 0;
+      return items[0].Component({ theme: { colors: {} }, host: { id: "host", label: "Host" }, layout: { compact: false, platform: "web" } }) as unknown as { props: { title: string; icon: string; value: null; search(event: { query: string }): Promise<readonly PickerItem[]>; onSelect(event: { item: PickerItem }): Promise<void> } } | null;
+    },
   };
 }
 const builder = (tail: string) => ({ id: `9f3c1a2e-0000-4000-8000-00000000000${tail}`, name: "Builder", reference: `[@Builder](mention://agent/9f3c1a2e-0000-4000-8000-00000000000${tail})` });
@@ -137,7 +145,11 @@ it.each([
 it("a picker whose agent reading fails shows the failure and reads again on the next query", async () => {
   let offline = true;
   const agents = [builder("1")];
-  const h = await pickerHarness(async () => { if (offline) throw new Error("CLI 未登录"); return { agents }; }, { agent: { provider: "multica", metadata: task } });
+  const h = await pickerHarness(async () => {
+    if (offline)
+      throw new Error("CLI 未登录");
+    return { agents };
+  }, { agent: { provider: "multica", metadata: task } });
   try {
     const picker = h.render()!;
     await expect(picker.props.search({ query: "" })).rejects.toThrow("CLI 未登录");
@@ -204,7 +216,10 @@ it("a reader can explicitly load every page of a long description from its visib
     "react-native": { View: "View", Text: "Text" },
   });
   const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {},
-    addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: PluginTimelineRendererContribution) => { renderers.push(renderer); return () => {}; } });
+    addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: PluginTimelineRendererContribution) => {
+      renderers.push(renderer);
+      return () => {};
+    } });
   try {
     const renderer = renderers.find(value => value.kind === "task-description")!;
     const data = renderer.schema.parse({ connectionKey: "connection", issueId: "issue", revision: "revision", preview: "目标预览", truncated: true });
@@ -240,12 +255,23 @@ it.each(["task-description"])("the compiled %s reader stops stalled cursors and 
     : { connectionKey: "connection", issueId: "issue", rootId: "root", clientMessageId: "input", idempotencyKey: "key", body: "Preview", truncated: true, createdAt: "2026-11-24T10:00:00Z", status: "failed" };
   const setup = await bundledContribution("../index.client.tsx", {
     react: {
-      useState: (initial: unknown) => { const index = cursor++; if (!(index in state)) state[index] = initial; return [state[index], (value: unknown) => { state[index] = typeof value === "function" ? value(state[index]) : value; }]; },
+      useState: (initial: unknown) => {
+        const index = cursor++;
+        if (!(index in state))
+          state[index] = initial;
+        return [state[index], (value: unknown) => {
+          state[index] = typeof value === "function" ? value(state[index]) : value;
+        }];
+      },
       useEffect: (effect: () => unknown, next: unknown[]) => {
         const index = cursor++;
         if (dependencies[index] && next.every((value, i) => Object.is(value, dependencies[index][i]))) return;
         dependencies[index] = next;
-        effects.push(() => { cleanups[index]?.(); const result = effect(); cleanups[index] = typeof result === "function" ? result as () => void : undefined; });
+        effects.push(() => {
+          cleanups[index]?.();
+          const result = effect();
+          cleanups[index] = typeof result === "function" ? result as () => void : undefined;
+        });
       },
     },
     "@getpaseo/plugin/client": { useRpc: (contract: { name: string }) => {
@@ -258,12 +284,25 @@ it.each(["task-description"])("the compiled %s reader stops stalled cursors and 
       });
       return rpcs.get(contract.name);
     } },
-    "@getpaseo/plugin/client/ui": { Markdown: ({ children }: any) => children, SettingsAction: ({ onPress, actionLabel }: any) => { actions.push({ onPress }); return actionLabel; } },
+    "@getpaseo/plugin/client/ui": { Markdown: ({ children }: any) => children, SettingsAction: ({ onPress, actionLabel }: any) => {
+      actions.push({ onPress });
+      return actionLabel;
+    } },
     "react-native": { View: "View", Text: "Text", Pressable: ({ onPress, children }: any) => { actions.push({ onPress }); return children; } },
   });
-  const dispose = setup({ rpc: async () => ({}), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: any) => { renderers.push(renderer); return () => {}; } });
+  const dispose = setup({ rpc: async () => ({}), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: any) => {
+    renderers.push(renderer);
+    return () => {};
+  } });
   const renderer = renderers.find(renderer => renderer.kind === kind)!;
-  const render = () => { cursor = 0; actions.length = 0; const text = renderedText(renderer.Component({ item: { data }, theme: { colors: {} } })); for (const effect of effects.splice(0)) effect(); return text; };
+  const render = () => {
+    cursor = 0;
+    actions.length = 0;
+    const text = renderedText(renderer.Component({ item: { data }, theme: { colors: {} } }));
+    for (const effect of effects.splice(0))
+      effect();
+    return text;
+  };
   try {
     render(); actions[0].onPress();
     await vi.advanceTimersByTimeAsync(0);
@@ -285,7 +324,10 @@ it.each(["root", "main"])("the invisible %s thread renderer still opens history 
   const calls: Array<{ name: string; input: unknown }> = [];
   const renderers: Array<{ kind: string; schema: zod.ZodType; Component: (props: any) => any }> = [];
   const setup = await bundledContribution("../index.client.tsx", {
-    "@getpaseo/plugin/client": { useRpc: (contract: { name: string }) => async (input: unknown) => { calls.push({ name: contract.name, input }); return { status: "ready" }; } },
+    "@getpaseo/plugin/client": { useRpc: (contract: { name: string }) => async (input: unknown) => {
+      calls.push({ name: contract.name, input });
+      return { status: "ready" };
+    } },
     "@getpaseo/plugin/client/ui": {}, "react-native": { Text: "Text", View: "View", Pressable: "Pressable" },
     react: { useEffect: (effect: () => unknown) => effects.push(effect), useState: (initial: unknown) => [initial, () => {}] },
   });
@@ -316,7 +358,10 @@ it("the main-discussion success renderer shows only a brief Thread hint", async 
     "react-native": { Text: "Text", View: "View", Pressable: "Pressable" },
     react: { useState: (initial: unknown) => [initial, () => {}], useEffect: () => {} },
   });
-  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: any) => { renderers.push(renderer); return () => {}; } });
+  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: any) => {
+    renderers.push(renderer);
+    return () => {};
+  } });
   try {
     const renderer = renderers.find(renderer => renderer.kind === "comment-delivery");
     expect(renderer).toBeDefined();
@@ -330,11 +375,17 @@ it("renders each run's agent and actual state as a bounded summary and observes 
   const calls: Array<{ name: string; input: unknown }> = [];
   const renderers: Array<{ kind: string; schema: zod.ZodType; Component: (props: any) => any }> = [];
   const setup = await bundledContribution("../index.client.tsx", {
-    "@getpaseo/plugin/client": { useRpc: (contract: { name: string }) => async (input: unknown) => { calls.push({ name: contract.name, input }); return { status: "ready" }; } },
+    "@getpaseo/plugin/client": { useRpc: (contract: { name: string }) => async (input: unknown) => {
+      calls.push({ name: contract.name, input });
+      return { status: "ready" };
+    } },
     "@getpaseo/plugin/client/ui": {}, "react-native": { Text: "Text", View: "View", Pressable: "Pressable" },
     react: { useEffect: (effect: () => unknown) => effects.push(effect), useState: (initial: unknown) => [initial, () => {}] },
   });
-  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: any) => { renderers.push(renderer); return () => {}; } });
+  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: any) => {
+    renderers.push(renderer);
+    return () => {};
+  } });
   try {
     const renderer = renderers.find(renderer => renderer.kind === "run-summary");
     expect(renderer, "a native run needs a visible registered summary renderer").toBeDefined();
@@ -380,27 +431,44 @@ it.each(["messages", "empty", "unavailable", "terminal"])("expands source Run me
   const rpcs = new Map<string, (input: any) => Promise<any>>();
   const setup = await bundledContribution("../index.client.tsx", {
     react: {
-      useState: (initial: unknown) => { const index = cursor++; if (!(index in state)) state[index] = initial; return [state[index], (value: unknown) => { state[index] = typeof value === "function" ? value(state[index]) : value; }]; },
+      useState: (initial: unknown) => {
+        const index = cursor++;
+        if (!(index in state))
+          state[index] = initial;
+        return [state[index], (value: unknown) => {
+          state[index] = typeof value === "function" ? value(state[index]) : value;
+        }];
+      },
       useEffect: (effect: () => unknown, next: unknown[]) => {
         const index = cursor++;
         if (dependencies[index] && next.every((value, i) => Object.is(value, dependencies[index][i]))) return;
         dependencies[index] = next;
-        effects.push(() => { cleanups[index]?.(); const result = effect(); cleanups[index] = typeof result === "function" ? result as () => void : undefined; });
+        effects.push(() => {
+          cleanups[index]?.();
+          const result = effect();
+          cleanups[index] = typeof result === "function" ? result as () => void : undefined;
+        });
       },
     },
     "@getpaseo/plugin/client": { useRpc: (contract: { name: string }) => {
       if (!rpcs.has(contract.name)) rpcs.set(contract.name, async input => {
         calls.push({ name: contract.name, input });
-        if (contract.name === "run.open") return { status: mode === "unavailable" ? "cached" : "ready", ...(mode !== "unavailable" ? { revision: String(messages.length) } : {}), metadataRevision: "metadata", message: mode === "unavailable" ? "No message cache" : undefined };
-        if (contract.name === "run.read" && input.kind === "metadata") return input.offset === 0 ? { text: JSON.stringify(metadata).slice(0, 40), nextOffset: 40 } : { text: JSON.stringify(metadata).slice(40), nextOffset: null };
-        if (contract.name === "run.read") return input.offset === 0 ? { text: JSON.stringify(messages).slice(0, 80), nextOffset: 80 } : { text: JSON.stringify(messages).slice(80), nextOffset: null };
+        if (contract.name === "run.open")
+          return { status: mode === "unavailable" ? "cached" : "ready", ...(mode !== "unavailable" ? { revision: String(messages.length) } : {}), metadataRevision: "metadata", message: mode === "unavailable" ? "No message cache" : undefined };
+        if (contract.name === "run.read" && input.kind === "metadata")
+          return input.offset === 0 ? { text: JSON.stringify(metadata).slice(0, 40), nextOffset: 40 } : { text: JSON.stringify(metadata).slice(40), nextOffset: null };
+        if (contract.name === "run.read")
+          return input.offset === 0 ? { text: JSON.stringify(messages).slice(0, 80), nextOffset: 80 } : { text: JSON.stringify(messages).slice(80), nextOffset: null };
         return { status: "ready" };
       });
       return rpcs.get(contract.name);
     } },
     "@getpaseo/plugin/client/ui": {}, "react-native": { Text: "Text", View: "View", Pressable: "Pressable" },
   });
-  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: any) => { renderers.push(renderer); return () => {}; } });
+  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: any) => {
+    renderers.push(renderer);
+    return () => {};
+  } });
   const renderer = renderers.find(value => value.kind === "run-summary")!;
   const data = renderer.schema.parse({ connectionKey: "connection", issueId: "issue", rootId: "root", runId: "run", agentId: "agent", agentName: "Build Agent", status: mode === "terminal" ? "completed" : "running" });
   let actions: Array<{ onPress(): void }> = [];
@@ -412,7 +480,14 @@ it.each(["messages", "empty", "unavailable", "terminal"])("expands source Run me
     if (node.type === "Pressable") actions.push(node.props);
     return visit(node.props?.children);
   };
-  const render = () => { cursor = 0; actions = []; const text = visit(renderer.Component({ item: { data }, theme: { colors: { foreground: "black", foregroundMuted: "gray" } } })); for (const effect of effects.splice(0)) effect(); return text; };
+  const render = () => {
+    cursor = 0;
+    actions = [];
+    const text = visit(renderer.Component({ item: { data }, theme: { colors: { foreground: "black", foregroundMuted: "gray" } } }));
+    for (const effect of effects.splice(0))
+      effect();
+    return text;
+  };
   try {
     expect(render()).toContain("展开执行明细");
     await vi.advanceTimersByTimeAsync(5000);
@@ -472,7 +547,9 @@ function componentTree() {
     useState: (initial: unknown) => {
       const id = `${scope}#${stateIndex++}`;
       if (!state.has(id)) state.set(id, initial);
-      return [state.get(id), (value: unknown) => { state.set(id, typeof value === "function" ? (value as (previous: unknown) => unknown)(state.get(id)) : value); }];
+      return [state.get(id), (value: unknown) => {
+        state.set(id, typeof value === "function" ? (value as (previous: unknown) => unknown)(state.get(id)) : value);
+      }];
     },
     useEffect: (effect: () => unknown, deps?: unknown[]) => {
       const id = `${scope}@${effectIndex++}`;
@@ -484,7 +561,8 @@ function componentTree() {
   function visit(node: unknown, path: string): string {
     if (typeof node === "string") return node;
     if (typeof node === "number") return String(node);
-    if (Array.isArray(node)) return node.map((child, position) => visit(child, `${path}.${isValidElement(child) && child.key !== null ? child.key : position}`)).join("");
+    if (Array.isArray(node))
+      return node.map((child, position) => visit(child, `${path}.${isValidElement(child) && child.key !== null ? child.key : position}`)).join("");
     if (!isValidElement<{ children?: unknown }>(node)) return "";
     if (typeof node.type !== "function") return visit(node.props.children, path);
     const own = `${path}/${node.type.name || "component"}`;
@@ -530,21 +608,31 @@ async function settingsHarness(answer: Answer, host: { composerItems?: boolean }
     "@getpaseo/plugin/client": {
       useSettings: () => ({ status: "ready", values: { profile: "" }, revision: "1", saving: false, saveError: null, reload: async () => {}, save: async () => true, reset: async () => true }),
       useRpc: (contract: { name: string }) => {
-        if (!rpcs.has(contract.name)) rpcs.set(contract.name, async input => { calls.push({ name: contract.name, input }); return contract.name === "connection.status" ? { sync: { status: "ready", stage: "idle", completedWorkspaces: 1, enabledWorkspaces: 1 }, hidden: [], ...(await answer(contract.name, input) as object) } : answer(contract.name, input); });
+        if (!rpcs.has(contract.name))
+          rpcs.set(contract.name, async input => {
+            calls.push({ name: contract.name, input });
+            return contract.name === "connection.status" ? { sync: { status: "ready", stage: "idle", completedWorkspaces: 1, enabledWorkspaces: 1 }, hidden: [], ...(await answer(contract.name, input) as object) } : answer(contract.name, input);
+          });
         return rpcs.get(contract.name);
       },
     },
     "@getpaseo/plugin/client/ui": {
       Markdown: ({ children }: { children: string }) => children, Icon: () => null, ExternalLink: ({ children }: { children: unknown }) => children,
       SettingsSection: passthrough, SettingsCard: passthrough, SettingsInput: passthrough, SettingsRow: passthrough,
-      SettingsAction: (props: typeof actions[number] & { error?: string }) => { actions.push(props); return [props.label, props.hint, props.error, props.actionLabel]; },
+      SettingsAction: (props: typeof actions[number] & { error?: string }) => {
+        actions.push(props);
+        return [props.label, props.hint, props.error, props.actionLabel];
+      },
       SettingsSwitch: (props: typeof switches[number] & { hint?: string }) => { switches.push(props); return [props.label, props.hint]; },
       SettingsSelect: (props: typeof selects[number] & { hint?: string }) => { selects.push(props); return [props.label, props.hint]; },
       Modal: Object.assign(({ title, children }: { title: string; children: unknown }) => [title, children], { Content: ({ children }: { children: unknown }) => children }),
       copyText: async (text: string) => { copied.push(text); },
       ScrollView: (props: typeof scrolls[number] & { children?: unknown }) => { scrolls.push(props); return props.children; },
     },
-    "react-native": { View: "View", Text: "Text", Pressable: (props: typeof pressables[number] & { children: unknown }) => { pressables.push(props); return props.children; } },
+    "react-native": { View: "View", Text: "Text", Pressable: (props: typeof pressables[number] & { children: unknown }) => {
+      pressables.push(props);
+      return props.children;
+    } },
   });
   const screens: Record<string, FunctionComponent<Record<string, unknown>>> = {};
   const composerItems: string[] = [];
@@ -560,7 +648,11 @@ async function settingsHarness(answer: Answer, host: { composerItems?: boolean }
       return tree.render(createElement(screens[screen], { host: { id: "host", label: "Host" }, theme: { colors }, layout: { compact: false, platform: "web" },
         navigation: { openAgent: (input: unknown) => navigation.push(input) }, ...props }));
     },
-    action(actionLabel: string) { const found = actions.find(action => action.actionLabel === actionLabel); expect(found, actionLabel).toBeDefined(); return found!; },
+    action(actionLabel: string) {
+      const found = actions.find(action => action.actionLabel === actionLabel);
+      expect(found, actionLabel).toBeDefined();
+      return found!;
+    },
     dispose() { tree.unmount(); dispose(); },
   };
 }
@@ -597,7 +689,8 @@ it("settings hides empty recovery and removed management sections", async () => 
     const page = management.render();
     expect(management.calls.some(call => ["sync.status", "hidden.list"].includes(call.name))).toBe(false);
     for (const text of ["Multica 连接", "已连接 · Lin", "https://api.example.test", "Multica 工作区与筛选规则"]) expect(page).toContain(text);
-    for (const text of ["人工隐藏", "停止结果", "评论投递", "只读历史", "历史连接", "提及 Agent", "恢复 CLI 登录", readyStatus.configPath, "凭据来源", "ID me"]) expect(page).not.toContain(text);
+    for (const text of ["人工隐藏", "停止结果", "评论投递", "只读历史", "历史连接", "提及 Agent", "恢复 CLI 登录", readyStatus.configPath, "凭据来源", "ID me"])
+      expect(page).not.toContain(text);
   } finally { management.dispose(); }
 
 });
@@ -644,7 +737,9 @@ it("refreshing or toggling a Multica workspace keeps the connection, rules and a
 it("does not report an empty Multica workspace list before the list has been read", async () => {
   // The connection reads ready before the workspace list arrives, so an empty list is first a pending read.
   let release: ((value: unknown) => void) | undefined;
-  const h = await settingsHarness((name, input) => name === "workspace.list" ? new Promise(resolve => { release = resolve; }) : name === "connection.status" ? readyStatus : empty(name, input));
+  const h = await settingsHarness((name, input) => name === "workspace.list" ? new Promise(resolve => {
+    release = resolve;
+  }) : name === "connection.status" ? readyStatus : empty(name, input));
   try {
     await vi.waitFor(() => { h.render("settings"); expect(release).toBeDefined(); });
     let page = h.render("settings");
@@ -663,7 +758,8 @@ it("the filter editor selects concrete default statuses, collapses catalogs and 
   const h = await settingsHarness((name, input) => {
     if (name === "connection.status") return readyStatus;
     if (name === "workspace.list") return { connectionKey: "current", workspaces: [{ id: "ws", name: "Team space", enabled: true, rule: defaultRule }] };
-    if (name === "workspace.catalog") return { assignees: [], statuses: [{ key: "todo", name: "Todo", category: "unstarted" }, { key: "doing", name: "Doing", category: "started" }, { key: "done", name: "Done", category: "done" }, { key: "closed", name: "Closed", category: "closed" }], projects: [], labels };
+    if (name === "workspace.catalog")
+      return { assignees: [], statuses: [{ key: "todo", name: "Todo", category: "unstarted" }, { key: "doing", name: "Doing", category: "started" }, { key: "done", name: "Done", category: "done" }, { key: "closed", name: "Closed", category: "closed" }], projects: [], labels };
     if (name === "workspace.rule") return { status: "ready" };
     return empty(name, input);
   });
@@ -722,10 +818,16 @@ it("the native discussion shows only thread-open failures", async () => {
     "react-native": { Text: "Text", View: "View", Pressable: "Pressable" },
     "@getpaseo/plugin/client/ui": {},
   });
-  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: any) => { renderers.push(renderer); return () => {}; } });
+  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: any) => {
+    renderers.push(renderer);
+    return () => {};
+  } });
   try {
     const renderer = renderers.find(renderer => renderer.kind === "thread")!;
-    const render = () => { cursor = 0; return renderedText(renderer.Component({ item: { data: { connectionKey: "connection", issueId: "issue", rootId: "root" } }, theme: { colors: { foreground: "black", foregroundMuted: "gray" } } })); };
+    const render = () => {
+      cursor = 0;
+      return renderedText(renderer.Component({ item: { data: { connectionKey: "connection", issueId: "issue", rootId: "root" } }, theme: { colors: { foreground: "black", foregroundMuted: "gray" } } }));
+    };
     render();
     const unmount = effects.splice(0).map(effect => effect()).filter((value): value is () => void => typeof value === "function");
     await Promise.resolve();
@@ -888,7 +990,8 @@ it.each([
   const h = await settingsHarness((name, input) => {
     if (name === "connection.status") return readyStatus;
     if (name === "workspace.list") return { connectionKey: "current", workspaces: [{ id: "ws", name: "Team space", enabled: true, rule }] };
-    if (name === "workspace.catalog") return { assignees: [], statuses: [{ key: "todo", name: "Todo", category: "unstarted" }, { key: "doing", name: "Doing", category: "started" }, { key: "done", name: "Done", category: "done" }], projects: [], labels: [] };
+    if (name === "workspace.catalog")
+      return { assignees: [], statuses: [{ key: "todo", name: "Todo", category: "unstarted" }, { key: "doing", name: "Doing", category: "started" }, { key: "done", name: "Done", category: "done" }], projects: [], labels: [] };
     if (name === "workspace.rule") return { status: "ready" };
     return empty(name, input);
   });

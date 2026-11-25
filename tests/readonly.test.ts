@@ -60,10 +60,28 @@ async function fixture(active = false, idempotent = false) {
         if (idempotent && result.body && (result.body as { type?: string }).type === "comment") receipts.set(key, result.body as ReturnType<typeof comment>);
         if (result.disconnect) { response.destroy(); return; } response.statusCode = result.status ?? 200; body = result.body ?? {}; }
     } else if (url.pathname === "/api/me") { await beforeMe?.(); response.statusCode = remote.authStatus; body = { id: identity, name: "Lin" }; }
-    else if (url.pathname === "/api/issues/issue") { response.statusCode = remote.objectStatus; body = remote.objectStatus === 200 ? remote.invalidObject ? {} : issue : { error: remote.denial }; if (remote.expireOnObject) remote.authStatus = 401; }
-    else if (url.pathname === "/api/workspaces") { const hold = beforeWorkspaces; beforeWorkspaces = undefined; await hold?.(); body = [{ id: "workspace", name: "Product", slug: "product" }]; }
-    else if (url.pathname === "/api/issues") { if (remote.disconnect) { response.destroy(); return; } response.statusCode = remote.listStatus; body = { issues: remote.visible ? [issue] : [], total: remote.visible ? 1 : 0 }; }
-    else if (url.pathname === "/api/tasks/run/messages") body = [{ task_id: "run", issue_id: "issue", seq: 1, type: "text", content: "Cached execution output" }];
+    else if (url.pathname === "/api/issues/issue") {
+      response.statusCode = remote.objectStatus;
+      body = remote.objectStatus === 200 ? remote.invalidObject ? {} : issue : { error: remote.denial };
+      if (remote.expireOnObject)
+        remote.authStatus = 401;
+    }
+    else if (url.pathname === "/api/workspaces") {
+      const hold = beforeWorkspaces;
+      beforeWorkspaces = undefined;
+      await hold?.();
+      body = [{ id: "workspace", name: "Product", slug: "product" }];
+    }
+    else if (url.pathname === "/api/issues") {
+      if (remote.disconnect) {
+        response.destroy();
+        return;
+      }
+      response.statusCode = remote.listStatus;
+      body = { issues: remote.visible ? [issue] : [], total: remote.visible ? 1 : 0 };
+    }
+    else if (url.pathname === "/api/tasks/run/messages")
+      body = [{ task_id: "run", issue_id: "issue", seq: 1, type: "text", content: "Cached execution output" }];
     else if (url.pathname === "/api/issues/issue/task-runs") body = runs;
     else if (url.pathname === "/api/issues/issue/comments/idempotent" && idempotent) {
       const key = request.headers["idempotency-key"] as string; lookups.push(key); await beforeLookup?.(key);
@@ -73,8 +91,10 @@ async function fixture(active = false, idempotent = false) {
       else if (receipt) { response.setHeader("Idempotent-Replayed", "true"); body = receipt; }
       else { response.statusCode = 404; body = { error: "no comment has been posted with this Idempotency-Key" }; }
     }
-    else if (url.pathname === "/api/issues/issue/comments") body = url.searchParams.has("thread") ? comments.filter(c => c.id === url.searchParams.get("thread") || c.parent_id === url.searchParams.get("thread")) : comments;
-    else if (url.pathname === "/api/agents") body = [{ id: "12345678-1234-4234-9234-123456789abc", name: "Agent [A]" }, { id: "22345678-1234-4234-9234-123456789abc", name: "Agent [A]" }];
+    else if (url.pathname === "/api/issues/issue/comments")
+      body = url.searchParams.has("thread") ? comments.filter(c => c.id === url.searchParams.get("thread") || c.parent_id === url.searchParams.get("thread")) : comments;
+    else if (url.pathname === "/api/agents")
+      body = [{ id: "12345678-1234-4234-9234-123456789abc", name: "Agent [A]" }, { id: "22345678-1234-4234-9234-123456789abc", name: "Agent [A]" }];
     else { response.statusCode = 404; body = {}; }
     response.end(JSON.stringify(body));
   });
@@ -148,29 +168,60 @@ async function fixture(active = false, idempotent = false) {
     },
     archiveAgent: async (id: string) => {
       const agent = agents.find(agent => agent.id === id)!;
-      if (agent.status === "running" || agent.activeTurn) await (await connect()).send({ type: "session.interrupt", requestId: `archive-${id}`, sessionId: id });
+      if (agent.status === "running" || agent.activeTurn)
+        await (await connect()).send({ type: "session.interrupt", requestId: `archive-${id}`, sessionId: id });
       agent.archivedAt = new Date(Date.parse(stamp) + ++native.archiveSequence * 1000).toISOString();
       await server.hook("agent.archive.after", { agent: { ...agent, provider: "multica" } } as never, paseo);
       return { archivedAt: agent.archivedAt };
     },
-    refreshAgent: async (id: string) => { const agent = agents.find(agent => agent.id === id)!; if (!agent.archivedAt) throw new Error("Active refresh interrupts"); agent.archivedAt = null; return { agent }; },
+    refreshAgent: async (id: string) => {
+      const agent = agents.find(agent => agent.id === id)!;
+      if (!agent.archivedAt)
+        throw new Error("Active refresh interrupts");
+      agent.archivedAt = null;
+      return { agent };
+    },
     createWorkspace: async (input: { workspaceId: string }) => ({ workspace: { id: input.workspaceId } }), setWorkspaceTitle: async () => {},
     fetchAgents: async () => ({ entries: agents.map(agent => ({ agent })), pageInfo: { hasMore: false } }),
     fetchAgentTimeline: async (agentId: string) => ({ agentId, epoch: "epoch", entries: canonical.get(agentId) ?? [], hasOlder: false, hasNewer: false }),
     importAgent: async (input: { workspaceId: string; cwd: string; labels: Record<string, string>; providerHandleId: string }) => {
-      const agent = { id: `native-${agents.length}`, provider: "multica", status: "idle", workspaceId: input.workspaceId, cwd: input.cwd, labels: input.labels, handle: input.providerHandleId }; agents.push(agent);
-      await (await connect()).send({ type: "session.open", requestId: agent.id, sessionId: agent.id, history: "replay", persistence: JSON.parse(agent.handle.slice(7)), config: { cwd: agent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } }); return agent;
+      const agent = { id: `native-${agents.length}`, provider: "multica", status: "idle", workspaceId: input.workspaceId, cwd: input.cwd, labels: input.labels, handle: input.providerHandleId };
+      agents.push(agent);
+      await (await connect()).send({ type: "session.open", requestId: agent.id, sessionId: agent.id, history: "replay", persistence: JSON.parse(agent.handle.slice(7)), config: { cwd: agent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
+      return agent;
     }, updateAgent: async () => {}, close: async () => {},
   } as unknown as DaemonClient;
   const paseo = { hosts: { list: async () => ({ self: { serverId: "daemon" } }) } } as unknown as PaseoApi;
-  const start = () => { provider = undefined; server = new FakeServer(); const dispose = createServerContribution({ homeDirectory: home, workingDirectory: home, environment: { PASEO_HOME: home }, connectHost: async () => host })(server.context); cleanup.push(dispose); return { server, dispose }; };
+  const start = () => {
+    provider = undefined;
+    server = new FakeServer();
+    const dispose = createServerContribution({ homeDirectory: home, workingDirectory: home, environment: { PASEO_HOME: home }, connectHost: async () => host })(server.context);
+    cleanup.push(dispose);
+    return { server, dispose };
+  };
   const started = start(); cleanup.push(async () => { await provider?.close(); });
   await server!.rpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, paseo);
   const send = async (rootId: string, text: string, clientMessageId: string, delivery: "auto" | "steer" = "auto") => {
     const agent = agents.find(agent => agent.labels["multica.discussion"] === rootId)!;
     await (await connect()).send({ type: "session.prompt", sessionId: agent.id, prompt: { clientMessageId, delivery, input: { type: "message", content: [{ type: "text", text }] } } });
   };
-  return { ...started, native, host, remote, requests, home, paseo, agents, events, canonical, nativeHistory, comments, runs, posts, lookups, receipts, deletedReceipts, connect, send, start, lookupFailure: (status?: number) => { lookupFailure = status; }, advance: (milliseconds: number) => { clock = new Date(clock.getTime() + milliseconds); }, beforeLookup: (handler: typeof beforeLookup) => { beforeLookup = handler; }, identity: (id: string) => { identity = id; }, beforeMe: (handler?: () => Promise<void>) => { beforeMe = handler; }, beforeWorkspaces: (handler: () => Promise<void>) => { beforeWorkspaces = handler; }, beforeCancel: (handler: typeof beforeCancel) => { beforeCancel = handler; }, post: (handler: typeof post) => { post = handler; } };
+  return { ...started, native, host, remote, requests, home, paseo, agents, events, canonical, nativeHistory, comments, runs, posts, lookups, receipts, deletedReceipts, connect, send, start, lookupFailure: (status?: number) => {
+    lookupFailure = status;
+  }, advance: (milliseconds: number) => {
+    clock = new Date(clock.getTime() + milliseconds);
+  }, beforeLookup: (handler: typeof beforeLookup) => {
+    beforeLookup = handler;
+  }, identity: (id: string) => {
+    identity = id;
+  }, beforeMe: (handler?: () => Promise<void>) => {
+    beforeMe = handler;
+  }, beforeWorkspaces: (handler: () => Promise<void>) => {
+    beforeWorkspaces = handler;
+  }, beforeCancel: (handler: typeof beforeCancel) => {
+    beforeCancel = handler;
+  }, post: (handler: typeof post) => {
+    post = handler;
+  } };
 }
 
 it.each(["list failure", "network", "authentication"])("%s preserves active mappings without archiving cached issues", async failure => {

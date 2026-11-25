@@ -75,7 +75,9 @@ function RunSummaryBody({ item, theme }: Props) {
       <RunMetadataView metadata={metadata} theme={theme} />
       {!messages.length && !notice ? <Text style={muted}>暂无可用执行消息。</Text> : null}
       {messages.map(message => <View key={`${message.task_id}:${message.seq}`} style={{ gap: 4 }}>
-        <Text style={muted}>#{message.seq} · {({ text: "运行文本", thinking: "思考记录", tool_use: "工具调用", tool_result: "工具结果", error: "执行错误" })[message.type]}{message.created_at ? ` · ${message.created_at}` : ""}</Text>
+        <Text style={muted}>#{message.seq} · {({
+          text: "运行文本", thinking: "思考记录", tool_use: "工具调用", tool_result: "工具结果", error: "执行错误"
+        })[message.type]}{message.created_at ? ` · ${message.created_at}` : ""}</Text>
         {message.type === "tool_use" || message.type === "tool_result" ? <>
           {message.type === "tool_use" ? <>
             <Text selectable style={muted}>{message.tool || "工具名称缺失"}</Text>

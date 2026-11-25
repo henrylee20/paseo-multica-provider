@@ -66,7 +66,9 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
         const timestamp = row.role === "event" ? row.sourceUpdatedAt ?? row.sourceCreatedAt : row.sourceCreatedAt;
         // Canonical recovery acknowledges originals it skips, including native input IDs.
         const firstOriginal = row.role === "event" || rememberOriginal(session, row);
-        if ((includeOriginal && firstOriginal) || row.role === "event") emit({ type: "timeline.item", sessionId, item: projectRow(session.address, row), ...(timestamp && Number.isFinite(Date.parse(timestamp)) ? { timestamp } : {}) });
+        if ((includeOriginal && firstOriginal) || row.role === "event")
+          emit({ type: "timeline.item", sessionId, item: projectRow(session.address, row),
+            ...(timestamp && Number.isFinite(Date.parse(timestamp)) ? { timestamp } : {}) });
       };
       return {
         version: 1, capabilities,
@@ -96,7 +98,9 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
               emit({ type: "request.failed", requestId: input.requestId, error: { code: "discussion_unavailable", message: "此隐藏讨论正在核对本地归档状态，请稍后重试。" } });
               return;
             }
-            if (!parsed.success || !issue || !openingAddress || (parsed.data.data.discussion === "thread" && !issue.threads[parsed.data.data.rootId]) || issue.cwd !== input.config.cwd || sessions.has(input.sessionId)) {
+            if (!parsed.success || !issue || !openingAddress ||
+              (parsed.data.data.discussion === "thread" && !issue.threads[parsed.data.data.rootId]) ||
+              issue.cwd !== input.config.cwd || sessions.has(input.sessionId)) {
               emit({ type: "request.failed", requestId: input.requestId, error: { code: "unmapped_issue", message: "请在 Multica 设置启用任务工作区后打开已导入的主讨论。" } });
               return;
             }
@@ -117,7 +121,8 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
               data: taskDescriptionData(parsed.data.data.connectionKey, parsed.data.data.issueId, issue.description),
             } });
             if (parsed.data.data.discussion === "main") {
-              let revision = input.history === "replay" ? taskDescriptionData(parsed.data.data.connectionKey, parsed.data.data.issueId, issue.description).revision : undefined;
+              let revision = input.history === "replay"
+                ? taskDescriptionData(parsed.data.data.connectionKey, parsed.data.data.issueId, issue.description).revision : undefined;
               session.subscriptions.push(descriptions.subscribe(parsed.data.data.connectionKey, parsed.data.data.issueId, data => {
                 if (revision === data.revision) return;
                 revision = data.revision;
@@ -171,7 +176,10 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
               for (const [runId, run] of Object.entries(owned)) {
                 const row = runSummary(address, runId, run);
                 const fingerprint = JSON.stringify(row);
-                if (projected.get(runId) !== fingerprint) { emit({ type: "timeline.item", sessionId: input.sessionId, item: row }); projected.set(runId, fingerprint); }
+                if (projected.get(runId) !== fingerprint) {
+                  emit({ type: "timeline.item", sessionId: input.sessionId, item: row });
+                  projected.set(runId, fingerprint);
+                }
               }
               if (!activity) return;
               const active = Object.values(owned).some(run => isActiveRun(run.status));
@@ -217,7 +225,9 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
                 if (interruptedTurnId && sessions.get(input.sessionId) === session) session?.settleInterrupt?.(interruptedTurnId);
                 emit({ type: "request.completed", requestId: input.requestId });
               } catch (error) {
-                emit({ type: "request.failed", requestId: input.requestId, error: { code: "stop_incomplete", message: error instanceof Error ? error.message : "停止失败，请重试。" } });
+                emit({ type: "request.failed", requestId: input.requestId, error: {
+                  code: "stop_incomplete", message: error instanceof Error ? error.message : "停止失败，请重试。"
+                } });
               }
             })();
             session?.interrupts.add(operation);
