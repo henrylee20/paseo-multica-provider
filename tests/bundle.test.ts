@@ -858,6 +858,7 @@ it("the native discussion shows the same daemon sync failure and cached-history 
 
 it.each([
   ["pending", {}, ["待答"]],
+  ["pending", { delivery: { status: "pending_verification", clientMessageId: "answer", message: "响应无法核实" } }, ["待核实", "响应无法核实", "核实原投递", "重新发送"]],
   ["answered", { answer: { commentId: "reply", content: "**确认结果**\n\n1. **理由**：已核对", actorId: "reviewer", actorType: "member" } }, ["已答", "reviewer", "已核对"]],
   ["skipped", { skippedAt: "2026-11-24T10:00:00Z", skippedBy: "operator" }, ["已跳过", "operator"]],
   ["invalid", { error: "附件超过 64 KiB 上限。" }, ["不可解析", "64 KiB"]],
@@ -922,4 +923,26 @@ it("compiled cache-only history renders a complete askuser card without requesti
     for (const text of ["完整历史警示说明", "说明原因", "只读", "离线缓存", "original-user", "已确认完整回答"]) expect(h.render()).toContain(text);
     expect(h.calls.some(call => call.name.startsWith("askuser."))).toBe(false);
   } finally { h.dispose(); }
+});
+
+it("the compiled uncertain-answer card opens delivery management and explains conditions with question titles and labels", async () => {
+  const renderers: PluginTimelineRendererContribution[] = [];
+  const pressables: Array<{ onPress(): void }> = [];
+  const opened: unknown[] = [];
+  const tree = componentTree();
+  const data = { connectionKey: "connection", issueId: "issue", rootId: "root", commentId: "card", attachmentId: "file", revision: "revision", title: "发布确认", status: "pending", readOnly: true, offline: false, truncated: false,
+    delivery: { status: "pending_verification", clientMessageId: "answer", message: "响应丢失" },
+    questions: [{ id: "choice", type: "single", title: "发布范围", options: [{ id: "all", label: "全量" }, { id: "small", label: "灰度" }] }, { id: "detail", type: "text", title: "理由", required_when: { question_id: "choice", option_ids: ["all"] } }] };
+  const setup = await bundledContribution("../index.client.tsx", {
+    react: tree.react, "@getpaseo/plugin/client": { useRpc: () => async () => data },
+    "@getpaseo/plugin/client/ui": { Markdown: ({ children }: { children: string }) => children },
+    "react-native": { View: "View", Text: "Text", Pressable: (props: typeof pressables[number] & { children: unknown }) => { pressables.push(props); return props.children; } },
+  });
+  const dispose = setup({ rpc: async () => ({ status: "ready" }), openScreen: (value: unknown) => { opened.push(value); }, addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: PluginTimelineRendererContribution) => { renderers.push(renderer); return () => {}; } });
+  try {
+    const renderer = renderers.find(value => value.kind === "askuser")!;
+    const text = tree.render(createElement(renderer.Component as FunctionComponent<any>, { item: { type: "plugin", kind: "askuser", version: 1, data: renderer.schema.parse(data) }, theme: { colors: {} } }));
+    expect(text).toContain("「发布范围」选择「全量」时必填"); expect(text).toContain("待核实");
+    expect(pressables).toHaveLength(1); pressables[0].onPress(); expect(opened).toEqual([{ screenId: "management" }]);
+  } finally { tree.unmount(); dispose(); }
 });

@@ -93,7 +93,7 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     const runs = new RunSynchronizer(store);
     const runDetails = new RunDetails(store, connection);
     const stops = new StopCoordinator(store, connection, runs);
-    const deliveries = new CommentDelivery(store, connection, stops, () => synchronizer.reconcile(), dependencies.now);
+    const deliveries = new CommentDelivery(store, connection, stops, () => synchronizer.reconcile(), dependencies.now, record => askusers.deliveryChanged(record));
     threads.coordinateDeliveries(() => deliveries.waitForPosts());
     server.handle(deliveryVerify, async input => deliveries.verify(input));
     server.handle(deliveryResend, async input => deliveries.resend(input));

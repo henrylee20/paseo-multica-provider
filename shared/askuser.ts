@@ -30,6 +30,7 @@ export type AskuserDocument = z.infer<typeof askuserDocumentSchema>;
 export const askuserAddress = z.object({ connectionKey: z.string(), issueId: z.string(), commentId: z.string(), attachmentId: z.string() });
 export const askuserAnswerSchema = z.object({ commentId: z.string(), content: z.string(), actorId: z.string().optional(), actorType: z.string().optional(), delegatedBy: z.string().optional() });
 export const askuserCardSchema = askuserAddress.extend({ rootId: z.string(), revision: z.string(), title: z.string(), description: z.string().optional(),
+  delivery: z.object({ status: z.enum(["received", "saved", "failed", "pending_verification"]), clientMessageId: z.string(), message: z.string().optional() }).optional(),
   questions: z.array(askuserQuestionSchema), status: z.enum(["pending", "answered", "skipped", "invalid"]),
   readOnly: z.boolean(), readOnlyReason: z.string().optional(), offline: z.boolean(), truncated: z.boolean(), error: z.string().optional(), statusError: z.string().optional(), answer: askuserAnswerSchema.optional(), skippedAt: z.string().optional(), skippedBy: z.string().optional(),
 });
@@ -66,4 +67,13 @@ export function isAskuserReplyValid(document: AskuserDocument, reply: { content:
     }
     return !required || answers[index] !== "" && answers[index] !== "未回答";
   });
+}
+
+
+export function askuserConditionHint(questions: AskuserDocument["questions"], question: AskuserDocument["questions"][number]) {
+  if (question.type !== "text" || !question.required_when) return undefined;
+  const condition = question.required_when;
+  const parent = questions.find(item => item.id === condition.question_id);
+  const labels = parent?.type === "single" ? parent.options.filter(option => condition.option_ids.includes(option.id)).map(option => `「${option.label}」`).join("、") : "指定选项";
+  return `条件必填：「${parent?.title ?? condition.question_id}」选择${labels}时必填；无法确认选项时也必填（包括自定义回答）。`;
 }

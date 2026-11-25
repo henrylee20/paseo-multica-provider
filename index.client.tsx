@@ -46,7 +46,7 @@ export default function contribute(client: PluginClientContext) {
   const removeThread = client.addTimelineRenderer({ kind: "thread", version: 1, schema: threadSummarySchema, Component: ThreadSummary });
   const removeRun = client.addTimelineRenderer({ kind: "run-summary", version: 1, schema: runSummarySchema, Component: RunSummary });
   const removeEvent = client.addTimelineRenderer({ kind: "comment-event", version: 1, schema: commentEventSchema, Component: CommentEvent });
-  const removeAskuser = client.addTimelineRenderer({ kind: "askuser", version: 1, schema: askuserCardSchema, Component: AskuserCard });
+  const removeAskuser = client.addTimelineRenderer({ kind: "askuser", version: 1, schema: askuserCardSchema, Component: props => <AskuserCard {...props} openManagement={openManagement} /> });
   const removeDelivery = client.addTimelineRenderer({ kind: "comment-delivery", version: 1, schema: deliverySummary, Component: props => <DeliveryStatus {...props} openManagement={openManagement} /> });
   return () => { disposed = true; clearInterval(timer); removeAskuser(); removeDelivery(); removeRun(); removeEvent(); removeThread(); removeDescription(); removeMention(); removeItem(); removeScreen(); removeSettings(); };
 }

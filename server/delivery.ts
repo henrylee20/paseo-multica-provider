@@ -15,12 +15,13 @@ import { assertWritableIssue } from "./access.js";
 export const deliveryKey = (rootId: string, clientMessageId: string) => createHash("sha256").update(JSON.stringify([rootId, clientMessageId])).digest("hex");
 const addressKey = (address: RunAddress) => JSON.stringify([address.connectionKey, address.issueId, address.rootId]);
 const receiptSchema = z.object({ id: z.string(), issue_id: z.string(), parent_id: z.string().nullish(), content: z.string(), type: z.literal("comment"), author_type: z.literal("member"), author_id: z.string(),
-  created_at: z.string().optional(), updated_at: z.string().optional(), trigger_outcomes: z.array(z.object({ target_type: z.string(), target_id: z.string(), status: z.string(), reason_code: z.string().optional() })).optional(),
+  askuser_answer_to: z.string().nullish(), created_at: z.string().optional(), updated_at: z.string().optional(), trigger_outcomes: z.array(z.object({ target_type: z.string(), target_id: z.string(), status: z.string(), reason_code: z.string().optional() })).optional(),
 });
 
 export function deliveryRow(record: DeliveryRecord): ProviderTimelineItem {
   return { type: "plugin", id: `multica:delivery:${record.idempotencyKey}`, pluginId: "multica", kind: "comment-delivery", version: 1, data: {
     connectionKey: record.connectionKey, issueId: record.issueId, rootId: record.rootId, clientMessageId: record.clientMessageId,
+    ...(record.parentCommentId ? { parentCommentId: record.parentCommentId } : {}), ...(record.askuserAnswerTo ? { askuserAnswerTo: record.askuserAnswerTo } : {}),
     idempotencyKey: record.idempotencyKey, createdAt: record.createdAt, status: record.status, body: [...record.body].slice(0, 4000).join(""), truncated: [...record.body].length > 4000,
     ...(record.retryOf ? { retryOf: record.retryOf } : {}), ...(record.commentId ? { commentId: record.commentId } : {}), ...(record.threadRootId ? { threadRootId: record.threadRootId } : {}), ...(record.message ? { message: record.message } : {}),
   } };
@@ -36,7 +37,7 @@ export class CommentDelivery {
   private readonly posts = new Map<string, Promise<void>>();
   private readonly operations = new Set<Promise<void>>();
   constructor(private readonly store: StateStore, private readonly connection: () => Promise<AuthenticatedConnection>, private readonly stops: StopCoordinator,
-    private readonly onSaved: () => Promise<void>, private readonly now: () => Date = () => new Date()) {}
+    private readonly onSaved: () => Promise<void>, private readonly now: () => Date = () => new Date(), private readonly onChanged?: (record: DeliveryRecord) => Promise<void>) {}
   subscribe(address: RunAddress, deliver: (record: DeliveryRecord, includeOriginal?: boolean) => void, recovery = false) {
     const listener = { deliver, recovery };
     const id = addressKey(address), listeners = this.listeners.get(id) ?? new Set();
@@ -102,7 +103,8 @@ export class CommentDelivery {
     return !!record.idempotencyKey && record.idempotencyKey.trim() === record.idempotencyKey && Buffer.byteLength(record.idempotencyKey, "utf8") <= 255;
   }
   private matches(record: DeliveryRecord, connection: AuthenticatedConnection, comment: z.infer<typeof receiptSchema>) {
-    return comment.issue_id === record.issueId && (comment.parent_id ?? null) === (record.rootId === "main" ? null : record.rootId)
+    return comment.issue_id === record.issueId && (comment.parent_id ?? null) === (record.parentCommentId ?? (record.rootId === "main" ? null : record.rootId))
+      && (comment.askuser_answer_to === undefined || (comment.askuser_answer_to ?? undefined) === record.askuserAnswerTo)
       && comment.content === record.body && comment.author_id === connection.userId && (!record.commentId || comment.id === record.commentId);
   }
   private async lookup(record: DeliveryRecord, connection: AuthenticatedConnection, workspace: RemoteWorkspace): Promise<
@@ -110,7 +112,7 @@ export class CommentDelivery {
     try {
       if (connection.connectionKey !== record.connectionKey || (record.remoteWorkspaceId && record.remoteWorkspaceId !== workspace.id)) throw new Error("请连接原 Multica 身份与工作区。");
       if (!this.validKey(record)) throw new Error("原请求 key 无效。");
-      const query = new URLSearchParams({ type: "comment", ...(record.rootId === "main" ? {} : { parent_id: record.rootId }) });
+      const query = new URLSearchParams({ type: "comment", ...((record.parentCommentId ?? (record.rootId === "main" ? undefined : record.rootId)) ? { parent_id: record.parentCommentId ?? record.rootId } : {}), ...(record.askuserAnswerTo ? { askuser_answer_to: record.askuserAnswerTo } : {}) });
       const response = await remoteFetch(connection, `/api/issues/${encodeURIComponent(record.issueId)}/comments/idempotent?${query}`, {
         headers: { Authorization: `Bearer ${connection.token}`, "X-Workspace-Slug": workspace.slug, "Idempotency-Key": record.idempotencyKey },
         redirect: "error", signal: AbortSignal.timeout(10_000),
@@ -140,7 +142,7 @@ export class CommentDelivery {
     void post.finally(() => { this.posts.delete(record.idempotencyKey); this.operations.delete(post); }).catch(() => {});
     return post;
   }
-  async admit(address: RunAddress, prompt: ProviderPrompt): Promise<DeliveryRecord> {
+  async admit(address: RunAddress, prompt: ProviderPrompt, target: { parentCommentId?: string; askuserAnswerTo?: string } = {}): Promise<DeliveryRecord> {
     const body = prompt.input.type === "message" && prompt.input.content.every(part => part.type === "text" && !("mimeType" in part))
       ? prompt.input.content.map(part => part.type === "text" ? part.text : "").join("") : undefined;
     if (body === undefined || !body.trim() || prompt.outputSchema !== undefined) throw new Error("仅支持非空文本评论；请移除附件或结构化输出。 ");
@@ -152,11 +154,11 @@ export class CommentDelivery {
       const id = deliveryKey(address.rootId, prompt.clientMessageId);
       const existing = issue.deliveries[id];
       if (existing) {
-        if (existing.body !== body || existing.nativeDelivery !== prompt.delivery) throw new Error("同一输入身份不能改变正文或目标。");
+        if (existing.body !== body || existing.nativeDelivery !== prompt.delivery || existing.parentCommentId !== target.parentCommentId || existing.askuserAnswerTo !== target.askuserAnswerTo) throw new Error("同一输入身份不能改变正文或目标。");
         record = existing; return;
       }
       assertWritableIssue(issue);
-      record = issue.deliveries[id] = { ...address, remoteWorkspaceId: issue.remoteWorkspaceId, clientMessageId: prompt.clientMessageId, idempotencyKey: randomUUID(), body, createdAt: this.now().toISOString(), stopEpoch, nativeDelivery: prompt.delivery, status: "received", retryCount: 0 };
+      record = issue.deliveries[id] = { ...address, ...target, remoteWorkspaceId: issue.remoteWorkspaceId, clientMessageId: prompt.clientMessageId, idempotencyKey: randomUUID(), body, createdAt: this.now().toISOString(), stopEpoch, nativeDelivery: prompt.delivery, status: "received", retryCount: 0 };
     });
     this.publish(record); return record;
   }
@@ -169,6 +171,12 @@ export class CommentDelivery {
       if (current?.status === "saved") await this.onSaved();
     }).catch(() => {}).finally(() => { this.operations.delete(operation); });
     this.operations.add(operation);
+  }
+  /** Permission responses need the durable outcome, not just background admission. */
+  async settle(record: DeliveryRecord) {
+    this.start(record);
+    await this.posts.get(record.idempotencyKey);
+    return this.record(record);
   }
   async waitForPosts() { await Promise.allSettled([...this.posts.values()]); }
   private async perform(record: DeliveryRecord, retry = false, context?: { connection: AuthenticatedConnection; workspace: RemoteWorkspace }) {
@@ -198,7 +206,7 @@ export class CommentDelivery {
       sent = true;
       const response = await fetch(`${connection.apiUrl}/api/issues/${encodeURIComponent(record.issueId)}/comments`, {
         method: "POST", headers: { Authorization: `Bearer ${connection.token}`, "Content-Type": "application/json", "X-Workspace-Slug": workspace.slug, "Idempotency-Key": record.idempotencyKey },
-        body: JSON.stringify({ content: record.body, type: "comment", ...(record.rootId === "main" ? {} : { parent_id: record.rootId }) }), redirect: "error", signal: AbortSignal.any([AbortSignal.timeout(10_000), ...(connection.signal ? [connection.signal] : [])]),
+        body: JSON.stringify({ content: record.body, type: "comment", ...((record.parentCommentId ?? (record.rootId === "main" ? undefined : record.rootId)) ? { parent_id: record.parentCommentId ?? record.rootId } : {}), ...(record.askuserAnswerTo ? { askuser_answer_to: record.askuserAnswerTo } : {}) }), redirect: "error", signal: AbortSignal.any([AbortSignal.timeout(10_000), ...(connection.signal ? [connection.signal] : [])]),
       });
       await connection.assertCurrent?.();
       if (!response.ok) {
@@ -225,6 +233,8 @@ export class CommentDelivery {
         receipt: { authorId: comment.author_id, parentId: comment.parent_id ?? null, createdAt: comment.created_at, updatedAt: comment.updated_at, triggerOutcomes: comment.trigger_outcomes } } : {}) });
     });
     this.publish(current);
+    // Projection failure cannot invalidate an authoritative saved receipt.
+    if (this.onChanged) await this.onChanged(current).catch(() => {});
   }
   private async record(address: RunAddress & { clientMessageId: string }) {
     const record = (await this.store.read()).connections[address.connectionKey]?.issues[address.issueId]?.deliveries[deliveryKey(address.rootId, address.clientMessageId)];
@@ -274,7 +284,7 @@ export class CommentDelivery {
       if (current.status === "saved") throw new Error("原评论已确认保存，无需重新发送。");
       current.recoveryHalted = true;
       next = issue.deliveries[deliveryKey(original.rootId, clientMessageId)] = {
-        connectionKey: original.connectionKey, issueId: original.issueId, rootId: original.rootId, remoteWorkspaceId: original.remoteWorkspaceId ?? issue.remoteWorkspaceId,
+        connectionKey: original.connectionKey, issueId: original.issueId, rootId: original.rootId, parentCommentId: original.parentCommentId, askuserAnswerTo: original.askuserAnswerTo, remoteWorkspaceId: original.remoteWorkspaceId ?? issue.remoteWorkspaceId,
         clientMessageId, idempotencyKey: randomUUID(), retryOf: original.idempotencyKey, body: original.body,
         createdAt: this.now().toISOString(), stopEpoch: issue.stopEpochs[original.rootId] ?? 0,
         nativeDelivery: "auto", status: "received", retryCount: 0,

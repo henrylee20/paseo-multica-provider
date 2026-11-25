@@ -538,3 +538,13 @@ it("a replay whose remotely edited body differs cannot bind to or replace the im
   expect((await f.server.rpc(deliveryList, {}, f.paseo)).records[0]).toMatchObject({ body: "Keep exactly this original body", status: "pending_verification" });
   expect(f.posts).toHaveLength(1);
 });
+
+it("accepts ordinary comment receipts whose optional askuser target is explicitly null", async () => {
+  const f = await fixture(false, true);
+  f.post(async body => ({ body: { ...comment("ordinary-null-target", body.parent_id ?? null, body.content), askuser_answer_to: null } }));
+  await f.send("root", "Ordinary discussion", "ordinary-null-target");
+  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[0]?.status).toBe("saved");
+  const record = (await f.server.rpc(deliveryList, {}, f.paseo)).records[0];
+  expect(await f.server.rpc(deliveryVerify, record, f.paseo)).toMatchObject({ status: "saved" });
+  expect(f.posts).toHaveLength(1);
+});
