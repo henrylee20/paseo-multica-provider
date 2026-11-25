@@ -1,3 +1,4 @@
+import { DataRebuild } from "./data-rebuild.js";
 import { useEffect, useState } from "react";
 import { Text, View } from "react-native";
 import { useRpc, useSettings, type PluginSurfaceProps } from "@getpaseo/plugin/client";
@@ -183,6 +184,7 @@ export function ConnectionScreen({ host, theme }: PluginSurfaceProps) {
       </Modal.Content>
     </Modal> : null}
     {rules}
+    <DataRebuild key={scopeKey} connectionKey={status?.connectionKey} ready={status?.status === "ready" && syncStatus?.stage !== "purging"} disabledReason={syncStatus?.stage === "purging" ? "请等待旧 profile 本地数据清理完成后重建。" : undefined} theme={theme} onRefresh={refresh} />
     <HiddenObjects theme={theme} objects={hidden} onRefresh={refresh} />
   </View>;
 }

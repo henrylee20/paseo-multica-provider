@@ -3,7 +3,8 @@ import { runMetadataSchema, runStatusSchema } from "../shared/runs.js";
 
 export const storedRunSchema = z.object({
   agentId: z.string(), agentName: z.string(), status: runStatusSchema,
-  ownerRootId: z.string().optional(),
+  markerProjected: z.boolean().optional(),
+  ownerRootId: z.string().optional(), triggerAuthor: z.string().optional(),
   // Remote coverage changes independently from the permanent display owner.
   triggerCommentId: z.string().nullish(), coalescedCommentIds: z.array(z.string()),
   generatedCommentIds: z.array(z.string()).default([]),

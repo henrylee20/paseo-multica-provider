@@ -1,4 +1,5 @@
-import { runObserve, runOpen, runRead } from "../shared/runs.js";
+import { DataRebuild } from "./rebuild.js";
+import { rebuildPreflight, rebuildStart, rebuildStatus } from "../shared/rebuild.js";
 import { RunSynchronizer } from "./runs.js";
 import { RunDetails } from "./run-details.js";
 import { homedir } from "node:os";
@@ -132,7 +133,7 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     threads.coordinateDeliveries(() => deliveries.waitForPosts());
     server.handle(deliveryMentions, async input => deliveries.mentions(input));
     const descriptions = new TaskDescriptions(store);
-    server.registerProvider(createMulticaProvider(store, threads, runs, stops, deliveries, descriptions, lifecycle, askusers));
+    server.registerProvider(createMulticaProvider(store, threads, runs, stops, deliveries, descriptions, lifecycle, askusers, runDetails));
     server.handle(readTaskDescription, async input => {
       // The host authenticates this RPC. Cached history belongs to its persisted
       // connection, even while the CLI is offline, logged out, or using another account.
@@ -140,9 +141,6 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       if (!issue) throw new Error("Task description unavailable");
       return readText(issue.description, input);
     });
-    server.handle(runObserve, async input => runs.observe(input));
-    server.handle(runOpen, async input => runDetails.open(input));
-    server.handle(runRead, async input => runDetails.read(input));
     server.handle(threadOpen, async input => threads.open(input));
     server.handle(commentEventDetail, async input => {
       const issue = (await store.read()).connections[input.connectionKey]?.issues[input.issueId];
@@ -155,7 +153,7 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       drain: async () => {
         await deliveries.waitForPosts();
         await stops.close();
-        await runDetails.close();
+        await runDetails.reset();
         await threads.reset();
         await wakeups.reset();
         await askusers.reset();
@@ -165,6 +163,7 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
         await descriptions.observe({ connectionKey: connection.connectionKey, issueId });
         await threads.discover(connection, workspace, issueId, host);
         await runs.discover(connection, workspace, issueId);
+        await runDetails.refreshOpened();
         await wakeups.discover(connection, issueId, host);
       },
       connectHost: () => (dependencies.connectHost ?? connectNativeHost)(owningHome), intervalMs: dependencies.syncIntervalMs ?? 15_000 });
@@ -178,6 +177,10 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       await store.observeProfile(state.values.profile);
       if (changed) synchronizer.settingsChanged();
     });
+    const rebuild = new DataRebuild(store, connection, synchronizer, lifecycle, runDetails);
+    server.handle(rebuildPreflight, (input, context) => rebuild.preflight(input.connectionKey, context.paseo));
+    server.handle(rebuildStart, (input, context) => rebuild.start(input.connectionKey, context.paseo));
+    server.handle(rebuildStatus, input => rebuild.status(input.connectionKey));
     server.handle(hiddenRestore, async (input, context) => {
       try {
         await synchronizer.assertNoPurge();
@@ -221,6 +224,7 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       shuttingDown = true;
       unsubscribeSettings();
       await Promise.allSettled(identityRefreshes);
+      await rebuild.close();
       await deliveries.close();
       await synchronizer.close();
       await metadata.close();

@@ -1,9 +1,11 @@
+import { RunProjection } from "./run-projection.js";
+import type { RunDetails } from "./run-details.js";
 import { askuserPermission, askuserPermissionId, isLocalAskuserDismiss } from "./askuser-answers.js";
 import type { AskuserCardData } from "../shared/askuser.js";
 import type { AskUsers } from "./askuser.js";
 import { randomUUID } from "node:crypto";
 import { isActiveRun } from "../shared/runs.js";
-import { runSummary, type RunSynchronizer } from "./runs.js";
+import type { RunSynchronizer } from "./runs.js";
 import { z } from "zod";
 import type { ProviderEvent, ProviderRegistration } from "@getpaseo/plugin/server/provider";
 import { StateStore } from "./state.js";
@@ -20,12 +22,14 @@ import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
 const persistenceSchema = z.object({ version: z.literal(1), data: z.object({
   connectionKey: z.string(), issueId: z.string(),
 }).and(z.discriminatedUnion("discussion", [z.object({ discussion: z.literal("main") }), z.object({ discussion: z.literal("thread"), rootId: z.string() })])) });
-const supported = ["prompt.message", "prompt.steer", "session.persistence", "session.list", "timeline.plugin", "session.archive", "session.unarchive", "permission"];
+const supported = ["prompt.message", "prompt.steer", "session.persistence", "session.subsession", "session.list", "timeline.plugin", "session.archive", "session.unarchive", "permission"];
 
 interface SessionContext {
   address: RunAddress;
   emittedRows: Set<string>;
   originalIdentities: Set<string>;
+  hasComment: boolean;
+  inputComments: Set<string>;
   subscriptions: Array<() => void>;
   interrupts: Set<Promise<void>>;
   permissions: Map<string, AskuserCardData>;
@@ -34,7 +38,7 @@ interface SessionContext {
 }
 
 /** A Multica discussion projection, never a local code execution engine. */
-export function createMulticaProvider(store: StateStore, threads: ThreadSynchronizer, runs: RunSynchronizer, stops: StopCoordinator, deliveries: CommentDelivery, descriptions: TaskDescriptions, lifecycle: DiscussionLifecycle, askusers: AskUsers): ProviderRegistration {
+export function createMulticaProvider(store: StateStore, threads: ThreadSynchronizer, runs: RunSynchronizer, stops: StopCoordinator, deliveries: CommentDelivery, descriptions: TaskDescriptions, lifecycle: DiscussionLifecycle, askusers: AskUsers, runDetails: RunDetails): ProviderRegistration {
   return {
     id: providerId, label: "Multica", description: "Multica 任务讨论（目录仅为本地占位目录）",
     status: async () => ({ available: true }),
@@ -59,6 +63,15 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
         for (const key of keys) identities.add(key);
         return !seen;
       };
+      const beforeComment = (sessionId: string, id: string, clientMessageId?: string) => {
+        const session = sessions.get(sessionId);
+        if (!session || (clientMessageId && session.inputComments.has(clientMessageId))) return;
+        if (session.hasComment) emit({ type: "timeline.item", sessionId, item: {
+          type: "plugin", id, pluginId: providerId, kind: "comment-divider", version: 1, data: {},
+        } });
+        session.hasComment = true;
+        if (clientMessageId) session.inputComments.add(clientMessageId);
+      };
       const emitRow = (sessionId: string, row: StoredRow, includeOriginal = true) => {
         const session = sessions.get(sessionId);
         if (!session || session.emittedRows.has(row.id)) return;
@@ -66,6 +79,10 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
         const timestamp = row.role === "event" ? row.sourceUpdatedAt ?? row.sourceCreatedAt : row.sourceCreatedAt;
         // Canonical recovery acknowledges originals it skips, including native input IDs.
         const firstOriginal = row.role === "event" || rememberOriginal(session, row);
+        if (row.role !== "event") {
+          if (includeOriginal && firstOriginal) beforeComment(sessionId, `multica:divider:${row.commentId}`, row.clientMessageId);
+          else session.hasComment = true;
+        }
         if ((includeOriginal && firstOriginal) || row.role === "event")
           emit({ type: "timeline.item", sessionId, item: projectRow(session.address, row),
             ...(timestamp && Number.isFinite(Date.parse(timestamp)) ? { timestamp } : {}) });
@@ -104,7 +121,9 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
               emit({ type: "request.failed", requestId: input.requestId, error: { code: "unmapped_issue", message: "请在 Multica 设置启用任务工作区后打开已导入的主讨论。" } });
               return;
             }
-            const session: SessionContext = { address: openingAddress, emittedRows: new Set(), originalIdentities: new Set(), subscriptions: [], interrupts: new Set(), permissions: new Map() };
+            const history = openingAddress.rootId === "main" ? issue.mainHistory : issue.threads[openingAddress.rootId];
+            const hasComment = input.history !== "replay" && history.rows.some(row => row.role !== "event");
+            const session: SessionContext = { address: openingAddress, emittedRows: new Set(), originalIdentities: new Set(), hasComment, inputComments: new Set(), subscriptions: [], interrupts: new Set(), permissions: new Map() };
             sessions.set(input.sessionId, session);
             const address = session.address;
             emit({ type: "session.opened", requestId: input.requestId, sessionId: input.sessionId, capabilities,
@@ -173,18 +192,26 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
             const cards = await askusers.cards(address);
             if (sessions.get(input.sessionId) !== session || lifecycle.unavailable(address)) return;
             for (const card of cards) projectPermission(card);
-            const projected = new Map<string, string>();
+            const projection = new RunProjection(input.sessionId, address.rootId, emit);
+            const projectChildren = (latest: typeof issue, replay = false) => {
+              const markers = projection.project(latest, replay);
+              if (!markers.some(runId => !latest.runs[runId].markerProjected)) return;
+              void store.update(state => {
+                const saved = state.connections[address.connectionKey]?.issues[address.issueId];
+                for (const runId of markers) if (saved?.runs[runId]) saved.runs[runId].markerProjected = true;
+              }).catch(() => {});
+            };
+            if (capabilities.includes("session.subsession")) {
+              projectChildren(issue, input.history === "replay");
+              session.subscriptions.push(store.subscribe(state => {
+                const latest = state.connections[address.connectionKey]?.issues[address.issueId];
+                if (latest) projectChildren(latest);
+              }), () => projection.close());
+              runDetails.openDiscussion(address);
+            }
             let currentRuns: typeof issue.runs = {};
             const projectRuns = (owned: typeof issue.runs, activity = true) => {
               currentRuns = owned;
-              for (const [runId, run] of Object.entries(owned)) {
-                const row = runSummary(address, runId, run);
-                const fingerprint = JSON.stringify(row);
-                if (projected.get(runId) !== fingerprint) {
-                  emit({ type: "timeline.item", sessionId: input.sessionId, item: row });
-                  projected.set(runId, fingerprint);
-                }
-              }
               if (!activity) return;
               const active = Object.values(owned).some(run => isActiveRun(run.status));
               if (active && !session.turnId) {
@@ -196,8 +223,7 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
               }
             };
             const owned = Object.fromEntries(Object.entries(issue.runs).filter(([, run]) => run.ownerRootId === address.rootId));
-            if (input.history === "replay") projectRuns(owned, false);
-            else for (const [runId, run] of Object.entries(owned)) projected.set(runId, JSON.stringify(runSummary(address, runId, run)));
+            projectRuns(owned, false);
             session.settleInterrupt = turnId => {
               if (session.turnId !== turnId) return;
               // Stop settles the turn captured by the host, even if later Runs
@@ -209,6 +235,8 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
             session.subscriptions.push(runs.subscribe(address, owned => projectRuns(owned)));
             emit({ type: "session.ready", requestId: input.requestId, sessionId: input.sessionId });
             opening = false;
+            // Native registration completes after session.ready / importAgent returns.
+            setImmediate(() => { if (sessions.get(input.sessionId) === session) void runs.observe(address).catch(() => {}); });
             return;
           }
           if (input.type === "session.close") {
@@ -225,7 +253,10 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
                 const address = session?.address;
                 if (!address || lifecycle.unavailable(address)) throw new Error("Discussion unavailable");
                 try { await stops.interrupt(address); }
-                finally { await askusers.collapsePending(address); }
+                finally {
+                  await askusers.collapsePending(address);
+                  if (capabilities.includes("session.subsession")) await runDetails.refreshOpened();
+                }
                 if (interruptedTurnId && sessions.get(input.sessionId) === session) session?.settleInterrupt?.(interruptedTurnId);
                 emit({ type: "request.completed", requestId: input.requestId });
               } catch (error) {
@@ -253,7 +284,10 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
             if (input.response.behavior === "deny" || isLocalAskuserDismiss(card, input.response.updatedInput)) { await askusers.collapse(target); return; }
             const record = await askusers.submit(target, input.response.updatedInput, deliveries);
             const row = { id: `multica:comment:${record.commentId}`, role: "user" as const, commentId: record.commentId, clientMessageId: record.clientMessageId, text: record.body };
-            if (rememberOriginal(session, row)) emit({ type: "timeline.item", sessionId: input.sessionId, item: projectRow(address, row) });
+            if (rememberOriginal(session, row)) {
+              beforeComment(input.sessionId, `multica:divider:input:${record.clientMessageId}`, record.clientMessageId);
+              emit({ type: "timeline.item", sessionId: input.sessionId, item: projectRow(address, row) });
+            }
             if (session.permissions.delete(input.permissionId)) emit({ type: "session.permission_resolved", sessionId: input.sessionId, permissionId: input.permissionId });
             return;
           }
@@ -271,6 +305,7 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
               const issue = (await store.read()).connections[address.connectionKey]?.issues[address.issueId];
               if (!issue || (address.rootId !== "main" && !issue.threads[address.rootId])) throw new Error("此任务或 Thread 尚未映射。");
               if ("clearPendingPermissions" in input.prompt && input.prompt.clearPendingPermissions === true) await askusers.collapsePending(address);
+              beforeComment(input.sessionId, `multica:divider:input:${input.prompt.clientMessageId}`, input.prompt.clientMessageId);
               emit({ type: "timeline.item", sessionId: input.sessionId, item: {
                 type: "user_message", id: `multica:input:${input.prompt.clientMessageId}`, messageId: `multica:input:${input.prompt.clientMessageId}`,
                 clientMessageId: input.prompt.clientMessageId, text: body,

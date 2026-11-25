@@ -17,11 +17,12 @@ export const issueSchema = z.object({
   manualHidden: z.object({ workspace: z.boolean(), discussions: z.array(z.string()) }).default({ workspace: false, discussions: [] }),
   threads: z.record(z.string(), threadSchema).default({}),
   runs: z.record(z.string(), storedRunSchema).default({}),
-  runDetails: z.record(z.string(), z.object({ messages: z.array(runMessageSchema) })).default({}),
+  runDetails: z.record(z.string(), z.object({ messages: z.array(runMessageSchema), finalized: z.boolean().optional() })).default({}),
   askuserAttachments: z.record(z.string(), askuserAttachmentSchema).optional(),
   askuserCards: z.record(z.string(), storedAskuserCardSchema).optional(),
   commentInputs: z.record(z.string(), z.object({ commentId: z.string(), rootId: z.string() })).default({}),
   commentSourceTaskIds: z.record(z.string(), z.string()).default({}),
+  commentAuthors: z.record(z.string(), z.object({ id: z.string(), type: z.enum(["member", "agent", "system"]) })).default({}),
   commentCreatedAt: z.record(z.string(), z.string()).default({}),
   commentRoots: z.record(z.string(), z.string()).default({}),
   unresolvedCommentIds: z.array(z.string()).default([]),
@@ -29,6 +30,7 @@ export const issueSchema = z.object({
   mainHistory: threadSchema.default({ title: "主讨论", historyLoaded: false, rows: [], observed: {} }),
 });
 const connectionSchema = z.object({
+  rebuildGeneration: z.number().int().nonnegative().optional(),
   rules: z.record(z.string(), taskRuleSchema.extend({ enabled: z.boolean() })),
   projects: z.record(z.string(), projectSchema), issues: z.record(z.string(), issueSchema),
 });

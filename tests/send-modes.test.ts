@@ -7,7 +7,6 @@ import type { PaseoApi } from "@getpaseo/client";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { ProviderConnection, ProviderEvent } from "@getpaseo/plugin/server/provider";
 import { workspaceEnable } from "../shared/contracts.js";
-import { runObserve } from "../shared/runs.js";
 import { createServerContribution } from "../server/contribute.js";
 import { FakeServer, resync } from "./support/fake-server.js";
 
@@ -91,7 +90,7 @@ async function fixture() {
   const interrupt = (requestId: string) => provider.send({ type: "session.interrupt", requestId, sessionId: thread.id });
   const turnEvents = () => events.filter((event): event is Extract<ProviderEvent, { type: "session.turn" }> => event.type === "session.turn" && event.sessionId === thread.id);
   const sync = () => resync(server, paseo, "workspace");
-  const observe = () => server.rpc(runObserve, address, paseo);
+  const observe = sync;
   return { server, paseo, events, runs, comments, writes, thread, prompt, interrupt, turnEvents, sync, observe,
     cancel: (handler: typeof cancel) => { cancel = handler; }, save: (handler: typeof save) => { save = handler; } };
 }

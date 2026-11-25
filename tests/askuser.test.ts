@@ -102,7 +102,7 @@ async function fixture() {
   let provider: ProviderConnection | undefined;
   async function connect() {
     if (provider) return provider;
-    provider = await server.providers.get("multica")!.connect({ versions: [1], capabilities: ["session.persistence", "timeline.plugin", "permission"] });
+    provider = await server.providers.get("multica")!.connect({ versions: [1], capabilities: ["session.subsession", "session.persistence", "timeline.plugin", "permission"] });
     provider.onEvent(event => {
       events.push(event);
       if (event.type !== "timeline.item") return;
@@ -361,8 +361,8 @@ it("places a generated root card in its new Thread while its unanchored Run stay
   f.documents.set("generated-file", card); await f.sync();
   const generated = f.agents.find(agent => agent.labels["multica.discussion"] === "generated")!;
   expect(f.rows.get(generated.id)).toContainEqual(expect.objectContaining({ type: "plugin", kind: "askuser", data: expect.objectContaining({ rootId: "generated", commentId: "generated" }) }));
-  expect(f.rows.get(f.agents[0].id)).toContainEqual(expect.objectContaining({ type: "plugin", kind: "run-summary", id: "multica:run:unanchored" }));
-  expect(f.rows.get(generated.id)?.some(row => row.type === "plugin" && row.kind === "run-summary")).toBe(false);
+  expect(f.rows.get(f.agents[0].id)).toContainEqual(expect.objectContaining({ type: "tool_call", id: "multica:run-marker:unanchored", status: "completed" }));
+  expect(f.rows.get(generated.id)?.some(row => row.type === "tool_call" && row.detail.type === "sub_agent")).toBe(false);
 });
 
 it("keeps a prior connection's cached card read-only after the CLI resolves another account", async () => {
@@ -923,4 +923,20 @@ it.each(["parent_id", "askuser_answer_to"])("rejects an answer receipt with mism
   f.remote.beforePost = async () => { f.remote.receiptMismatch = field; };
   await expect(answer(f, ["检查回执目标"])).rejects.toThrow("不匹配");
   expect(f.cards()[0].data).toMatchObject({ status: "pending", delivery: { status: "failed" } });
+});
+
+it("adds one input divider before a native AskUser answer and no second divider for its echo", async () => {
+  const f = await fixture();
+  f.comments[0].attachments = [attachment("answer-divider")]; f.documents.set("answer-divider", card);
+  await f.sync();
+  await f.server.rpc(threadOpen, f.address(), f.paseo);
+  const parent = f.agents[1].id;
+  await answer(f, ["Keep the exact answer"]);
+  const reply = f.rows.get(parent)!.find(row => row.type === "user_message" && row.clientMessageId);
+  if (reply?.type !== "user_message") throw new Error("Missing native AskUser answer");
+  expect(reply.text).toBe("**确认结果**\n\n1. **理由**：Keep the exact answer");
+  const dividers = () => f.events.filter(event => event.type === "timeline.item" && event.sessionId === parent && event.item.type === "plugin" && event.item.kind === "comment-divider");
+  expect(dividers()).toMatchObject([{ item: { id: `multica:divider:input:${reply.clientMessageId}` } }]);
+  await f.sync(); await f.sync();
+  expect(dividers()).toHaveLength(1);
 });

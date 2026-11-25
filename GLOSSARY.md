@@ -41,20 +41,24 @@ _Avoid_: 原位替换、新的参与者评论
 _Avoid_: 裸 @名字、执行成功
 
 **执行过程（Agent run）**：
-智能体对一项任务的一次执行活动，可以涉及零个、一个或多个任务讨论串。
-_Avoid_: Thread、Comment
+智能体对一项任务的一次执行活动，可以涉及零个、一个或多个任务讨论串；每个 Run 在 Paseo 中对应唯一一个 Run 子代理，重跑产生的新 Run 是另一个。
+_Avoid_: Thread、Comment、同一 agent 多次执行的合称
 
 **展示归属（Run display ownership）**：
-一个 Run 在 Paseo 中唯一承载其执行流的 tab，可以对应任务讨论串或本地主讨论；展示归属不表示该 Run 只处理这个讨论串的评论。
+一个 Run 的 Run 子代理唯一从属、且首次确定后不再迁移的讨论，可以是任务讨论串或本地主讨论；展示归属不表示该 Run 只处理这个讨论串的评论。
 _Avoid_: 所有参与讨论串、远端运行所有权
 
 **本地主讨论（Local main discussion）**：
 每个 Issue 在 Paseo 中用于呈现任务描述和首次展示时无评论关联 Run 的本地会话；在此发送消息会新建真实 Thread，但主讨论本身不对应一个 Multica Thread。
 _Avoid_: Multica Thread、任务的全部讨论
 
-**执行段（Run segment）**：
-单个 Run 在对话中的可展开展示，包含执行 agent、状态、工具调用及结果、运行文本和错误。
-_Avoid_: 评论、整个 Thread
+**Run 子代理（Run subagent）**：
+一个 Run 在 Paseo 中的只读呈现，从属于一个讨论而非独立 tab，以原生时间线承载执行 agent、状态、工具调用及结果、运行文本和错误；回复与追问仍以评论在所属讨论中发出。
+_Avoid_: 执行段、独立 tab、评论
+
+**Run 位置标记（Run marker）**：
+所属讨论时间线中标明一个 Run 出现位置的静态徽章，只说明由谁执行、因何触发，不反映 Run 的当前状态。
+_Avoid_: Run 状态、执行段、可展开的执行内容
 
 **Multica 连接（Connection）**：
 Paseo 与一个 Multica 服务之间、绑定单一 Multica 用户身份的连接；该身份是判断“自己的评论”的参照，更换服务或用户属于不同的连接身份。
@@ -83,3 +87,7 @@ _Avoid_: 远端删除、远端停止、人工隐藏的唯一来源
 **结构化提问卡片（AskUser card）**：
 Multica 评论携带的一组文本或选项问题，区分待答、已答与已跳过；本地收起不表示远端跳过，卡片回答仍是所属讨论中的评论。
 _Avoid_: Run、Thread、普通聊天、停止执行
+
+**数据重建（Data rebuild）**：
+针对当前连接，删除插件在 Paseo 中生成的原生记录与本地缓存，再按已保留的任务筛选规则从 Multica 重新导入的操作；不取消任何远端 Run，且清除人工隐藏。
+_Avoid_: 数据刷新、普通同步、远端删除

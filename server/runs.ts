@@ -1,10 +1,9 @@
 import { z } from "zod";
-import type { ProviderTimelineItem } from "@getpaseo/plugin/server/provider";
 import type { AuthenticatedConnection } from "./connection.js";
 import { StateStore, type IssueMapping } from "./state.js";
 import type { StoredRun } from "./run-state.js";
-import { remoteJson, workspaceAgents, type RemoteWorkspace } from "./sync.js";
-import { isActiveRun, runMetadataSchema, runStatusSchema, runSummarySchema } from "../shared/runs.js";
+import { remoteJson, workspaceAgents, workspaceMembers, type RemoteWorkspace } from "./sync.js";
+import { isActiveRun, runMetadataSchema, runStatusSchema } from "../shared/runs.js";
 
 export type RunAddress = { connectionKey: string; issueId: string; rootId: string };
 const key = (address: RunAddress) => JSON.stringify([address.connectionKey, address.issueId, address.rootId]);
@@ -39,15 +38,7 @@ function owner(issue: IssueMapping, run: z.infer<typeof remoteRunSchema>, genera
   return issue.commentRoots[associations[0]];
 }
 
-export function runSummary(address: RunAddress, runId: string, run: StoredRun): ProviderTimelineItem {
-  return { type: "plugin", id: `multica:run:${runId}`, pluginId: "multica", kind: "run-summary", version: 1,
-    data: runSummarySchema.parse({ ...address, runId, agentId: run.agentId, agentName: [...run.agentName].slice(0, 1000).join(""), status: run.status,
-      ...(run.createdAt ? { createdAt: run.createdAt } : {}),
-      ...(run.startedAt ? { startedAt: run.startedAt } : {}),
-      ...(run.completedAt ? { completedAt: run.completedAt } : {}) }) };
-}
-
-/** Fixed display ownership and summary projection. Never reads detailed run output. */
+/** Fixed display ownership and activity projection. Never reads detailed run output. */
 export class RunSynchronizer {
   private readonly listeners = new Map<string, Set<(runs: Record<string, StoredRun>) => void>>();
   constructor(private readonly store: StateStore) {}
@@ -62,15 +53,38 @@ export class RunSynchronizer {
     if (records.some(run => run.issue_id !== issueId) || new Set(records.map(run => run.id)).size !== records.length)
       throw new Error("Invalid issue run snapshot");
     const agents = records.length ? await workspaceAgents(connection, workspace) : [];
+    const snapshot = (await this.store.read()).connections[connection.connectionKey].issues[issueId];
+    const source = (run: z.infer<typeof remoteRunSchema>) => run.trigger_comment_id ??
+      [...(run.coalesced_comment_ids ?? []), ...(run.delivered_comment_ids ?? []), ...(run.supplement_comment_ids ?? [])]
+        .sort((a, b) => {
+          const first = sourceTime(snapshot.commentCreatedAt[a]) ?? 0n, second = sourceTime(snapshot.commentCreatedAt[b]) ?? 0n;
+          return first < second ? -1 : first > second ? 1 : a.localeCompare(b);
+        })[0];
+    const generated = new Map<string, string[]>();
+    for (const [commentId, runId] of Object.entries(snapshot.commentSourceTaskIds)) {
+      const ids = generated.get(runId) ?? []; ids.push(commentId); generated.set(runId, ids);
+    }
+    const triggerAuthors = new Map(records.map(run => [run.id, snapshot.commentAuthors[source(run)]]));
+    const members = records.some(run => {
+      const author = triggerAuthors.get(run.id);
+      return author?.type === "member" && author.id !== connection.userId;
+    }) ? await workspaceMembers(connection, workspace) : [];
+
     await this.store.update(state => {
       const issue = state.connections[connection.connectionKey].issues[issueId];
       for (const run of records) {
         const previous = issue.runs[run.id];
         // A Run ID is one execution: a stale read must not reopen its terminal cycle.
         const staleActive = previous && !isActiveRun(previous.status) && isActiveRun(run.status);
-        const generatedCommentIds = Object.entries(issue.commentSourceTaskIds).filter(([, taskId]) => taskId === run.id).map(([commentId]) => commentId);
+        const generatedCommentIds = generated.get(run.id) ?? [];
         issue.runs[run.id] = { agentId: run.agent_id, agentName: agents.find(agent => agent.id === run.agent_id)?.name ?? `Agent ${run.agent_id}`,
+          markerProjected: previous?.markerProjected,
           status: staleActive ? previous.status : run.status,
+          triggerAuthor: (() => {
+            const author = triggerAuthors.get(run.id);
+            return author?.type === "member" ? members.find(member => member.user_id === author.id)?.name ?? (author.id === connection.userId ? connection.identity?.user.name || "我" : `成员 ${author.id}`)
+              : author?.type === "system" ? "系统" : author ? agents.find(agent => agent.id === author.id)?.name ?? `Agent ${author.id}` : undefined;
+          })(),
           ownerRootId: previous?.ownerRootId ?? owner(issue, run, generatedCommentIds), generatedCommentIds, triggerCommentId: run.trigger_comment_id,
           coalescedCommentIds: run.coalesced_comment_ids ?? [], deliveredCommentIds: run.delivered_comment_ids ?? undefined,
           supplementCommentIds: run.supplement_comment_ids ?? [],
@@ -83,12 +97,11 @@ export class RunSynchronizer {
     const issue = (await this.store.read()).connections[connection.connectionKey].issues[issueId];
     for (const rootId of ["main", ...Object.keys(issue.threads)]) await this.observe({ connectionKey: connection.connectionKey, issueId, rootId });
   }
-  async observe(address: RunAddress): Promise<{ status: "ready" | "unavailable" }> {
+  async observe(address: RunAddress): Promise<void> {
     const issue = (await this.store.read()).connections[address.connectionKey]?.issues[address.issueId];
-    if (!issue || (address.rootId !== "main" && !issue.threads[address.rootId])) return { status: "unavailable" };
+    if (!issue || (address.rootId !== "main" && !issue.threads[address.rootId])) return;
     const owned = Object.fromEntries(Object.entries(issue.runs).filter(([, run]) => run.ownerRootId === address.rootId));
     for (const listener of this.listeners.get(key(address)) ?? []) listener(owned);
-    return { status: "ready" };
   }
   close() { this.listeners.clear(); }
 }

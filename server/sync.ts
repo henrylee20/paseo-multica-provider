@@ -63,6 +63,7 @@ export class SidebarSynchronizer {
   private expectedServerId?: string;
   private timer?: ReturnType<typeof setInterval>;
   private closed = false;
+  private paused = false;
   private eventTimer?: ReturnType<typeof setTimeout>;
   private eventSyncPending = false;
   private eventDirty = false;
@@ -152,14 +153,14 @@ export class SidebarSynchronizer {
   async assertNoPurge() { if (await this.purgePending()) throw new Error("正在清理旧 profile 本地数据，请稍后重试。"); }
   private requestSync(): Promise<void> { return this.syncPending ?? this.triggerSync(); }
   private triggerSync(): Promise<void> {
-    if (this.closed) return Promise.resolve();
+    if (this.closed || this.paused) return Promise.resolve();
     this.syncDirty = true;
     this.syncState = { ...this.syncState, status: "syncing", message: undefined };
     if (!this.syncPending) {
       this.syncState = { ...this.syncState, stage: "connection", completedWorkspaces: 0, completedArchives: 0, pendingArchives: 0 };
       this.syncPending = this.serialize(async () => {
         try {
-          while (!this.closed && this.syncDirty) {
+          while (!this.closed && !this.paused && this.syncDirty) {
             this.syncDirty = false;
             const version = this.ruleVersion;
             this.syncState = { ...this.syncState, stage: "connection", completedWorkspaces: 0, completedArchives: 0, pendingArchives: 0 };
@@ -186,6 +187,27 @@ export class SidebarSynchronizer {
       await this.assertNoPurge();
       await operation(this.host);
     });
+  }
+  /** Let the current sync yield at its next rule-version boundary, then run alone. */
+  async exclusive(paseo: PaseoApi, operation: (host: NativeHost) => Promise<void>) {
+    await this.assertNoPurge();
+    if (this.paused) throw new Error("数据重建正在进行。");
+    this.paused = true;
+    this.ruleVersion++;
+    try {
+      await this.mutationPending;
+      await this.withNativeHost(paseo, operation);
+    } finally {
+      this.paused = false;
+      if (!this.closed) void this.triggerSync().catch(() => {});
+    }
+  }
+  async reimport(connectionKey: string, progress: (completed: number, total: number) => void) {
+    await this.assertNoPurge();
+    const version = this.ruleVersion;
+    await this.sync(version, { connectionKey, progress });
+    await this.assertNoPurge();
+    if (version !== this.ruleVersion) throw new Error("重建期间 profile 已变化，请重新重建。");
   }
   /** Reconcile a saved comment without changing the client's selected discussion. */
   reconcile(): Promise<void> { return this.expectedServerId ? this.triggerSync() : Promise.resolve(); }
@@ -222,7 +244,8 @@ export class SidebarSynchronizer {
   }
   private mutate(operation: () => Promise<void>) {
     const result = this.mutationPending.then(async () => {
-      if (this.closed) throw new Error("Synchronizer closed");
+      if (this.closed) return;
+      if (this.paused) throw new Error("数据重建期间暂不能修改筛选规则。");
       await operation();
       this.ruleVersion++;
       this.startTimer();
@@ -415,8 +438,9 @@ export class SidebarSynchronizer {
       throw error;
     } finally { for (const release of releases.reverse()) release(); }
   }
-  private async sync(version: number) {
-    await this.purge();
+  private async sync(version: number, rebuild?: { connectionKey: string; progress: (completed: number, total: number) => void }) {
+    if (rebuild) await this.assertNoPurge();
+    else await this.purge();
     if (!this.host) this.host = await this.options.connectHost();
     await this.assertOwningDaemon();
     if (version !== this.ruleVersion) return;
@@ -424,6 +448,7 @@ export class SidebarSynchronizer {
     await this.options.onCached?.(this.host);
     this.syncState.stage = "connection";
     const connection = await this.options.connection();
+    if (rebuild && rebuild.connectionKey !== connection.connectionKey) throw new Error("Connection identity changed");
     this.syncState.connectionKey = connection.connectionKey;
     const state = await this.options.store.read();
     const local = state.connections[connection.connectionKey];
@@ -436,8 +461,19 @@ export class SidebarSynchronizer {
     const disabledProjects = Object.entries(local?.projects ?? {}).filter(([id, project]) => local?.rules[id]?.enabled === false && project.projectId && !project.removed);
     const pendingIssues = disabledIssues.filter(([, issue]) => !issue.archiveReason && issue.workspaceCreated && !issue.manualHidden.workspace);
     this.syncState.pendingArchives = pendingIssues.length;
-    if (!enabled.length && !disabledIssues.length && !disabledProjects.length) { this.events.reconcile(connection, []); return; }
+    if (!enabled.length && !disabledIssues.length && !disabledProjects.length) { this.events.reconcile(connection, []); rebuild?.progress(0, 0); return; }
     const workspaces = enabled.length ? await this.workspaces(connection) : [];
+    const prepared = new Map<string, z.infer<typeof remoteIssueSchema>[]>();
+    let completed = 0, total = 0;
+    if (rebuild) {
+      for (const [workspaceId, rule] of enabled) {
+        const workspace = workspaces.find(item => item.id === workspaceId);
+        if (!workspace) throw new Error("Enabled workspace snapshot unavailable");
+        const issues = await this.matchingIssues(connection, workspace, rule);
+        prepared.set(workspaceId, issues); total += issues.length;
+      }
+      rebuild.progress(0, total);
+    }
     if (version !== this.ruleVersion) return;
     this.events.reconcile(connection, workspaces.filter(workspace => local?.rules[workspace.id]?.enabled));
     await this.assertOwningDaemon();
@@ -457,7 +493,7 @@ export class SidebarSynchronizer {
       const workspace = workspaces.find(item => item.id === workspaceId);
       if (!workspace) throw new Error("Enabled workspace snapshot unavailable");
       this.syncState.stage = "issues";
-      const issues = await this.matchingIssues(connection, workspace, rule, version);
+      const issues = prepared.get(workspaceId) ?? await this.matchingIssues(connection, workspace, rule, version);
       if (version !== this.ruleVersion) return;
       // Only the complete successful snapshot is authoritative for rule exits.
       const matchingIds = new Set(issues.map(issue => issue.id));
@@ -484,17 +520,19 @@ export class SidebarSynchronizer {
         const previous = (await this.options.store.read()).connections[connection.connectionKey]?.issues[issue.id];
         const title = [issue.identifier, issue.title].filter(Boolean).join(" ");
         const oldProjectId = previous?.projectId ?? local?.projects[workspaceId]?.projectId;
-        const rebuild = previous?.workspaceCreated && oldProjectId && oldProjectId !== projectId;
+        const rebuildWorkspace = previous?.workspaceCreated && oldProjectId && oldProjectId !== projectId;
         const cwd = local?.issues[issue.id]?.cwd ?? join(projectDirectory, stableId(issue.id).slice(0, 20));
         await mkdir(cwd, { recursive: true });
         // Persist intent before native creation. A retry uses the same valid native ID.
         await this.options.store.update(state => {
           const local = connectionState(state, connection.connectionKey);
+          const generation = local.rebuildGeneration ?? 0;
+          const newWorkspaceId = `wks_${stableId(connection.connectionKey, issue.id,
+            ...(rebuildWorkspace ? [projectId] : []), ...(generation > 0 ? [String(generation)] : [])).slice(0, 16)}`;
           local.issues[issue.id] = issueSchema.parse({ ...local.issues[issue.id], remoteWorkspaceId: workspaceId,
             projectId,
-            workspaceId: rebuild ? `wks_${stableId(connection.connectionKey, issue.id, projectId).slice(0, 16)}`
-              : local.issues[issue.id]?.workspaceId ?? `wks_${stableId(connection.connectionKey, issue.id).slice(0, 16)}`,
-            workspaceCreated: rebuild ? false : local.issues[issue.id]?.workspaceCreated,
+            workspaceId: rebuildWorkspace ? newWorkspaceId : local.issues[issue.id]?.workspaceId ?? newWorkspaceId,
+            workspaceCreated: rebuildWorkspace ? false : local.issues[issue.id]?.workspaceCreated,
             cwd, title, description: issue.description ?? "", updatedAt: issue.updated_at });
         });
         const mapping = (await this.options.store.read()).connections[connection.connectionKey].issues[issue.id];
@@ -541,6 +579,7 @@ export class SidebarSynchronizer {
         if (version !== this.ruleVersion) return;
         this.syncState.stage = "history";
         await this.options.onIssue?.(connection, workspace, issue.id, this.host);
+        rebuild?.progress(++completed, total);
       }
       this.syncState.completedWorkspaces++;
     }
