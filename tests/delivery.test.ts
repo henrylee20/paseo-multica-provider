@@ -21,6 +21,7 @@ async function fixture(active = false, idempotent = false) {
   cleanup.push(() => rm(home, { recursive: true, force: true }));
   const comments = [comment("root", null, "Existing root")];
   const runs = active ? [{ id: "run", issue_id: "issue", agent_id: "agent", status: "running", trigger_comment_id: "root" }] : [];
+  const requests: string[] = [];
   const posts: Array<{ path: string; body: unknown; key?: string; slug?: string }> = [];
   const receipts = new Map<string, ReturnType<typeof comment>>();
   const lookups: string[] = [];
@@ -36,6 +37,7 @@ async function fixture(active = false, idempotent = false) {
   const http = createServer(async (request, response) => {
     response.setHeader("Content-Type", "application/json");
     const url = new URL(request.url!, "http://localhost");
+    requests.push(url.pathname);
     let body: unknown;
     if (request.method === "POST") {
       let text = ""; for await (const chunk of request) text += chunk;
@@ -110,7 +112,7 @@ async function fixture(active = false, idempotent = false) {
     const agent = agents.find(agent => agent.labels["multica.discussion"] === rootId)!;
     await (await connect()).send({ type: "session.prompt", sessionId: agent.id, prompt: { clientMessageId, delivery, input: { type: "message", content: [{ type: "text", text }] } } });
   };
-  return { ...started, home, paseo, agents, events, canonical, nativeHistory, comments, runs, posts, lookups, receipts, deletedReceipts, connect, send, start, lookupFailure: (status?: number) => { lookupFailure = status; }, advance: (milliseconds: number) => { clock = new Date(clock.getTime() + milliseconds); }, beforeLookup: (handler: typeof beforeLookup) => { beforeLookup = handler; }, identity: async (id: string) => { identity = id; await writeFile(join(home, ".multica/config.json"), JSON.stringify({ server_url: `http://127.0.0.1:${(http.address() as { port: number }).port}`, token: `synthetic-${id}` })); }, beforeMe: (handler?: () => Promise<void>) => { beforeMe = handler; }, post: (handler: typeof post) => { post = handler; } };
+  return { ...started, home, paseo, agents, events, canonical, nativeHistory, comments, runs, posts, requests, lookups, receipts, deletedReceipts, connect, send, start, lookupFailure: (status?: number) => { lookupFailure = status; }, advance: (milliseconds: number) => { clock = new Date(clock.getTime() + milliseconds); }, beforeLookup: (handler: typeof beforeLookup) => { beforeLookup = handler; }, identity: async (id: string) => { identity = id; await writeFile(join(home, ".multica/config.json"), JSON.stringify({ server_url: `http://127.0.0.1:${(http.address() as { port: number }).port}`, token: `synthetic-${id}` })); }, beforeMe: (handler?: () => Promise<void>) => { beforeMe = handler; }, post: (handler: typeof post) => { post = handler; } };
 }
 
 it("main input creates an ordinary Thread and shows only its brief success hint", async () => {
@@ -283,4 +285,15 @@ it("projects input before admission and retains it before a later network error"
   expect(f.events.at(-1)).toMatchObject({ type: "timeline.item", item: { type: "error", message: "Remote rejection" } });
   const thread = f.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
   expect(f.canonical.get(thread.id)?.filter(entry => entry.item.clientMessageId === "visible")).toHaveLength(1);
+});
+
+it("mentions and sending reuse the cached workspace slug without listing workspaces", async () => {
+  const f = await fixture();
+  const before = f.requests.filter(path => path === "/api/workspaces").length;
+  await f.server.rpc(deliveryMentions, { connectionKey: f.agents[0].labels["multica.connection"], issueId: "issue" }, f.paseo);
+  f.post(async () => ({ status: 403 }));
+  await f.send("root", "Rejected locally visible input", "cached-workspace");
+  await expect.poll(() => f.events.some(event => event.type === "timeline.item" && event.item.type === "error")).toBe(true);
+  expect(f.requests.filter(path => path === "/api/workspaces")).toHaveLength(before);
+  expect(f.posts[0].slug).toBe("product");
 });

@@ -762,18 +762,19 @@ it("does not download a newly discovered attachment if the Thread is hidden duri
 });
 
 
-it("rejects an answer hidden during workspace preflight without posting", async () => {
+it("rejects an answer hidden during identity preflight without posting", async () => {
   const f = await fixture(); f.comments[0].attachments = [attachment("hide-answer")]; f.documents.set("hide-answer", card); await f.sync();
   let entered!: () => void; let release!: () => void;
   const arrived = new Promise<void>(resolve => { entered = resolve; }); const blocked = new Promise<void>(resolve => { release = resolve; });
-  f.remote.beforeWorkspaces = async () => { entered(); await blocked; };
+  await f.refreshLogin();
+  f.remote.beforeMe = async () => { entered(); await blocked; };
   const submitted = answer(f, ["保留原始回答"]).then(value => ({ value }), error => ({ error }));
   await arrived;
   await f.server.hook("agent.archive.after", { agent: { ...f.agents[1], provider: "multica" } } as never, f.paseo);
   release();
   expect(await submitted).toMatchObject({ error: expect.objectContaining({ message: expect.stringContaining("归档") }) });
   expect(f.posts).toEqual([]);
-  expect(f.cards()[0].data.delivery).toMatchObject({ status: "failed" });
+  expect(f.cards()[0].data).toMatchObject({ readOnly: true });
 });
 
 

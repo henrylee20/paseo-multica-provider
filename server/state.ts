@@ -76,3 +76,9 @@ export class StateStore {
 export function connectionState(state: LocalState, key: string): ConnectionState {
   return state.connections[key] ??= { rules: {}, projects: {}, issues: {} };
 }
+
+export function cachedWorkspace(state: LocalState, connectionKey: string, issue: IssueMapping) {
+  const project = state.connections[connectionKey]?.projects[issue.remoteWorkspaceId];
+  if (!project?.slug) throw new Error("Multica 工作区不可用。");
+  return { id: issue.remoteWorkspaceId, name: project.name, slug: project.slug };
+}

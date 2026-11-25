@@ -3,8 +3,8 @@ import { setTimeout } from "node:timers/promises";
 import { z } from "zod";
 import { remoteFetch, type AuthenticatedConnection } from "./connection.js";
 import type { RunAddress } from "./runs.js";
-import { StateStore } from "./state.js";
-import { remoteJson, workspaceSchema, type RemoteWorkspace } from "./sync.js";
+import { StateStore, cachedWorkspace } from "./state.js";
+import { remoteJson } from "./sync.js";
 import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
 import { assertAskuserWritable } from "./askuser-policy.js";
 
@@ -24,8 +24,7 @@ export class CommentDelivery {
       if (connection.connectionKey !== address.connectionKey) throw new Error("登录身份已变化；请切回此讨论所属的 Multica 连接。");
       const saved = issue.commentInputs[clientMessageId];
       if (saved?.rootId === address.rootId) return saved.commentId;
-      const workspace = (await remoteJson(connection, "/api/workspaces", z.array(workspaceSchema)) as RemoteWorkspace[]).find(item => item.id === issue.remoteWorkspaceId);
-      if (!workspace) throw new Error("Multica 工作区不可用。");
+      const workspace = cachedWorkspace(await this.store.read(), address.connectionKey, issue);
       const idempotencyKey = createHash("sha256").update(key).digest("hex");
       for (let attempt = 0; attempt < 3; attempt++) {
         const current = (await this.store.read()).connections[address.connectionKey]?.issues[address.issueId];
@@ -61,10 +60,8 @@ export class CommentDelivery {
     const issue = (await this.store.read()).connections[address.connectionKey]?.issues[address.issueId];
     if (!issue) throw new Error("任务缓存不可用。");
     const connection = await this.connection();
-    if (!issue || connection.connectionKey !== address.connectionKey) throw new Error("请连接此讨论的原 Multica 身份。");
-    const workspaces = await remoteJson(connection, "/api/workspaces", z.array(workspaceSchema)) as z.infer<typeof workspaceSchema>[];
-    const workspace = workspaces.find(workspace => workspace.id === issue.remoteWorkspaceId);
-    if (!workspace) throw new Error("Multica 工作区不可用。");
+    if (connection.connectionKey !== address.connectionKey) throw new Error("请连接此讨论的原 Multica 身份。");
+    const workspace = cachedWorkspace(await this.store.read(), address.connectionKey, issue);
     const agents = await remoteJson(connection, `/api/agents?workspace_id=${encodeURIComponent(workspace.id)}&include_archived=true`, z.array(z.object({ id: z.string(), name: z.string(), archived_at: z.string().nullish() })), workspace) as Array<{ id: string; name: string; archived_at?: string | null }>;
     return { agents: agents.filter(agent => !agent.archived_at && z.uuid().safeParse(agent.id).success).map(agent => ({ id: agent.id, name: agent.name, reference: `[@${agent.name.replace(/[\\\[\]]/g, "\\$&")}](mention://agent/${agent.id})` })) };
   }

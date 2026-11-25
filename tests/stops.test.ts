@@ -178,7 +178,9 @@ it("native Stop cancels exactly the current tab's five unfinished statuses as wh
   await resync(f.server, f.paseo, "remote-workspace");
   const thread = f.native.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
   const provider = await f.connect();
+  const workspaceReads = f.requests.filter(request => request.url === "/api/workspaces").length;
   await provider.send({ type: "session.interrupt", requestId: "stop", sessionId: thread.id });
+  expect(f.requests.filter(request => request.url === "/api/workspaces")).toHaveLength(workspaceReads);
   expect(f.requests.filter(request => request.method === "POST")).toEqual(["queued", "dispatched", "running", "waiting", "deferred"].map(id => ({ method: "POST", url: `/api/issues/issue/tasks/${id}/cancel`, slug: "product" })));
   expect(f.providerEvents).toContainEqual({ type: "request.completed", requestId: "stop" });
   expect(f.runs.filter(run => run.status === "running").map(run => run.id)).toEqual(["other-tab"]);

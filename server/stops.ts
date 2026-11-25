@@ -2,8 +2,7 @@ import { z } from "zod";
 import { runMetadataSchema, runStatusSchema } from "../shared/runs.js";
 import { remoteFetch, type AuthenticatedConnection } from "./connection.js";
 import { isActiveRun, type RunAddress, type RunSynchronizer } from "./runs.js";
-import { StateStore } from "./state.js";
-import { remoteJson, workspaceSchema, type RemoteWorkspace } from "./sync.js";
+import { StateStore, cachedWorkspace } from "./state.js";
 
 const cancelledRunSchema = z.object({ id: z.string(), issue_id: z.string(), status: runStatusSchema,
   ...runMetadataSchema.shape, completed_at: z.string().nullish(),
@@ -28,8 +27,7 @@ export class StopCoordinator {
     if (!runIds.length) return;
     const connection = await this.connection();
     if (connection.connectionKey !== address.connectionKey) throw new Error("请切回此讨论所属的 Multica 连接后重试停止。");
-    const workspace = (await remoteJson(connection, "/api/workspaces", z.array(workspaceSchema)) as RemoteWorkspace[]).find(item => item.id === issue.remoteWorkspaceId);
-    if (!workspace) throw new Error("Multica 工作区不可用。");
+    const workspace = cachedWorkspace(await this.store.read(), address.connectionKey, issue);
     let failure: unknown;
     for (const runId of runIds) {
       try {

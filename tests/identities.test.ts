@@ -35,7 +35,7 @@ async function fixture() {
   const credentials = [randomUUID(), randomUUID(), randomUUID()];
   const requests: Array<{ path: string; actor: string; method: string }> = [];
   const posts: Array<{ actor: string; path: string }> = [];
-  let beforeWorkspaces: (() => Promise<void>) | undefined;
+  let beforeIdentity: (() => Promise<void>) | undefined;
   const remote = async () => {
     const http = createServer(async (request, response) => {
       const actor = request.headers.authorization === `Bearer ${credentials[2]}` ? "other" : "me";
@@ -47,8 +47,8 @@ async function fixture() {
         for await (const _chunk of request) { /* Consume ordinary comment body. */ }
         posts.push({ actor, path: url.pathname });
         response.statusCode = 503; body = {};
-      } else if (url.pathname === "/api/me") body = { id: actor, name: actor === "me" ? "Lin" : "Kai" };
-      else if (url.pathname === "/api/workspaces") { await beforeWorkspaces?.(); body = [{ id: "workspace", name: "Product", slug: "product" }]; }
+      } else if (url.pathname === "/api/me") { await beforeIdentity?.(); body = { id: actor, name: actor === "me" ? "Lin" : "Kai" }; }
+      else if (url.pathname === "/api/workspaces") { body = [{ id: "workspace", name: "Product", slug: "product" }]; }
       else if (url.pathname === "/api/issues") body = { issues: [{ id: "issue", workspace_id: "workspace", title: "Task", description: "Description", status: "todo" }], total: 1 };
       else if (url.pathname === "/api/issues/issue/task-runs") body = [{ id: "run", issue_id: "issue", agent_id: "agent", status: "running", trigger_comment_id: "root" }];
       else if (url.pathname === "/api/issues/issue/comments") body = [{ id: "root", issue_id: "issue", parent_id: null, content: "Original Lin comment", author_id: "me", author_type: "member", type: "comment", created_at: "2026-11-24T10:00:00Z", updated_at: "2026-11-24T10:00:00Z", attachments: [] }];
@@ -116,14 +116,15 @@ async function fixture() {
       cleanup.push(createServerContribution({ homeDirectory: home, stateDirectory: join(home, "state"), workingDirectory: home, environment: { PASEO_HOME: home } })(server.context));
       return server;
     },
-    blockWorkspaces: (handler?: () => Promise<void>) => { beforeWorkspaces = handler; },
+    blockIdentity: (handler?: () => Promise<void>) => { beforeIdentity = handler; },
     secretAbsent: (value: unknown) => credentials.every(credential => !JSON.stringify(value).includes(credential)),
     persisted: () => readFile(join(home, "state/state.json"), "utf8") };
 }
 
 it("logout during connection setup prevents an accepted old input from reaching the remote service", async () => {
   const f = await fixture();
-  const gate = pause(); f.blockWorkspaces(gate.handler);
+  await f.login(1);
+  const gate = pause(); f.blockIdentity(gate.handler);
   await f.send("logout-input"); await gate.waiting;
   await f.login(null); gate.release();
   await expect.poll(() => f.events.some(event => event.type === "timeline.item" && event.item.type === "error")).toBe(true);
@@ -207,7 +208,8 @@ it("credential rotation reuses history while account and service switches isolat
 
 it("an account switch during Stop setup fails without sending an old cancellation", async () => {
   const f = await fixture();
-  const gate = pause(); f.blockWorkspaces(gate.handler);
+  await f.login(1);
+  const gate = pause(); f.blockIdentity(gate.handler);
   const thread = f.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
   const stopping = (await f.connect()).send({ type: "session.interrupt", requestId: "switch-during-stop", sessionId: thread.id });
   await gate.waiting; await f.login(2); gate.release(); await stopping;

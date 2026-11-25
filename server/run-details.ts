@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { runAddress, runMessageSchema } from "../shared/runs.js";
 import type { AuthenticatedConnection } from "./connection.js";
-import { StateStore } from "./state.js";
+import { StateStore, cachedWorkspace } from "./state.js";
 import { remoteJson } from "./sync.js";
 
 type Address = z.infer<typeof runAddress>;
@@ -41,15 +41,14 @@ export class RunDetails {
     // Resolve the current CLI context; cached history cannot authorize another login.
     const connection = await this.connection();
     if (connection.connectionKey !== address.connectionKey) throw new Error("Connection identity changed");
-    const workspace = (await this.store.read()).connections[address.connectionKey]?.projects[issue.remoteWorkspaceId];
-    if (!workspace?.slug) throw new Error("Workspace unavailable");
+    const workspace = cachedWorkspace(await this.store.read(), address.connectionKey, issue);
     const known = new Set(cache?.messages.map(message => message.seq));
     // Strict seq > since. Never advance across a missing sequence, including
     // the first message; old/partial sources are safe to reread in full.
     let contiguous = known.has(0) ? 0 : known.has(1) ? 1 : undefined;
     if (contiguous !== undefined) while (known.has(contiguous + 1)) contiguous++;
     const query = contiguous === undefined ? "" : `?since=${contiguous}`;
-    const messages = await remoteJson(connection, `/api/tasks/${encodeURIComponent(address.runId)}/messages${query}`, z.array(runMessageSchema), { id: issue.remoteWorkspaceId, name: workspace.name, slug: workspace.slug }) as Array<z.infer<typeof runMessageSchema>>;
+    const messages = await remoteJson(connection, `/api/tasks/${encodeURIComponent(address.runId)}/messages${query}`, z.array(runMessageSchema), workspace) as Array<z.infer<typeof runMessageSchema>>;
     if (messages.some(message => message.task_id !== address.runId || message.issue_id !== address.issueId)) throw new Error("Run message identity mismatch");
     const unique = new Map(cache?.messages.map(message => [message.seq, message]));
     for (const message of messages) if (!unique.has(message.seq)) unique.set(message.seq, message);

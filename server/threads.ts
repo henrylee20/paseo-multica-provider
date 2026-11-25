@@ -4,7 +4,7 @@ import { z } from "zod";
 import type { ProviderTimelineItem } from "@getpaseo/plugin/server/provider";
 import { remoteFetch, type AuthenticatedConnection } from "./connection.js";
 import { findNativeDiscussion, type NativeHost } from "./native-host.js";
-import { StateStore } from "./state.js";
+import { StateStore, cachedWorkspace } from "./state.js";
 import type { IssueMapping } from "./state.js";
 import type { DiscussionMetadata } from "./discussion-metadata.js";
 import type { StoredRow } from "./thread-state.js";
@@ -195,9 +195,8 @@ export class ThreadSynchronizer {
     try {
         const connection = await this.connection();
       if (connection.connectionKey !== address.connectionKey) throw new Error("Connection identity changed");
-      const workspace = (await this.store.read()).connections[address.connectionKey]?.projects[issue.remoteWorkspaceId];
-      if (!workspace?.slug) throw new Error("Workspace unavailable");
-      await this.refresh(connection, { id: issue.remoteWorkspaceId, name: workspace.name, slug: workspace.slug }, address);
+      const workspace = cachedWorkspace(await this.store.read(), address.connectionKey, issue);
+      await this.refresh(connection, workspace, address);
       return { status: "ready" };
     } catch { return { status: thread.historyLoaded ? "cached" : "unavailable", message: "无法完整读取远端 Thread；保留已读的本地历史。" }; }
   }
