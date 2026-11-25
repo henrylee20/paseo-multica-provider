@@ -11,7 +11,7 @@ manifest 仅声明 Paseo `>=0.15.3`，不设最高版本；开发 SDK 固定 `0.
 ## 保留的核心路径
 
 - Multica 工作区 → Paseo 项目，Issue → Paseo 工作区，Thread → agent tab；主讨论展示描述、系统事件和首次完全无关联的 Run。
-- daemon 只读复用 CLI 配置，保留环境覆盖和任务隔离。凭据不写入插件状态或 RPC；服务地址和真实用户 ID 组成连接键，同账号 Token 轮换续用映射，换身份使用独立空规则。
+- daemon 只读复用 CLI 配置，保留环境覆盖和任务隔离；`profile.list` 按 CLI 0.6.3 目录布局枚举已登录 profile（不返回凭据、不访问 `/api/me`，任务隔离直接返回空列表）。凭据不写入插件状态或 RPC；服务地址和真实用户 ID 组成连接键，同一 profile 下同账号 Token 轮换续用映射，同一 profile 下经 CLI 换身份使用独立空规则且不自动删除。切换 CLI profile 时由持久归属 `state.owner.profile` 驱动可续跑清理（经 `settings.subscribe`、bootstrap、sync 和规则写入入口触发并门禁），依次释放会话与缓存、hold 并 `deleteAgent`（不取消远端 Run）、按用户自建工作区核对执行 `removeProject` 或仅归档插件工作区、校验路径后清理 `placeholders/` 并原子更新 `owner`，见 ADR 0010；旧版本缺少 `owner` 时采用当前 profile，升级不删数据。
 - 每次远端请求发送前核对 profile 和有效服务／凭据。旧连接不能借新登录写入。CLI 文件按 mtime／大小缓存；同凭据 `/api/me` 结果最多缓存 60 秒，配置变化或 401／403 失效。
 - 原生评论保留初次读取内容；后续编辑、删除追加事件。成功评论只保存 clientMessageId → commentId／rootId 关联，用于同步回声去重；新 Thread 是独立原生会话。
 - `session.prompt` 先校验文本、附件、空正文、outputSchema 与任务／Thread 映射，在 prompt_result 前直接 emit 原生输入。仅网络发送异步；steer 保留接收时捕获的 turnId，失败追加一个原生错误。
@@ -44,7 +44,7 @@ StateStore 首次读取校验后缓存，只返回只读约定的共享快照；
 
 ## 精简界面与取消的保证
 
-只有设置页：连接、Multica 工作区与筛选规则、有隐藏项时的人工恢复。工作区按已启用优先分组，编辑与启用走带固定底栏的弹窗；默认选择未开始／进行中整类，编辑器保留整类与部分具体状态的选择，目录按连接缓存并由只读 `workspace.preview` 预览匹配与移出项（不写状态、不进同步队列），`workspace.list` 的 `importedCount` 与预览均按未归档映射计数。保存成功即关闭弹窗并显示非错误回执；后台错误独立显示在同步行，停用行显示待归档任务。设置页同步期间每 2 秒读取进度，空闲恢复 10 秒；只有仍有未归档的已停用任务时才显示归档阶段，归档数量不计 Project 移除。提及只走 composer 选择器。主讨论发送成功仅提示可在侧栏打开新 Thread；Thread 内成功不显示额外内容。
+只有设置页：连接（含 `SettingsSelect` profile 下拉框、切换确认 `Modal`、清理阶段提示与含用户自建工作区的保留 Project 区块）、Multica 工作区与筛选规则、有隐藏项时的人工恢复。工作区按已启用优先分组，编辑与启用走带固定底栏的弹窗；默认选择未开始／进行中整类，编辑器保留整类与部分具体状态的选择，目录按连接缓存并由只读 `workspace.preview` 预览匹配与移出项（不写状态、不进同步队列），`workspace.list` 的 `importedCount` 与预览均按未归档映射计数。保存成功即关闭弹窗并显示非错误回执；后台错误独立显示在同步行，停用行显示待归档任务。设置页同步期间每 2 秒读取进度，空闲恢复 10 秒；只有仍有未归档的已停用任务时才显示归档阶段，归档数量不计 Project 移除。提及只走 composer 选择器。主讨论发送成功仅提示可在侧栏打开新 Thread；Thread 内成功不显示额外内容。
 
 - **取消保证 A**：删除持久投递原文、核实／显式重发与 7 天保证。网络或 5xx 用相同 Idempotency-Key 最多三次，失败只追加错误；不由插件跨重启恢复失败输入。
 - **取消保证 B**：删除停止记录、清理四态、跨 tab 单 Run 重试及 Stop epoch 栅栏；Stop 只处理当前活跃 Run。

@@ -22,11 +22,13 @@
 
 默认复用 daemon 主机、运行用户的 Multica CLI 登录，支持云服务及自部署地址。插件只读配置，不生成 PAT、不改写 CLI、不借用客户端或其他用户的登录。API server_url 与前端 app_url 分开使用，不硬编码云地址。
 
-Profile 留空使用默认配置，命名 profile 显式选择；不猜测全局 active profile。遵循 MULTICA_SERVER_URL、MULTICA_TOKEN、MULTICA_APP_URL／FRONTEND_ORIGIN 及任务私有配置根的有效覆盖，保留任务隔离。
+Profile 通过设置页下拉框在 daemon 主机已登录的 CLI profile 间选择（留空表示默认配置，枚举 `<配置根>/config.json` 与 `profiles/*/config.json`，跳过不符合设置 schema 的目录名；当前已选项即使已登出仍保留在选项中）；不猜测全局 active profile，也不向 RPC 返回凭据或使用未选中 profile 的凭据访问 `/api/me`。遵循 MULTICA_SERVER_URL、MULTICA_TOKEN、MULTICA_APP_URL／FRONTEND_ORIGIN 及任务私有配置根的有效覆盖，环境变量覆盖时提示切换 profile 不改变账号；任务隔离上下文禁用下拉框且不读取拥有者配置目录。
 
-服务地址和真实用户 ID 组成连接身份；同账号 Token 轮换或切换同身份 profile 续用映射，换服务／用户从独立空规则开始。历史角色、Run owner 和人工隐藏保留原身份，旧连接不能借新登录发表评论、取消 Run 或刷新远端明细。凭据不进入插件持久状态、客户端或 RPC。
+服务地址和真实用户 ID 组成连接身份；同一 profile 下同账号 Token 轮换续用映射，同一 profile 下经 CLI 换服务／用户从独立空规则开始且不自动删除旧连接，历史角色、Run owner 和人工隐藏保留原身份，旧连接不能借新登录发表评论、取消 Run 或刷新远端明细。凭据不进入插件持久状态、客户端或 RPC。
 
-CLI 文件原子替换、重新登录和登出会触发有效配置重读；凭据被移除后不继续使用。每次远端请求发送前核对原上下文，401／403 使身份验证缓存失效；已经发出的请求不能撤回。离线已读缓存不要求当前 CLI 仍为原身份。
+切换 CLI profile 时，客户端先弹窗展示本机 Project、任务、讨论数量并提示不影响远端，确认后再保存设置。服务端以持久归属 `state.owner.profile` 驱动可重复执行的清理（见 ADR 0010）：清空前一 profile 留下的全部本地映射、规则、缓存、人工隐藏、原生讨论（`deleteAgent`，不取消远端 Run）、不含用户自建活跃工作区的插件 Project 与占位目录，再允许新 profile 的同步、导入或规则写入；两个 profile 指向同一账号时同样清理，同一 profile 下累积的多个连接一并清空；含用户自建活跃工作区的 Project 保留 Project 与占位目录，只删插件讨论、归档插件工作区并提示用户。旧版本缺少归属时采用当前 profile，升级不删数据；清理失败保留原归属并在下次引导重试。
+
+CLI 文件原子替换、重新登录和登出会触发有效配置重读；凭据被移除后不继续使用。每次远端请求发送前核对原上下文，401／403 使身份验证缓存失效；已经发出的请求不能撤回。同一 profile 离线或登出时已读缓存仍可读；切换 profile 后前一 profile 的本地缓存已清空。
 
 ## 筛选、归档与人工隐藏
 
@@ -98,7 +100,7 @@ history:skip 恢复仍完整分页核对原生原文的来源 ID、角色和全�
 
 ## 设置与工程验证
 
-唯一设置页包括连接、规则和有隐藏项时的人工恢复。名称来自对应业务对象，但身份不依赖名称；后台导入新 Thread 不抢夺浏览位置。manifest 要求 Paseo >=0.15.3，不设最高版本，提及选择器需要 0.16+。
+唯一设置页包括连接（含 CLI profile 下拉框、切换确认弹窗与保留 Project 提示）、规则和有隐藏项时的人工恢复。名称来自对应业务对象，但身份不依赖名称；后台导入新 Thread 不抢夺浏览位置。manifest 要求 Paseo >=0.15.3，不设最高版本，提及选择器需要 0.16+。
 
 测试通过临时 CLI、可控时钟、HTTP／WebSocket 与宿主契约，从公开贡献、provider、RPC 和 renderer 边界验证身份隔离、回声、Run 归属、按 root 停止、人工隐藏及恢复。静态源码核查与隔离测试不等同真实服务验收；真实自部署、原生 queue 等未验证范围以历史验收记录为准。
 

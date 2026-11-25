@@ -2,7 +2,7 @@
 
 用户要求本机只保留当前所选 CLI profile 的插件数据，因此切换 profile 时删除前一 profile 留下的全部本地映射、缓存、原生讨论、插件 Project 与占位目录，不再按 [ADR 0006](./0006-isolate-connection-identities.md) 保留旧身份以便切回续用。Multica 远端数据与 CLI 配置不受影响。
 
-设置页以下拉框选择 profile。CLI 0.6.3 没有列出 profile 的命令，也没有已保存的 active profile，插件因此按 CLI 目录布局枚举 `<配置根>/profiles/*/config.json`（配置根遵循 `MULTICA_TASK_CONFIG_ROOT`），`token` 与 `server_url` 均非空即视为已登录，名称还须通过插件设置 schema。枚举只读文件，不向 RPC 返回凭据，也不用未选中 profile 的 token 调用 `/api/me`；选项只显示名称与服务主机，切换后才验证身份。环境变量覆盖凭据时提示切换不改变账号。
+设置页以下拉框选择 profile。CLI 0.6.3 没有列出 profile 的命令，也没有已保存的 active profile，插件因此按 CLI 目录布局枚举 `<配置根>/config.json` 与 `<配置根>/profiles/*/config.json`（配置根遵循 `MULTICA_TASK_CONFIG_ROOT`；任务隔离上下文直接返回空列表，不读取拥有者 `~/.multica`），`token` 非空且 `server_url` 为有效地址即视为已登录，名称还须通过插件设置 schema。枚举只读文件，不向 RPC 返回凭据，也不用未选中 profile 的 token 调用 `/api/me`；选项只显示名称与服务主机，切换后才验证身份。环境变量覆盖凭据时提示切换不改变账号。
 
 插件服务端只能读取和订阅设置，选择由客户端保存。清理因此由持久归属驱动：state 记录数据所属的 profile，设置中的 profile 与之不同时，先清理，再允许同步、导入或规则写入。各步骤可重复执行，失败时保留原归属，由下一次 bootstrap 重试；任何客户端或设置来源的变更都走同一路径，客户端在保存前请用户确认。
 
