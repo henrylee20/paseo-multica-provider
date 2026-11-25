@@ -63,7 +63,7 @@ async function fixture(active = false, idempotent = false) {
       else { response.statusCode = 404; body = { error: "no comment has been posted with this Idempotency-Key" }; }
     }
     else if (url.pathname === "/api/issues/issue/comments") body = url.searchParams.has("thread") ? comments.filter(c => c.id === url.searchParams.get("thread") || c.parent_id === url.searchParams.get("thread")) : comments;
-    else if (url.pathname === "/api/agents") body = [{ id: "12345678-1234-4234-9234-123456789abc", name: "Agent [A]" }, { id: "22345678-1234-4234-9234-123456789abc", name: "Agent [A]" }];
+    else if (url.pathname === "/api/agents") body = [{ id: "12345678-1234-4234-9234-123456789abc", name: "Agent [A]" }, { id: "22345678-1234-4234-9234-123456789abc", name: "Agent [A]" }, { id: "32345678-1234-4234-9234-123456789abc", name: "Archived agent", archived_at: stamp }];
     else { response.statusCode = 404; body = {}; }
     response.end(JSON.stringify(body));
   });

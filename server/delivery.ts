@@ -4,7 +4,7 @@ import { z } from "zod";
 import { remoteFetch, type AuthenticatedConnection } from "./connection.js";
 import type { RunAddress } from "./runs.js";
 import { StateStore, cachedWorkspace } from "./state.js";
-import { remoteJson } from "./sync.js";
+import { workspaceAgents } from "./sync.js";
 import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
 import { assertAskuserWritable } from "./askuser-policy.js";
 
@@ -62,7 +62,7 @@ export class CommentDelivery {
     const connection = await this.connection();
     if (connection.connectionKey !== address.connectionKey) throw new Error("请连接此讨论的原 Multica 身份。");
     const workspace = cachedWorkspace(await this.store.read(), address.connectionKey, issue);
-    const agents = await remoteJson(connection, `/api/agents?workspace_id=${encodeURIComponent(workspace.id)}&include_archived=true`, z.array(z.object({ id: z.string(), name: z.string(), archived_at: z.string().nullish() })), workspace) as Array<{ id: string; name: string; archived_at?: string | null }>;
+    const agents = await workspaceAgents(connection, workspace);
     return { agents: agents.filter(agent => !agent.archived_at && z.uuid().safeParse(agent.id).success).map(agent => ({ id: agent.id, name: agent.name, reference: `[@${agent.name.replace(/[\\\[\]]/g, "\\$&")}](mention://agent/${agent.id})` })) };
   }
   async close() { await this.waitForPosts(); }

@@ -3,7 +3,7 @@ import type { ProviderTimelineItem } from "@getpaseo/plugin/server/provider";
 import type { AuthenticatedConnection } from "./connection.js";
 import { StateStore, type IssueMapping } from "./state.js";
 import type { StoredRun } from "./run-state.js";
-import { remoteJson, type RemoteWorkspace } from "./sync.js";
+import { remoteJson, workspaceAgents, type RemoteWorkspace } from "./sync.js";
 import { runMetadataSchema, runStatusSchema, runSummarySchema } from "../shared/runs.js";
 
 export const isActiveRun = (status: StoredRun["status"]) => ["queued", "dispatched", "running", "waiting_local_directory", "deferred"].includes(status);
@@ -59,7 +59,7 @@ export class RunSynchronizer {
   async discover(connection: AuthenticatedConnection, workspace: RemoteWorkspace, issueId: string) {
     const records = await remoteJson(connection, `/api/issues/${encodeURIComponent(issueId)}/task-runs?view=timeline`, z.array(remoteRunSchema), workspace) as Array<z.infer<typeof remoteRunSchema>>;
     if (records.some(run => run.issue_id !== issueId) || new Set(records.map(run => run.id)).size !== records.length) throw new Error("Invalid issue run snapshot");
-    const agents = records.length ? await (workspace.agents ??= remoteJson(connection, `/api/agents?workspace_id=${encodeURIComponent(workspace.id)}&include_archived=true`, z.array(z.object({ id: z.string(), name: z.string() })), workspace) as Promise<Array<{ id: string; name: string }>>) : [];
+    const agents = records.length ? await workspaceAgents(connection, workspace) : [];
     await this.store.update(state => {
       const issue = state.connections[connection.connectionKey].issues[issueId];
       for (const run of records) {

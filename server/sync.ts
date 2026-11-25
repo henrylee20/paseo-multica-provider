@@ -20,7 +20,7 @@ const remoteIssueSchema = z.object({ id: z.string().min(1), workspace_id: z.stri
 const pageSchema = z.object({ issues: z.array(remoteIssueSchema), total: z.number().int().nonnegative() });
 // These requests live only for this snapshot (or an explicit Thread open).
 export type RemoteWorkspace = z.infer<typeof workspaceSchema> & {
-  agents?: Promise<Array<{ id: string; name: string }>>;
+  agents?: Promise<Array<{ id: string; name: string; archived_at?: string | null }>>;
   members?: Promise<Array<{ user_id: string; name: string }>>;
 };
 export const defaultStatusCategories = ["unstarted", "started"];
@@ -37,6 +37,15 @@ export async function remoteJson(connection: AuthenticatedConnection, path: stri
   const response = await remoteFetch(connection, path, { headers: workspace ? { "X-Workspace-Slug": workspace.slug } : {} });
   if (!response.ok) { await response.body?.cancel(); throw new Error(`Multica read failed (HTTP ${response.status})`); }
   return schema.parse(await response.json());
+}
+
+export function workspaceAgents(connection: AuthenticatedConnection, workspace: RemoteWorkspace) {
+  return workspace.agents ??= remoteJson(connection, `/api/agents?workspace_id=${encodeURIComponent(workspace.id)}&include_archived=true`,
+    z.array(z.object({ id: z.string(), name: z.string(), archived_at: z.string().nullish() })), workspace) as NonNullable<RemoteWorkspace["agents"]>;
+}
+export function workspaceMembers(connection: AuthenticatedConnection, workspace: RemoteWorkspace) {
+  return workspace.members ??= remoteJson(connection, `/api/workspaces/${encodeURIComponent(workspace.id)}/members`,
+    z.array(z.object({ user_id: z.string(), name: z.string() })), workspace) as NonNullable<RemoteWorkspace["members"]>;
 }
 
 export class SidebarSynchronizer {
