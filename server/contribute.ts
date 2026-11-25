@@ -22,11 +22,9 @@ import { hiddenList, hiddenRestore } from "../shared/hiding.js";
 import { StopCoordinator } from "./stops.js";
 import { CommentDelivery } from "./delivery.js";
 import { deliveryTargets, deliveryMentions } from "../shared/delivery.js";
-import { issueHistoryList, issueHistoryRead } from "../shared/access.js";
 import { AskUsers } from "./askuser.js";
 import { AskuserWakeups } from "./askuser-wakeup.js";
 import { askuserObserve, askuserRead, askuserReopen, askuserSkip } from "../shared/askuser.js";
-import { IssueHistory } from "./access.js";
 
 export interface ServerDependencies extends ConnectionDependencies {
   stateDirectory: string;
@@ -104,9 +102,6 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     server.handle(askuserRead, input => askusers.read(input));
     const threads = new ThreadSynchronizer(store, connection, askusers);
     const metadata = new DiscussionMetadata(store);
-    const history = new IssueHistory(store);
-    server.handle(issueHistoryList, () => history.list());
-    server.handle(issueHistoryRead, input => history.read(input));
     const wakeups = new AskuserWakeups(store, askusers, lifecycle, dependencies.now);
     server.handle(askuserReopen, async (input, context) => {
       const card = await askusers.reopen(input, lifecycle);

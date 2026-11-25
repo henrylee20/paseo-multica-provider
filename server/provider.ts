@@ -88,7 +88,7 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
           if (input.type === "sessions") {
             const state = await store.read();
             const entries = Object.entries(state.connections).flatMap(([connectionKey, connection]) =>
-              Object.entries(connection.issues).filter(([, issue]) => issue.access?.status !== "inaccessible").flatMap(([issueId, issue]) => [{
+              Object.entries(connection.issues).flatMap(([issueId, issue]) => [{
                 persistence: mainPersistence(connectionKey, issueId), cwd: issue.cwd, title: issue.title,
                 description: issue.description, updatedAt: issue.updatedAt,
               }, ...Object.entries(issue.threads).map(([rootId, thread]) => ({ persistence: threadPersistence(connectionKey, issueId, rootId), cwd: issue.cwd, title: thread.title,

@@ -589,8 +589,6 @@ it("management lists shared hidden objects and offers separate workspace and sel
     { connectionKey: "old-connection", issueId: "issue", workspaceId: "workspace", cwd: "/original", kind: "thread", rootId: "root", agentId: "original-agent", title: "Task · Root" },
   ];
   const h = await managementHarness(name => {
-    if (name === "issue.history.list") return { issues: [{ connectionKey: "old-connection", issueId: "issue", workspaceId: "workspace", title: "Read-only Task", status: "inaccessible", reason: "forbidden", lastSuccessAt: "2026-11-24T10:00:00Z", checkedAt: "2026-11-24T11:00:00Z", revision: "cache-revision" }] };
-    if (name === "issue.history.read") return { text: JSON.stringify({ title: "Read-only Task", description: "Preserved goal", discussions: [{ rootId: "root", title: "Original thread", rows: [{ id: "comment", role: "user", text: "Original cached comment" }] }], runs: [{ id: "run", agentName: "Original agent", status: "running", ownerRootId: "root", metadata: { error: "Cached task failure", work_dir: "/remote/cache/../original" }, messages: [{ task_id: "run", issue_id: "issue", seq: 1, type: "text", content: "Preserved output" }] }], deliveries: [], stops: [] }), nextOffset: null };
     if (name === "connection.history") return { connections: [{ connectionKey: "old-connection", apiUrl: "https://original.example.test", user: { id: "original-user", name: "Original account", email: "" }, profiles: ["office"], projectCount: 1, issueCount: 2, hiddenCount: 1, pendingDeliveryCount: 1, stopWarningCount: 1 }] };
     if (name === "delivery.targets") return { issues: [{ connectionKey: "old-connection", issueId: "issue", title: "Task" }] };
     if (name === "delivery.mentions") return { agents: [{ id: "agent-id", name: "Agent A", reference: "[@Agent A](mention://agent/agent-id)" }] };
@@ -603,12 +601,8 @@ it("management lists shared hidden objects and offers separate workspace and sel
   try {
     await vi.waitFor(() => { expect(h.render()).toContain("人工隐藏"); expect(h.render()).toContain("Task · Root"); });
     const page = h.render();
-    for (const text of ["历史连接", "Original account", "https://original.example.test", "只读历史", "Read-only Task", "访问受限"])
+    for (const text of ["历史连接", "Original account", "https://original.example.test"])
       expect(page).toContain(text);
-    h.action("读取缓存历史").onPress();
-    await vi.waitFor(() => expect(h.render()).toContain("Original cached comment"));
-    for (const text of ["Preserved output", "Preserved goal", "Cached task failure", "远端目录", "/remote/cache/../original", "运行中"]) expect(h.render()).toContain(text);
-    expect(h.calls).toContainEqual({ name: "issue.history.read", input: { connectionKey: "old-connection", issueId: "issue", revision: "cache-revision", offset: 0 } });
     h.selects.find(select => select.label === "任务")!.onValueChange(JSON.stringify(["old-connection", "issue"]));
     await vi.waitFor(() => expect(h.render()).toContain("Agent A"));
     h.action("复制引用").onPress();
@@ -879,23 +873,6 @@ it("the compiled askuser card loads complete warning details only on explicit re
   } finally { dispose(); }
 });
 
-it("compiled cache-only history renders a complete askuser card without requesting CLI or remote card data", async () => {
-  const h = await managementHarness((name, input) => {
-    if (name === "issue.history.list") return { issues: [{ connectionKey: "old", issueId: "issue", workspaceId: "workspace", title: "History", status: "inaccessible", revision: "history-v1" }] };
-    if (name === "issue.history.read") return { text: JSON.stringify({ title: "History", description: "", discussions: [], runs: [], deliveries: [], stops: [], askuserCards: [
-      { connectionKey: "old", issueId: "issue", rootId: "root", commentId: "card", attachmentId: "file", revision: "v1", title: "历史提问", description: "完整历史警示说明", questions: [{ id: "reason", title: "说明原因", type: "text" }], status: "answered", readOnly: true, offline: true, truncated: false, answer: { commentId: "answer", actorId: "original-user", content: "已确认完整回答" } },
-      { connectionKey: "old", issueId: "issue", rootId: "root", commentId: "skipped", attachmentId: "skipped-file", revision: "v1", title: "历史跳过卡片", description: "跳过前的完整警示", questions: [{ id: "scope", title: "历史范围", type: "single", options: [{ id: "canary", label: "仅灰度" }] }], status: "skipped", skippedBy: "skip-operator", readOnly: true, offline: true, truncated: false },
-      { connectionKey: "old", issueId: "issue", rootId: "root", commentId: "pending", attachmentId: "pending-file", revision: "v1", title: "历史待答卡片", description: "待答完整警示", questions: [{ id: "reason", title: "补充理由", type: "text", required: false }], status: "pending", collapsed: true, readOnly: true, offline: true, truncated: false },
-    ] }), nextOffset: null };
-    return empty(name, input) ?? { status: "offline", message: "offline", profile: "", source: { api: "none", credentials: "none", app: "none" }, loginCommand: "multica login" };
-  });
-  try {
-    await vi.waitFor(() => expect(h.render()).toContain("History")); h.action("读取缓存历史").onPress();
-    await vi.waitFor(() => expect(h.render()).toContain("历史提问"));
-    for (const text of ["完整历史警示说明", "说明原因", "只读", "离线缓存", "original-user", "已确认完整回答", "历史跳过卡片", "跳过前的完整警示", "历史范围", "仅灰度", "已跳过", "skip-operator", "历史待答卡片", "待答完整警示", "补充理由", "已在本地收起"]) expect(h.render()).toContain(text);
-    expect(h.calls.some(call => call.name.startsWith("askuser."))).toBe(false);
-  } finally { h.dispose(); }
-});
 
 async function askuserActionHarness(answer: Answer, extra: Record<string, unknown> = {}) {
   const tree = componentTree();
@@ -918,6 +895,7 @@ async function askuserActionHarness(answer: Answer, extra: Record<string, unknow
   const render = () => { buttons.length = 0; return tree.render(createElement(renderer.Component as FunctionComponent<any>, { item: { data: renderer.schema.parse(base) }, theme: { colors: { foreground: "fg", foregroundMuted: "muted", statusDanger: "danger" } } })); };
   return { calls, buttons, render, button: (label: string) => { render(); const button = buttons.find(button => button.accessibilityLabel === label); expect(button, label).toBeDefined(); return button!; }, dispose: () => { tree.unmount(); dispose(); } };
 }
+
 
 it("the compiled askuser card reopens locally collapsed forms and requires a separate confirmation before remote skip", async () => {
   const h = await askuserActionHarness((name) => ({ connectionKey: "connection", issueId: "issue", rootId: "root", commentId: "card", attachmentId: "file", revision: "v2", title: "发布确认", questions: [], status: name === "askuser.skip" ? "skipped" : "pending", collapsed: false, readOnly: name === "askuser.skip", offline: false, truncated: false }));

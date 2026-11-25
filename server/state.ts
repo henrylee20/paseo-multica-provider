@@ -6,14 +6,12 @@ import { runMessageSchema } from "../shared/runs.js";
 import { threadSchema } from "./thread-state.js";
 import { connectionIdentitySchema, taskRuleSchema } from "../shared/contracts.js";
 import { askuserAttachmentSchema, storedAskuserCardSchema } from "./askuser-state.js";
-import { issueAccessSchema } from "../shared/access.js";
 
 const projectSchema = z.object({ cwd: z.string(), name: z.string(), slug: z.string().optional(), projectId: z.string().optional(), removed: z.boolean().optional() });
 const issueSchema = z.object({
   remoteWorkspaceId: z.string(), workspaceId: z.string(), cwd: z.string(), title: z.string(),
   projectId: z.string().optional(),
   description: z.string(), updatedAt: z.string().optional(), workspaceCreated: z.boolean().default(false), mainAgentId: z.string().optional(),
-  access: issueAccessSchema.optional(),
   archiveReason: z.enum(["rule_disabled", "filter_exit", "inaccessible"]).optional(), ruleArchivedAgentIds: z.array(z.string()).default([]), archivePending: z.boolean().default(false),
   manualHidden: z.object({ workspace: z.boolean(), discussions: z.array(z.string()) }).default({ workspace: false, discussions: [] }),
   threads: z.record(z.string(), threadSchema).default({}),

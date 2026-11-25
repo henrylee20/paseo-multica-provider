@@ -65,11 +65,11 @@ export class AskUsers {
   private readonly unsubscribe: () => void;
   constructor(private readonly store: StateStore, private readonly connection: () => Promise<AuthenticatedConnection>, private readonly lifecycle: DiscussionLifecycle) {
     // Durable availability changes must clear native needs_input even when sync
-    // will not reach this Issue again (hidden, archived, or inaccessible).
+    // will not reach this Issue again (hidden or archived).
     this.unsubscribe = store.subscribe(state => {
       for (const [connectionKey, connection] of Object.entries(state.connections)) for (const [issueId, issue] of Object.entries(connection.issues)) {
         const key = JSON.stringify([connectionKey, issueId]);
-        const availability = JSON.stringify([issue.access?.status, issue.archiveReason, issue.archivePending, issue.manualHidden]);
+        const availability = JSON.stringify([issue.archiveReason, issue.archivePending, issue.manualHidden]);
         const previous = this.availability.get(key);
         this.availability.set(key, availability);
         if (previous !== availability) this.project(connectionKey, issueId, issue);
@@ -246,32 +246,7 @@ export class AskUsers {
     } finally { await response.body?.cancel().catch(() => {}); }
   }
   private async issueObject(connection: AuthenticatedConnection, workspace: RemoteWorkspace, issueId: string) {
-    const response = await remoteFetch(connection, `/api/issues/${encodeURIComponent(issueId)}`, { headers: { "X-Workspace-Slug": workspace.slug } });
-    if (!response.ok) {
-      let error = "";
-      try { error = z.object({ error: z.string() }).parse(await response.json()).error; } catch { /* Generic route errors are not object-access evidence. */ }
-      await connection.assertCurrent?.();
-      const issue = (await this.store.read()).connections[connection.connectionKey]?.issues[issueId];
-      const explicit = /\bissue\b/i.test(error) && /not found|forbidden|denied|permission/i.test(error);
-      if ([403, 404].includes(response.status) && error && (issue?.access?.objectVerifiedAt || explicit)) {
-        // A global credential/workspace failure must not retire cached Issues.
-        const current = await this.connection();
-        if (current.connectionKey === connection.connectionKey) {
-          const workspaces = await remoteJson(current, "/api/workspaces", z.array(workspaceSchema)) as RemoteWorkspace[];
-          if (workspaces.some(item => item.id === workspace.id && item.slug === workspace.slug)) {
-            await current.assertCurrent?.();
-            await this.store.update(state => {
-              const local = state.connections[connection.connectionKey]?.issues[issueId];
-              if (local) local.access = { ...local.access, status: "inaccessible", reason: response.status === 403 ? "forbidden" : "not_found", checkedAt: new Date().toISOString() };
-            });
-          }
-        }
-      }
-      throw new Error(`任务访问核对失败（HTTP ${response.status}）。`);
-    }
-    const object = z.object({ id: z.string(), workspace_id: z.string() }).parse(await response.json());
-    await connection.assertCurrent?.();
-    return object;
+    return remoteJson(connection, `/api/issues/${encodeURIComponent(issueId)}`, z.object({ id: z.string(), workspace_id: z.string() }), workspace) as Promise<{ id: string; workspace_id: string }>;
   }
   private async assertDownloadAvailable(connectionKey: string, issueId: string, rootId = "main") {
     const issue = (await this.store.read()).connections[connectionKey]?.issues[issueId];

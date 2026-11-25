@@ -8,7 +8,6 @@ import { describeRule, WorkspaceRuleEditor } from "./workspace-rule.js";
 import { HiddenObjects } from "./hidden-objects.js";
 import { MentionReferences } from "./delivery-status.js";
 import { ConnectionHistory } from "./connection-history.js";
-import { ReadonlyHistory } from "./readonly-history.js";
 import { HeaderAction, Notice } from "./ui-kit.js";
 
 type Workspace = { connectionKey: string; id: string; name: string; enabled: boolean; rule: TaskRule };
@@ -184,7 +183,6 @@ export function ConnectionScreen({ host, theme, layout, navigation, scope = "man
     {connection}
     {rules}
     <HiddenObjects theme={theme} refreshKey={refreshKey} />
-    <ReadonlyHistory theme={theme} />
     <ConnectionHistory theme={theme} currentKey={status?.connectionKey} />
     <MentionReferences theme={theme} refreshKey={refreshKey} mentionPicker={mentionPicker} />
   </ScrollView>;

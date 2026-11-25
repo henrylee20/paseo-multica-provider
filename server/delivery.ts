@@ -8,7 +8,6 @@ import { StateStore } from "./state.js";
 import { remoteJson, workspaceSchema, type RemoteWorkspace } from "./sync.js";
 import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
 import { assertAskuserWritable } from "./askuser-policy.js";
-import { assertWritableIssue } from "./access.js";
 
 const receiptSchema = z.object({ id: z.string(), issue_id: z.string(), parent_id: z.string().nullish(), askuser_answer_to: z.string().nullish(), content: z.string(), author_id: z.string() });
 
@@ -25,7 +24,7 @@ export class CommentDelivery {
         ? prompt.input.content.map(part => part.type === "text" ? part.text : "").join("") : undefined;
       if (!body?.trim() || prompt.outputSchema !== undefined) throw new Error("仅支持非空文本评论，请移除附件或结构化输出。");
       const issue = (await this.store.read()).connections[address.connectionKey]?.issues[address.issueId];
-      assertWritableIssue(issue);
+      if (!issue) throw new Error("任务缓存不可用。");
       if (address.rootId !== "main" && !issue.threads[address.rootId]) throw new Error("Discussion unavailable");
       const connection = await this.connection();
       if (connection.connectionKey !== address.connectionKey) throw new Error("登录身份已变化；请切回此讨论所属的 Multica 连接。");
@@ -36,7 +35,6 @@ export class CommentDelivery {
       const idempotencyKey = createHash("sha256").update(key).digest("hex");
       for (let attempt = 0; attempt < 3; attempt++) {
         const current = (await this.store.read()).connections[address.connectionKey]?.issues[address.issueId];
-        assertWritableIssue(current);
         if (target.askuser_answer_to) assertAskuserWritable(current, address, this.lifecycle);
         let response: Response | undefined;
         try {
@@ -65,10 +63,10 @@ export class CommentDelivery {
     return operation;
   }
   async waitForPosts() { await Promise.allSettled(this.posts.values()); }
-  async targets() { const state = await this.store.read(); return { issues: Object.entries(state.connections).flatMap(([connectionKey, connection]) => Object.entries(connection.issues).filter(([, issue]) => issue.access?.status !== "inaccessible").map(([issueId, issue]) => ({ connectionKey, issueId, title: issue.title }))) }; }
+  async targets() { const state = await this.store.read(); return { issues: Object.entries(state.connections).flatMap(([connectionKey, connection]) => Object.entries(connection.issues).map(([issueId, issue]) => ({ connectionKey, issueId, title: issue.title }))) }; }
   async mentions(address: { connectionKey: string; issueId: string }) {
     const issue = (await this.store.read()).connections[address.connectionKey]?.issues[address.issueId];
-    assertWritableIssue(issue);
+    if (!issue) throw new Error("任务缓存不可用。");
     const connection = await this.connection();
     if (!issue || connection.connectionKey !== address.connectionKey) throw new Error("请连接此讨论的原 Multica 身份。");
     const workspaces = await remoteJson(connection, "/api/workspaces", z.array(workspaceSchema)) as z.infer<typeof workspaceSchema>[];

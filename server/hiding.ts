@@ -1,7 +1,6 @@
 import type { PluginHookAgent } from "@getpaseo/plugin/server";
 import { StateStore, type IssueMapping } from "./state.js";
 import { archiveClosedDiscussion, ensureWorkspaceActive, restoreMappedDiscussion, type NativeHost } from "./native-host.js";
-import { assertWritableIssue } from "./access.js";
 import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
 
 export function discussionAgent(issue: IssueMapping, rootId: string) {
@@ -71,7 +70,6 @@ export class ManualHiding {
   async restore(input: { connectionKey: string; issueId: string; rootId?: string }, host: NativeHost) {
     const issue = (await this.store.read()).connections[input.connectionKey]?.issues[input.issueId];
     if (!issue?.workspaceCreated) throw new Error("Mapped workspace unavailable");
-    assertWritableIssue(issue);
     if (issue.archiveReason) throw new Error("任务目前已退出筛选范围；请先启用并调整 Multica 工作区规则，再恢复隐藏对象。");
     const agentId = input.rootId === undefined ? undefined : discussionAgent(issue, input.rootId);
     if (input.rootId !== undefined && !agentId) throw new Error("Mapped discussion unavailable");

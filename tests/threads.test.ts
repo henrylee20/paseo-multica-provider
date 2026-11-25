@@ -12,7 +12,6 @@ import { runObserve, runOpen, runRead } from "../shared/runs.js";
 import { workspaceEnable, syncBootstrap } from "../shared/contracts.js";
 import { createServerContribution } from "../server/contribute.js";
 import { threadOpen, threadResolve, commentEventDetail } from "../shared/threads.js";
-import { cachedIssueSnapshot, issueHistoryList, issueHistoryRead } from "../shared/access.js";
 import { FakeServer } from "./support/fake-server.js";
 import { metadataHost } from "./support/metadata-host.js";
 
@@ -607,13 +606,6 @@ it("retains full versioned task metadata without message access across restart a
   expect(cached).toMatchObject({ status: "cached", metadataRevision: changed.metadataRevision });
   const first = await restarted.server.rpc(metadataRead, { ...address, revision: cached.metadataRevision!, offset: 0 }, f.paseo);
   expect(first.text).toContain('"error":null,"failure_reason":"local_directory_error"');
-  const listed = await restarted.server.rpc(issueHistoryList, {}, f.paseo);
-  let history = ""; offset = 0;
-  while (offset !== null) {
-    const page: { text: string; nextOffset: number | null } = await restarted.server.rpc(issueHistoryRead, { connectionKey: address.connectionKey, issueId: "issue", revision: listed.issues[0].revision, offset }, f.paseo);
-    history += page.text; offset = page.nextOffset;
-  }
-  expect(cachedIssueSnapshot.parse(JSON.parse(history)).runs[0].metadata).toEqual({ ...metadata, error: null, relative_work_dir: "" });
   expect(f.requests).toHaveLength(requests);
 });
 

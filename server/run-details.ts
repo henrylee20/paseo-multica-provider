@@ -4,7 +4,6 @@ import { runAddress, runMessageSchema } from "../shared/runs.js";
 import type { AuthenticatedConnection } from "./connection.js";
 import { StateStore } from "./state.js";
 import { remoteJson } from "./sync.js";
-import { assertWritableIssue } from "./access.js";
 
 type Address = z.infer<typeof runAddress>;
 const key = (address: Address) => JSON.stringify([address.connectionKey, address.issueId, address.rootId, address.runId]);
@@ -39,13 +38,11 @@ export class RunDetails {
   }
   private async refresh(address: Address) {
     const { issue, cache } = await this.cached(address);
-    assertWritableIssue(issue);
     // Resolve the current CLI context; cached history cannot authorize another login.
     const connection = await this.connection();
     if (connection.connectionKey !== address.connectionKey) throw new Error("Connection identity changed");
     const workspace = (await this.store.read()).connections[address.connectionKey]?.projects[issue.remoteWorkspaceId];
     if (!workspace?.slug) throw new Error("Workspace unavailable");
-    assertWritableIssue((await this.store.read()).connections[address.connectionKey]?.issues[address.issueId]);
     const known = new Set(cache?.messages.map(message => message.seq));
     // Strict seq > since. Never advance across a missing sequence, including
     // the first message; old/partial sources are safe to reread in full.

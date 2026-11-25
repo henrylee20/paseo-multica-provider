@@ -276,7 +276,7 @@ it.each(["read-only", "answered", "skipped", "invalid", "timeline unavailable"])
   expect(f.wakes).toEqual([]); expect(f.events.filter(e => e.type === "session.permission")).toEqual([]);
 });
 
-it.each(["tab hidden", "workspace hidden", "rule disabled", "filter exit", "inaccessible", "native archived", "native workspace archived"])("does not wake %s discussions", async state => {
+it.each(["tab hidden", "workspace hidden", "rule disabled", "filter exit", "attachment forbidden", "native archived", "native workspace archived"])("does not wake %s discussions", async state => {
   const f = await fixture();
   const thread = f.thread();
   if (state === "tab hidden") {
@@ -286,7 +286,7 @@ it.each(["tab hidden", "workspace hidden", "rule disabled", "filter exit", "inac
   if (state === "workspace hidden") await f.server.hook("workspace.archive.after", { workspace: { id: thread.workspaceId, cwd: thread.cwd, projectId: "project", name: "Task", archivedAt: stamp } }, f.paseo);
   if (state === "rule disabled") await f.server.rpc(workspaceEnable, { workspaceId: "workspace", enabled: false }, f.paseo);
   if (state === "filter exit") { f.issues.length = 0; await f.server.rpc(workspaceRule, { workspaceId: "workspace", rule: { statusCategories: ["started"] } }, f.paseo); }
-  if (state === "inaccessible") f.remote.issueStatus = 403;
+  if (state === "attachment forbidden") f.remote.issueStatus = 403;
   if (state === "native archived") thread.archivedAt = stamp;
   if (state === "native workspace archived") f.workspaces[0].archivedAt = stamp;
   f.question(); await f.sync(); await f.sync();

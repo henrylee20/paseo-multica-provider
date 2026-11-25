@@ -20,8 +20,6 @@ afterEach(async () => { for (const dispose of cleanup.splice(0).reverse()) await
 const stamp = "2026-11-24T10:00:00Z";
 const comment = (id: string, parent_id: string | null, content: string) => ({ id, parent_id, content, author_id: "me", author_type: "member", issue_id: "issue", type: "comment", created_at: stamp, updated_at: stamp, attachments: [] });
 const deliveryMentions = defineRpc({ name: "delivery.mentions", input: z.object({ connectionKey: z.string(), issueId: z.string() }), output: z.object({ agents: z.array(z.object({ id: z.string(), name: z.string(), reference: z.string() })) }) });
-const historyList = defineRpc({ name: "issue.history.list", input: z.object({}), output: z.object({ issues: z.array(z.object({ connectionKey: z.string(), issueId: z.string(), title: z.string(), workspaceId: z.string(), status: z.string(), reason: z.string().optional(), lastSuccessAt: z.string().optional(), checkedAt: z.string().optional(), revision: z.string() })) }) });
-const historyRead = defineRpc({ name: "issue.history.read", input: z.object({ connectionKey: z.string(), issueId: z.string(), revision: z.string(), offset: z.number() }), output: z.object({ text: z.string(), nextOffset: z.number().nullable() }) });
 async function fixture(active = false, idempotent = false) {
   const home = await mkdtemp(join(tmpdir(), "multica-delivery-"));
   cleanup.push(() => rm(home, { recursive: true, force: true }));
@@ -175,51 +173,17 @@ async function fixture(active = false, idempotent = false) {
   return { ...started, native, host, remote, requests, home, paseo, agents, events, canonical, nativeHistory, comments, runs, posts, lookups, receipts, deletedReceipts, connect, send, start, lookupFailure: (status?: number) => { lookupFailure = status; }, advance: (milliseconds: number) => { clock = new Date(clock.getTime() + milliseconds); }, beforeLookup: (handler: typeof beforeLookup) => { beforeLookup = handler; }, identity: (id: string) => { identity = id; }, beforeMe: (handler?: () => Promise<void>) => { beforeMe = handler; }, beforeWorkspaces: (handler: () => Promise<void>) => { beforeWorkspaces = handler; }, beforeCancel: (handler: typeof beforeCancel) => { beforeCancel = handler; }, post: (handler: typeof post) => { post = handler; } };
 }
 
-it("a verified missing Issue leaves active work and retains original read-only history across restart", async () => {
-  const f = await fixture(true, true);
-  const thread = f.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
-  const address = { connectionKey: thread.labels["multica.connection"], issueId: "issue", rootId: "root" };
-  await f.server.rpc(threadOpen, address, f.paseo);
-  const originalIds = f.agents.map(agent => agent.id);
-  await f.send("root", "Uncertain cached input", "pending");
-  await expect.poll(() => f.comments.some(comment => comment.content === "Uncertain cached input")).toBe(true);
-  f.remote.visible = false; f.remote.objectStatus = 404;
-  expect(await f.server.rpc(syncBootstrap, {}, f.paseo)).toMatchObject({ status: "ready" });
-  const summary = (await f.server.rpc(historyList, {}, f.paseo)).issues[0];
-  expect(summary).toMatchObject({ connectionKey: address.connectionKey, issueId: "issue", title: "Task", status: "inaccessible", reason: "not_found" });
-  expect(summary.lastSuccessAt).toBeDefined(); expect(summary.checkedAt).toBeDefined();
-  expect(f.native.archived).toBe(true);
-  const cached = await f.server.rpc(historyRead, { ...address, revision: summary.revision, offset: 0 }, f.paseo);
-  expect(cached.text).toContain("Existing root"); expect(cached.text).toContain('"run"');
-  const before = f.posts.length;
-  await f.send("root", "Do not write", "denied");
-  expect(f.posts).toHaveLength(before);
-  await expect.poll(() => f.events.some(event => event.type === "timeline.item" && event.item.type === "error" && event.item.id === "multica:send-error:denied")).toBe(true);
-  await f.dispose(); const restarted = f.start(); f.remote.authStatus = 401;
-  expect((await restarted.server.rpc(historyList, {}, f.paseo)).issues[0]).toEqual(summary);
-  expect((await restarted.server.rpc(historyRead, { ...address, revision: summary.revision, offset: 0 }, f.paseo)).text).toBe(cached.text);
-  f.remote.authStatus = 200; f.remote.objectStatus = 200;
-  await restarted.server.rpc(syncBootstrap, {}, f.paseo);
-  expect(f.native.archived).toBe(true); // Readability alone does not override the saved filter.
-  f.remote.visible = true;
-  await restarted.server.rpc(syncBootstrap, {}, f.paseo);
-  expect(f.native.archived).toBe(false); expect(f.agents.map(agent => agent.id)).toEqual(originalIds);
-  expect((await restarted.server.rpc(historyList, {}, f.paseo)).issues[0].status).toBe("available");
-});
-
-it.each(["list failure", "network", "authentication", "expired during object check"])("%s preserves active mappings without claiming every Issue is inaccessible", async failure => {
+it.each(["list failure", "network", "authentication"])("%s preserves active mappings without archiving cached issues", async failure => {
   const f = await fixture();
   if (failure === "list failure") f.remote.listStatus = 503;
   if (failure === "network") f.remote.disconnect = true;
   if (failure === "authentication") f.remote.authStatus = 401;
-  if (failure === "expired during object check") { f.remote.visible = false; f.remote.objectStatus = 404; f.remote.expireOnObject = true; }
   expect(await f.server.rpc(syncBootstrap, {}, f.paseo)).toMatchObject({ status: "unavailable" });
-  expect((await f.server.rpc(historyList, {}, f.paseo)).issues[0].status).toBe("available");
   expect(f.native.archived).toBe(false);
   expect(await f.server.rpc(syncStatus, {}, f.paseo)).toMatchObject({ status: "unavailable" });
 });
 
-it.each(["all", "one"])("reconciles %s host-reopened readonly discussions without losing hidden tabs when the Issue returns to the filter", async reopened => {
+it.each(["all", "one"])("reconciles %s host-reopened filtered discussions without losing hidden tabs when the Issue returns to the filter", async reopened => {
   const f = await fixture(true);
   f.native.restoreAgents = true;
   if (reopened === "one") {
@@ -240,8 +204,6 @@ it.each(["all", "one"])("reconciles %s host-reopened readonly discussions withou
 
   // The native prompt route unarchives the agent before the provider can reject it.
   main.archivedAt = null;
-  await f.send("main", "Readonly native reopen", "readonly-reopen");
-  await expect.poll(() => f.events.some(event => event.type === "timeline.item" && event.item.type === "error" && event.item.id === "multica:send-error:readonly-reopen")).toBe(true);
   const history = structuredClone([...f.canonical]);
   f.remote.objectStatus = 200;
   await f.server.rpc(syncBootstrap, {}, f.paseo);
@@ -252,8 +214,6 @@ it.each(["all", "one"])("reconciles %s host-reopened readonly discussions withou
   expect(await f.server.rpc(hiddenList, {}, f.paseo)).toEqual(hidden);
   expect([...f.canonical]).toEqual(history);
   expect(f.agents.map(agent => ({ id: agent.id, cwd: agent.cwd, handle: agent.handle }))).toEqual(identities);
-  const summary = (await f.server.rpc(historyList, {}, f.paseo)).issues[0];
-  expect((await f.server.rpc(historyRead, { ...address, revision: summary.revision, offset: 0 }, f.paseo)).text).toContain("Description");
 
   f.remote.visible = true;
   await f.server.rpc(syncBootstrap, {}, f.paseo);
@@ -264,7 +224,7 @@ it.each(["all", "one"])("reconciles %s host-reopened readonly discussions withou
   expect(await f.server.rpc(hiddenList, {}, f.paseo)).toEqual(hidden);
 });
 
-it("a successful list row restores access without another object read", async () => {
+it("a successful list row restores a filtered issue without object reads", async () => {
   const f = await fixture();
   const main = f.agents.find(agent => agent.labels["multica.discussion"] === "main")!;
   f.remote.visible = false; f.remote.objectStatus = 404;
@@ -275,19 +235,17 @@ it("a successful list row restores access without another object read", async ()
   await f.server.rpc(syncBootstrap, {}, f.paseo);
   expect(main.archivedAt).toBeNull();
   expect(f.native.archived).toBe(false);
-  expect((await f.server.rpc(historyList, {}, f.paseo)).issues[0].status).toBe("available");
   expect(f.requests.filter(path => path === "/api/issues/issue")).toHaveLength(reads);
   expect(f.posts).toEqual([]);
 });
 
-it.each(["filter_exit", "rule_disabled", "inaccessible"])("reconciles native reopen after %s across restart and retains the original discussion restore set", async reason => {
+it.each(["filter_exit", "rule_disabled"])("reconciles native reopen after %s across restart and retains the original discussion restore set", async reason => {
   const f = await fixture(true);
   const identities = f.agents.map(agent => ({ id: agent.id, cwd: agent.cwd, handle: agent.handle }));
   const main = f.agents.find(agent => agent.labels["multica.discussion"] === "main")!;
   if (reason === "rule_disabled") await f.server.rpc(workspaceEnable, { workspaceId: "workspace", enabled: false }, f.paseo);
   else {
     f.remote.visible = false;
-    if (reason === "inaccessible") f.remote.objectStatus = 404;
     await f.server.rpc(syncBootstrap, {}, f.paseo);
   }
   main.archivedAt = null;
@@ -424,52 +382,4 @@ it("a lost workspace restore acknowledgement still reapplies unselected hiding b
   expect(f.agents.every(agent => agent.archivedAt)).toBe(true);
   expect((await f.server.rpc(hiddenList, {}, f.paseo)).objects.map(object => object.kind).sort()).toEqual(["main", "thread", "workspace"]);
   expect(f.posts).toEqual([]); expect(f.runs[0].status).toBe("running");
-});
-
-it("object permission loss keeps cached Run output, failed stops and manual hiding while gating remote operations", async () => {
-  const f = await fixture(true, true);
-  const thread = f.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
-  const address = { connectionKey: thread.labels["multica.connection"], issueId: "issue", rootId: "root" };
-  await f.server.rpc(threadOpen, address, f.paseo);
-  const output = await f.server.rpc(runOpen, { ...address, runId: "run" }, f.paseo);
-  expect(output.status).toBe("ready");
-  thread.archivedAt = stamp;
-  await f.server.hook("agent.archive.after", { agent: { ...thread, provider: "multica" } } as never, f.paseo);
-  f.remote.visible = false; f.remote.objectStatus = 403; f.remote.denial = "issue forbidden";
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
-  expect((await f.server.rpc(historyList, {}, f.paseo)).issues[0]).toMatchObject({ status: "inaccessible", reason: "forbidden" });
-  const count = f.posts.length;
-  const beforeReads = f.requests.length;
-  await f.send("root", "Blocked active input", "readonly-active", "steer");
-  await expect.poll(() => f.events.some(event => event.type === "timeline.item" && event.item.type === "error")).toBe(true);
-  expect(f.events).toContainEqual(expect.objectContaining({ type: "timeline.item", item: expect.objectContaining({ type: "error", message: expect.stringContaining("不可访问") }) }));
-  expect(await f.server.rpc(threadOpen, address, f.paseo)).toMatchObject({ status: "cached", message: expect.stringContaining("只读") });
-  expect(await f.server.rpc(runOpen, { ...address, runId: "run" }, f.paseo)).toMatchObject({ status: "cached", revision: output.revision });
-  expect((await f.server.rpc(runRead, { ...address, runId: "run", revision: output.revision!, offset: 0 }, f.paseo)).text).toContain("Cached execution output");
-  await (await f.connect()).send({ type: "session.interrupt", sessionId: thread.id, requestId: "readonly-stop" });
-  expect(await f.server.rpc(hiddenRestore, address, f.paseo)).toMatchObject({ status: "unavailable" });
-  expect(f.posts).toHaveLength(count);
-  expect(f.requests.slice(beforeReads).some(path => path.includes("/comments?") || path.includes("/messages"))).toBe(false);
-  // A read-only receipt check may prove a prior save, but cannot POST a retry.
-  expect(f.posts).toHaveLength(count);
-  f.remote.visible = true; f.remote.objectStatus = 200;
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
-  expect(f.native.archived).toBe(false); expect(thread.archivedAt).toBeTruthy();
-  expect((await f.server.rpc(hiddenList, {}, f.paseo)).objects).toContainEqual(expect.objectContaining({ rootId: "root", agentId: thread.id }));
-});
-
-it("access loss while an accepted send waits prevents its claim and retains the immutable failed input", async () => {
-  const f = await fixture();
-  let release!: () => void;
-  let held!: () => void;
-  const waiting = new Promise<void>(resolve => { held = resolve; });
-  f.beforeWorkspaces(async () => { held(); await new Promise<void>(resolve => { release = resolve; }); });
-  await f.send("root", "Accepted before access loss", "racing-input");
-  await waiting;
-  try {
-    f.remote.visible = false; f.remote.objectStatus = 404;
-    await f.server.rpc(syncBootstrap, {}, f.paseo);
-  } finally { release(); }
-  await expect.poll(() => f.events.some(event => event.type === "timeline.item" && event.item.type === "error" && event.item.message.includes("不可访问"))).toBe(true);
-  expect(f.posts).toEqual([]);
 });
