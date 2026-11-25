@@ -59,9 +59,9 @@ it("client contribution bootstraps without opening management and retries after 
     expect(calls).toEqual(["sync.bootstrap"]);
     await vi.advanceTimersByTimeAsync(10_000);
     expect(calls).toEqual(["sync.bootstrap", "sync.bootstrap"]);
-    dispose();
     await vi.advanceTimersByTimeAsync(20_000);
     expect(calls).toHaveLength(2);
+    dispose();
   } finally { vi.useRealTimers(); }
 });
 
@@ -296,7 +296,7 @@ it.each(["root", "main"])("the invisible %s thread renderer still opens history 
   expect(threadRenderer.Component({ item: { data: threadRenderer.schema.parse({ ...address, title: "Thread" }) }, theme })).toBeNull();
   const cleanups = effects.splice(0).map(effect => effect());
   await Promise.resolve();
-  expect(calls).toEqual([{ name: "sync.status", input: {} }, { name: "thread.open", input: address }]);
+  expect(calls).toEqual([{ name: "thread.open", input: address }]);
   for (const cleanup of cleanups) if (typeof cleanup === "function") cleanup();
   const event = eventRenderer.Component({ item: { data: eventRenderer.schema.parse({ ...address, recordId: "correction", commentId: "root", category: "correction", text: "Updated text", sourceUpdatedAt: "2026-11-24T12:00:00Z", truncated: false }) }, theme });
   expect(JSON.stringify(event)).toContain("评论更正");
@@ -349,7 +349,7 @@ it("renders each run's agent and actual state as a bounded summary and observes 
   } finally { dispose(); }
 });
 
-it.each(["messages", "empty", "unavailable"])("expands source Run metadata with %s output and keeps detail reads inside expansion", async mode => {
+it.each(["messages", "empty", "unavailable", "terminal"])("expands source Run metadata with %s output and keeps detail reads inside expansion", async mode => {
   vi.useFakeTimers();
   const calls: Array<{ name: string; input: any }> = [];
   const renderers: Array<{ kind: string; schema: zod.ZodType; Component: (props: any) => any }> = [];
@@ -398,7 +398,7 @@ it.each(["messages", "empty", "unavailable"])("expands source Run metadata with 
   });
   const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: any) => { renderers.push(renderer); return () => {}; } });
   const renderer = renderers.find(value => value.kind === "run-summary")!;
-  const data = renderer.schema.parse({ connectionKey: "connection", issueId: "issue", rootId: "root", runId: "run", agentId: "agent", agentName: "Build Agent", status: "running" });
+  const data = renderer.schema.parse({ connectionKey: "connection", issueId: "issue", rootId: "root", runId: "run", agentId: "agent", agentName: "Build Agent", status: mode === "terminal" ? "completed" : "running" });
   let actions: Array<{ onPress(): void }> = [];
   const visit = (node: any): string => {
     if (node === null || node === undefined || typeof node === "boolean") return "";
@@ -440,6 +440,11 @@ it.each(["messages", "empty", "unavailable"])("expands source Run metadata with 
       await vi.advanceTimersByTimeAsync(2100);
       expect(render()).toContain("Live update");
       expect(calls.filter(call => call.name === "run.read").map(call => call.input.offset)).toEqual([0, 80, 0, 80]);
+    }
+    if (mode === "terminal") {
+      const reads = calls.filter(call => call.name === "run.open").length;
+      await vi.advanceTimersByTimeAsync(6000);
+      expect(calls.filter(call => call.name === "run.open")).toHaveLength(reads);
     }
     actions[0].onPress();
     render();
@@ -521,7 +526,7 @@ async function settingsHarness(answer: Answer, host: { composerItems?: boolean }
     "@getpaseo/plugin/client": {
       useSettings: () => ({ status: "ready", values: { profile: "" }, revision: "1", saving: false, saveError: null, reload: async () => {}, save: async () => true, reset: async () => true }),
       useRpc: (contract: { name: string }) => {
-        if (!rpcs.has(contract.name)) rpcs.set(contract.name, async input => { calls.push({ name: contract.name, input }); return answer(contract.name, input); });
+        if (!rpcs.has(contract.name)) rpcs.set(contract.name, async input => { calls.push({ name: contract.name, input }); return contract.name === "connection.status" ? { ...(await answer(contract.name, input) as object), sync: await answer("sync.status", {}), hidden: (await answer("hidden.list", {}) as any)?.objects ?? [] } : answer(contract.name, input); });
         return rpcs.get(contract.name);
       },
     },
@@ -590,6 +595,7 @@ it("settings hides empty recovery and removed management sections", async () => 
   try {
     await vi.waitFor(() => expect(management.render()).toContain("当前没有可用的 Multica 工作区"));
     const page = management.render();
+    expect(management.calls.some(call => ["sync.status", "hidden.list"].includes(call.name))).toBe(false);
     for (const text of ["Multica 连接", "已连接 · Lin", "https://api.example.test", "Multica 工作区与筛选规则"]) expect(page).toContain(text);
     for (const text of ["人工隐藏", "停止结果", "评论投递", "只读历史", "历史连接", "提及 Agent", "恢复 CLI 登录", readyStatus.configPath, "凭据来源", "ID me"]) expect(page).not.toContain(text);
   } finally { management.dispose(); }
@@ -700,42 +706,7 @@ it("a lost CLI login shows the recovery command with a copy action instead of an
 });
 
 
-it("an opened description observes current cached content and stops observing when unmounted", async () => {
-  const effects: Array<() => unknown> = [];
-  const renderers: Array<{ kind: string; Component: (props: any) => any }> = [];
-  const calls: string[] = [];
-  const state: unknown[] = [];
-  let cursor = 0;
-  const setup = await bundledContribution("../index.client.tsx", {
-    react: { useEffect: (effect: () => unknown) => effects.push(effect), useState: (initial: unknown) => {
-      const index = cursor++;
-      if (!(index in state)) state[index] = initial;
-      return [state[index], (value: unknown) => { state[index] = value; }];
-    } },
-    "@getpaseo/plugin/client": { useRpc: (contract: { name: string }) => async () => {
-      calls.push(contract.name);
-      return { connectionKey: "connection", issueId: "issue", revision: "current", preview: "Current cached goal", truncated: false };
-    } },
-    "@getpaseo/plugin/client/ui": { Markdown: ({ children }: { children: string }) => children },
-    "react-native": { Text: "Text", View: "View" },
-  });
-  vi.useFakeTimers();
-  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: any) => { renderers.push(renderer); return () => {}; } });
-  try {
-    const renderer = renderers.find(renderer => renderer.kind === "task-description")!;
-    const render = () => { cursor = 0; return renderedText(renderer.Component({ item: { data: { connectionKey: "connection", issueId: "issue", revision: "old", preview: "Old goal", truncated: false } }, theme: { colors: { foregroundMuted: "gray" } } })); };
-    expect(render()).toContain("Old goal");
-    const unmount = effects.splice(0).map(effect => effect()).filter((value): value is () => void => typeof value === "function");
-    await Promise.resolve();
-    expect(render()).toContain("Current cached goal");
-    expect(calls).toEqual(["description.observe"]);
-    for (const cleanup of unmount) cleanup();
-    await vi.advanceTimersByTimeAsync(20_000);
-    expect(calls).toHaveLength(1);
-  } finally { dispose(); vi.useRealTimers(); }
-});
-
-it("the native discussion shows the same daemon sync failure and cached-history status as management", async () => {
+it("the native discussion shows only thread-open failures", async () => {
   const effects: Array<() => unknown> = [];
   const renderers: Array<{ kind: string; Component: (props: any) => any }> = [];
   const state: unknown[] = [];
@@ -758,8 +729,7 @@ it("the native discussion shows the same daemon sync failure and cached-history 
     render();
     const unmount = effects.splice(0).map(effect => effect()).filter((value): value is () => void => typeof value === "function");
     await Promise.resolve();
-    expect(render()).toContain("同步未完成");
-    expect(render()).toContain("保留已读缓存");
+    expect(render()).not.toContain("同步未完成");
     expect(render()).toContain("可阅读已读历史");
     expect(render()).not.toContain("上次完成核对");
     for (const cleanup of unmount) cleanup();

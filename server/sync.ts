@@ -83,6 +83,7 @@ export class SidebarSynchronizer {
       this.timer = setInterval(() => { void this.requestSync().catch(() => {}); }, this.options.intervalMs);
       this.timer.unref?.();
     }
+    if (this.syncState.status === "ready") return;
     return this.requestSync();
   }
   private requestSync(): Promise<void> {
@@ -123,6 +124,7 @@ export class SidebarSynchronizer {
       await this.options.store.update(state => {
         const rules = connectionState(state, connection.connectionKey).rules;
         rules[workspaceId] = { ...taskRuleSchema.parse(rules[workspaceId] ?? {}), enabled };
+        this.syncState.status = "idle";
       });
     }).then(() => this.bootstrap(paseo));
   }
@@ -134,6 +136,7 @@ export class SidebarSynchronizer {
       await this.options.store.update(state => {
         const rules = connectionState(state, connection.connectionKey).rules;
         rules[workspaceId] = { ...rule, enabled: rules[workspaceId]?.enabled ?? false };
+        this.syncState.status = "idle";
       });
     }).then(() => this.bootstrap(paseo));
   }

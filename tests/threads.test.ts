@@ -12,7 +12,7 @@ import { runObserve, runOpen, runRead } from "../shared/runs.js";
 import { workspaceEnable, syncBootstrap } from "../shared/contracts.js";
 import { createServerContribution } from "../server/contribute.js";
 import { threadOpen, threadResolve, commentEventDetail } from "../shared/threads.js";
-import { FakeServer } from "./support/fake-server.js";
+import { FakeServer, resync } from "./support/fake-server.js";
 import { metadataHost } from "./support/metadata-host.js";
 
 const cleanup: Array<() => void | Promise<void>> = [];
@@ -184,7 +184,7 @@ it("discovers one stable native tab for a root and recursive replies without loa
   expect(f.requests.some(request => request.url.includes("thread="))).toBe(false);
   expect(f.timelines.get(f.native.agents[0].id)?.map(row => row.type === "plugin" ? row.kind : row.type)).toEqual(["task-description", "thread"]);
   expect(conversationRows(f.timelines.get(f.native.agents[1].id))).toEqual([expect.objectContaining({ type: "plugin", kind: "thread" })]);
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "remote-workspace");
   expect(f.native.agents).toHaveLength(2);
   expect(f.requests.every(request => request.method === "GET")).toBe(true);
 });
@@ -258,7 +258,7 @@ it("preserves the first obtainable snapshot and appends stable edit and deletion
   expect(conversationRows(f.timelines.get(thread.id))?.at(-1)).toMatchObject({ type: "plugin", data: { category: "deletion", commentId: "grandchild" } });
   await f.dispose();
   const restarted = f.start();
-  expect(await restarted.server.rpc(syncBootstrap, {}, f.paseo)).toEqual({ status: "ready" });
+  expect(await resync(restarted.server, f.paseo, "remote-workspace")).toEqual({ status: "ready" });
   expect(f.native.agents).toHaveLength(2);
   const connection = await restarted.server.providers.get("multica")!.connect({ versions: [1], capabilities: ["session.persistence"] });
   const replay: ProviderEvent[] = [];
@@ -275,7 +275,7 @@ it("preserves the first obtainable snapshot and appends stable edit and deletion
 it("keeps issue-level system changes in the main discussion without creating discussion tabs", async () => {
   const f = await fixture();
   f.comments.push({ ...comment("issue-status", null, "Issue completed", "system", "system"), type: "status_change" });
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "remote-workspace");
   expect(f.native.agents.map(agent => agent.labels["multica.discussion"])).toEqual(["main", "root"]);
   const main = f.native.agents[0];
   const { connectionKey, issueId } = JSON.parse(main.handle.slice(7)).data;
@@ -302,7 +302,7 @@ it("discovers older activity pages, resolves arbitrary descendants and leaves mi
   const older = comment("old-root", null, "Old discussion");
   const missing = comment("orphan", "missing-parent", "Unknown ancestry");
   f.discoveryPages([[...f.comments, missing], [older, comment("old-child", "old-root", "Old reply")]]);
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "remote-workspace");
   expect(f.native.agents.map(agent => agent.labels["multica.discussion"])).toEqual(["main", "root", "old-root"]);
   expect(await f.server.rpc(threadResolve, { ...address, commentIds: ["grandchild", "old-child", "orphan", "missing-parent"] }, f.paseo)).toEqual({ comments: [
     { commentId: "grandchild", rootId: "root", status: "resolved", createdAt: stamp },
@@ -365,9 +365,9 @@ it("appends deletion records when a fully deleted Thread vanishes from a complet
   const address = JSON.parse(thread.handle.slice(7)).data;
   await f.server.rpc(threadOpen, address, f.paseo);
   f.comments.splice(0);
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "remote-workspace");
   expect(conversationRows(f.timelines.get(thread.id))).toContainEqual(expect.objectContaining({ type: "plugin", data: expect.objectContaining({ category: "deletion", commentId: "root" }) }));
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "remote-workspace");
   expect(conversationRows(f.timelines.get(thread.id))).toHaveLength(7);
   expect(f.native.agents).toHaveLength(2);
 });
@@ -381,8 +381,8 @@ it("shows one stable run summary only in its trigger Thread and replaces its sta
   expect(summaries(thread.id)).toMatchObject([{ id: "multica:run:run-one", data: { runId: "run-one", agentId: "owned-agent", agentName: "Lin Agent", status: "queued" } }]);
   expect(summaries(main.id)).toEqual([]);
   f.runs[0].status = "running";
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "remote-workspace");
+  await resync(f.server, f.paseo, "remote-workspace");
   expect(summaries(thread.id)).toMatchObject([{ id: "multica:run:run-one", data: { status: "running" } }]);
   expect(f.timelines.get(thread.id)?.some(row => row.type === "assistant_message")).toBe(false);
   expect(f.requests.filter(request => request.url.includes("task-runs")).every(request => request.url === "/api/issues/issue/task-runs?view=timeline" && request.slug === "product")).toBe(true);
@@ -398,26 +398,26 @@ it("aggregates parallel and queued runs into one native turn and gives every lat
   const turns = () => f.providerEvents.filter((event): event is Extract<ProviderEvent, { type: "session.turn" }> => event.type === "session.turn" && event.sessionId === thread.id);
   expect(turns()).toMatchObject([{ state: "started" }]);
   f.runs[0].status = "completed";
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "remote-workspace");
   expect(turns()).toHaveLength(1);
   f.runs[1].status = "waiting_local_directory";
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "remote-workspace");
   f.runs[1].status = "deferred";
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "remote-workspace");
   f.runs[1].status = "dispatched";
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "remote-workspace");
   expect(turns()).toHaveLength(1);
   f.runs[1].status = "failed";
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "remote-workspace");
   expect(turns()).toMatchObject([{ state: "started" }, { state: "completed" }]);
   expect(turns()[1].turnId).toBe(turns()[0].turnId);
   f.runs.push({ id: "run-third", issue_id: "issue", agent_id: "second-agent", status: "queued", trigger_comment_id: "root" });
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "remote-workspace");
   expect(turns()).toMatchObject([{ state: "started" }, { state: "completed" }, { state: "started" }]);
   expect(turns()[2].turnId).not.toBe(turns()[0].turnId);
   f.runs[2].status = "cancelled";
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "remote-workspace");
+  await resync(f.server, f.paseo, "remote-workspace");
   expect(turns()).toMatchObject([{ state: "started" }, { state: "completed" }, { state: "started" }, { state: "completed" }]);
   expect(turns()[3].turnId).toBe(turns()[2].turnId);
 });
@@ -430,7 +430,7 @@ it("fixes first ownership across cross-Thread coalescing, later associations and
     { id: "unanchored", issue_id: "issue", agent_id: "owned-agent", status: "completed", delivered_comment_ids: [] },
     { id: "trigger", issue_id: "issue", agent_id: "owned-agent", status: "completed", trigger_comment_id: "a-later", coalesced_comment_ids: ["z-earliest"] },
   );
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "remote-workspace");
   const ownerOf = (id: string) => f.native.agents.filter(agent => f.timelines.get(agent.id)?.some(row => row.id === `multica:run:${id}`)).map(agent => agent.labels["multica.discussion"]);
   expect(ownerOf("earliest")).toEqual(["z-earliest"]);
   expect(ownerOf("unanchored")).toEqual(["main"]);
@@ -438,10 +438,10 @@ it("fixes first ownership across cross-Thread coalescing, later associations and
   f.runs[0].trigger_comment_id = "a-later";
   f.runs[1].trigger_comment_id = "z-earliest";
   f.runs[2].trigger_comment_id = "root";
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "remote-workspace");
   await f.dispose();
   const restarted = f.start();
-  await restarted.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(restarted.server, f.paseo, "remote-workspace");
   const provider = await restarted.server.providers.get("multica")!.connect({ versions: [1], capabilities: ["session.persistence"] });
   const replay: ProviderEvent[] = [];
   provider.onEvent(event => replay.push(event));
@@ -458,23 +458,23 @@ it("does not invent main-discussion ownership from failed association reads or u
   const hasRun = () => [...f.timelines.values()].flat().filter(row => row.type === "plugin" && row.kind === "run-summary");
   f.runs.push({ id: "uncertain", issue_id: "issue", agent_id: "owned-agent", status: "running", coalesced_comment_ids: ["orphan"] });
   f.failDiscovery(true);
-  expect(await f.server.rpc(syncBootstrap, {}, f.paseo)).toMatchObject({ status: "unavailable" });
+  expect(await resync(f.server, f.paseo, "remote-workspace")).toMatchObject({ status: "unavailable" });
   expect(hasRun()).toEqual([]);
   f.failDiscovery(false);
   f.comments.push(comment("orphan", "missing-parent", "Unresolved"));
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "remote-workspace");
   expect(hasRun()).toEqual([]);
   f.comments.push(comment("missing-parent", null, "Recovered parent"));
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "remote-workspace");
   const owner = f.native.agents.find(agent => agent.labels["multica.discussion"] === "missing-parent")!;
   expect(hasRun()).toMatchObject([{ data: { rootId: "missing-parent", status: "running" } }]);
   f.runs[0].status = "completed";
   f.failRuns(true);
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "remote-workspace");
   expect(hasRun()).toMatchObject([{ data: { status: "running" } }]);
   expect(f.providerEvents.filter(event => event.type === "session.turn" && event.sessionId === owner.id)).toMatchObject([{ state: "started" }]);
   f.failRuns(false);
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "remote-workspace");
   expect(hasRun()).toMatchObject([{ data: { status: "completed" } }]);
   expect(f.providerEvents.filter(event => event.type === "session.turn" && event.sessionId === owner.id)).toMatchObject([{ state: "started" }, { state: "completed" }]);
 });
@@ -483,7 +483,7 @@ it("uses source timestamps including sub-millisecond precision and timezone offs
   const f = await fixture();
   f.comments.push({ ...comment("early", null, "Early"), created_at: "2020-01-01T01:00:00.000000001+01:00" }, { ...comment("later", null, "Later"), created_at: "2020-01-01T00:00:00.000000002Z" });
   f.runs.push({ id: "precise", issue_id: "issue", agent_id: "owned-agent", status: "completed", delivered_comment_ids: ["later", "early"] });
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "remote-workspace");
   const summaries = [...f.timelines.values()].flat().filter(row => row.id === "multica:run:precise");
   expect(summaries).toMatchObject([{ data: { rootId: "early" } }]);
 });
@@ -497,7 +497,7 @@ it("handles real duplicate task WebSocket invalidations without duplicating boun
   f.signal("task:running", { task_id: "live", issue_id: "issue" });
   f.signal("task:running", { task_id: "live", issue_id: "issue" });
   await expect.poll(() => row(), { timeout: 3000 }).toMatchObject({ data: { status: "running" } });
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "remote-workspace");
   expect(f.timelines.get(thread.id)?.filter(row => row.id === "multica:run:live")).toHaveLength(1);
   expect(f.providerEvents.filter(event => event.type === "timeline.item" && event.item.id === "multica:run:live")).toHaveLength(2);
   expect(Buffer.byteLength(JSON.stringify(row()), "utf8")).toBeLessThan(64 * 1024);
@@ -525,7 +525,7 @@ it("restores cached summaries and activity after native attachment while close, 
   expect(turns()).toHaveLength(1);
   expect(f.requests.every(request => request.method === "GET")).toBe(true);
   f.runs[0].status = "completed";
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "remote-workspace");
   expect(turns()).toMatchObject([{ state: "started" }, { state: "completed" }]);
 });
 
@@ -541,7 +541,7 @@ it("uses generated-comment provenance as first-discovery associations but never 
     { id: "generated-only", issue_id: "issue", agent_id: "owned-agent", status: "completed" },
     { id: "trigger-priority", issue_id: "issue", agent_id: "owned-agent", status: "completed", trigger_comment_id: "root" },
   );
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "remote-workspace");
   const owners = (id: string) => f.native.agents.filter(agent => f.timelines.get(agent.id)?.some(row => row.id === `multica:run:${id}`)).map(agent => agent.labels["multica.discussion"]);
   expect(owners("generated-only")).toEqual(["generated-early"]);
   expect(owners("fixed-main")).toEqual(["main"]);
@@ -588,11 +588,11 @@ it("retains full versioned task metadata without message access across restart a
 
   // Omission carries no replacement evidence; explicit null and empty do.
   f.runs[0].error = null; delete f.runs[0].failure_reason; f.runs[0].relative_work_dir = "";
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "remote-workspace");
   const changed = await f.server.rpc(runOpen, address, f.paseo);
   await expect(f.server.rpc(metadataRead, { ...address, revision: opened.metadataRevision!, offset: 8192 }, f.paseo)).rejects.toThrow("changed");
   f.runs[0].status = "running"; f.runs[0].error = "Stale active snapshot";
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "remote-workspace");
   expect(await f.server.rpc(runOpen, address, f.paseo)).toMatchObject({ metadataRevision: changed.metadataRevision });
   await f.identity("other-user");
   const messageReads = f.requests.filter(request => request.url.includes("/messages")).length;
@@ -622,7 +622,7 @@ it("loads complete run details only on expansion and chunks large ordered source
     { ...input, seq: 5, type: "error", content: "Retry failed" },
     ...Array.from({ length: 205 }, (_, i): RunMessage => ({ ...input, seq: i + 6, type: "text", content: `Step ${i}` })),
   );
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "remote-workspace");
   expect(f.requests.some(request => request.url.includes("/messages"))).toBe(false);
   const opened = await f.server.rpc(runOpen, address, f.paseo);
   expect(opened).toMatchObject({ status: "ready", revision: expect.any(String) });
@@ -646,7 +646,7 @@ it("fills delayed sequence gaps, deduplicates repeated run messages and retains 
   const input = { task_id: "detail", issue_id: "issue" };
   f.messages.push({ ...input, seq: 3, type: "tool_result", output: "Unpaired output" }, { ...input, seq: 1, type: "text", content: "First" }, { ...input, seq: 1, type: "text", content: "First" });
   await f.server.rpc(runOpen, address, f.paseo);
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "remote-workspace");
   // The HTTP service can initially omit a delayed message. A greatest-seen
   // cursor would skip this permanently because seq 3 arrived before seq 2.
   f.messages.push({ ...input, seq: 2, type: "thinking", content: "Delayed thought" });
@@ -737,9 +737,9 @@ it("reconciles a cached original missing after process loss against complete nat
   await f.reconnect();
   // Recover cached originals even while remote reads fail. No history replay.
   f.failDiscovery(true);
-  await restarted.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(restarted.server, f.paseo, "remote-workspace");
   expect(f.timelines.get(thread.id)?.filter(row => row.type === "user_message" && row.messageId === "root")).toHaveLength(1);
-  await Promise.all([restarted.server.rpc(syncBootstrap, {}, f.paseo), restarted.server.rpc(syncBootstrap, {}, f.paseo)]);
+  await Promise.all([resync(restarted.server, f.paseo, "remote-workspace"), resync(restarted.server, f.paseo, "remote-workspace")]);
   expect(f.timelines.get(thread.id)?.filter(row => row.type === "assistant_message")).toHaveLength(2);
   expect(f.native.agents).toHaveLength(2);
 });
@@ -757,7 +757,7 @@ it("restores cached discussions and out-of-order run gaps without fetching every
   const bodies = f.requests.filter(request => request.url.includes("thread=") || request.url.includes("/messages")).length;
   const restarted = f.start();
   await f.reconnect();
-  await restarted.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(restarted.server, f.paseo, "remote-workspace");
   expect(f.requests.filter(request => request.url.includes("thread=") || request.url.includes("/messages"))).toHaveLength(bodies);
   f.messages.push({ ...identity, seq: 2, type: "thinking", content: "Delayed across restart" });
   const opened = await restarted.server.rpc(runOpen, runAddress, f.paseo);
@@ -777,9 +777,9 @@ it("never treats a failed older native page as proof that cached originals are m
   await f.reconnect();
   f.nativeHistory.failOlder = true;
   const before = f.timelines.get(thread.id)?.filter(row => row.type !== "plugin");
-  expect(await restarted.server.rpc(syncBootstrap, {}, f.paseo)).toMatchObject({ status: "unavailable" });
+  expect(await resync(restarted.server, f.paseo, "remote-workspace")).toMatchObject({ status: "unavailable" });
   expect(f.timelines.get(thread.id)?.filter(row => row.type !== "plugin")).toEqual(before);
   f.nativeHistory.failOlder = false;
-  expect(await restarted.server.rpc(syncBootstrap, {}, f.paseo)).toMatchObject({ status: "ready" });
+  expect(await resync(restarted.server, f.paseo, "remote-workspace")).toMatchObject({ status: "ready" });
   expect(f.timelines.get(thread.id)?.filter(row => row.type !== "plugin")).toEqual(before);
 });

@@ -9,7 +9,7 @@ import type { ProviderConnection, ProviderEvent } from "@getpaseo/plugin/server/
 import { workspaceEnable, syncBootstrap } from "../shared/contracts.js";
 import { runObserve } from "../shared/runs.js";
 import { createServerContribution } from "../server/contribute.js";
-import { FakeServer } from "./support/fake-server.js";
+import { FakeServer, resync } from "./support/fake-server.js";
 
 const cleanup: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const dispose of cleanup.splice(0).reverse()) await dispose(); });
@@ -87,7 +87,7 @@ async function fixture() {
   const prompt = (text: string, clientMessageId: string, delivery: "auto" | "steer") => provider.send({ type: "session.prompt", sessionId: thread.id, prompt: { clientMessageId, delivery, input: { type: "message", content: [{ type: "text", text }] } } });
   const interrupt = (requestId: string) => provider.send({ type: "session.interrupt", requestId, sessionId: thread.id });
   const turnEvents = () => events.filter((event): event is Extract<ProviderEvent, { type: "session.turn" }> => event.type === "session.turn" && event.sessionId === thread.id);
-  const sync = () => server.rpc(syncBootstrap, {}, paseo);
+  const sync = () => resync(server, paseo, "workspace");
   const observe = () => server.rpc(runObserve, address, paseo);
   return { server, paseo, events, runs, comments, writes, thread, prompt, interrupt, turnEvents, sync, observe,
     cancel: (handler: typeof cancel) => { cancel = handler; }, save: (handler: typeof save) => { save = handler; } };

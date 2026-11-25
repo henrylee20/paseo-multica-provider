@@ -13,7 +13,7 @@ import { DiscussionMetadata } from "./discussion-metadata.js";
 import { workspaceCatalogs } from "./catalogs.js";
 import { createMulticaProvider } from "./provider.js";
 import { DiscussionLifecycle } from "./discussion-lifecycle.js";
-import { readTaskDescription, observeTaskDescription } from "../shared/description.js";
+import { readTaskDescription } from "../shared/description.js";
 import { descriptionRevision, descriptionSlice, TaskDescriptions } from "./task-description.js";
 import { projectionHistory, ThreadSynchronizer } from "./threads.js";
 import { threadOpen, commentEventDetail, threadResolve } from "../shared/threads.js";
@@ -39,11 +39,12 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     const resolve = createConnectionResolver({ homeDirectory: dependencies.homeDirectory ?? homedir(),
       workingDirectory: dependencies.workingDirectory ?? process.cwd(), environment: dependencies.environment ?? process.env,
       currentProfile: async () => { const state = await settings.read(); return state.status === "ready" ? state.values.profile : undefined; } });
-    server.handle(connectionStatus, async (): Promise<ConnectionStatus> => {
+    server.handle(connectionStatus, async () => {
+      const details = { sync: synchronizer.status(), hidden: (await hiding.list()).objects };
       const state = await settings.read();
-      if (state.status !== "ready") { resolve.invalidate(); await askusers.connectionChanged(); return { status: "invalid_settings", profile: "", source: { api: "none", credentials: "none", app: "none" },
-        message: "Multica 插件设置无效，请重新选择 CLI profile。", loginCommand: "multica login" }; }
-      return resolveStatus(state.values.profile);
+      if (state.status !== "ready") { resolve.invalidate(); await askusers.connectionChanged(); return { ...details, status: "invalid_settings", profile: "", source: { api: "none", credentials: "none", app: "none" },
+        message: "Multica 插件设置无效，请重新选择 CLI profile。", loginCommand: "multica login" } as const; }
+      return { ...await resolveStatus(state.values.profile), ...details };
     });
     async function connection() {
       const state = await settings.read();
@@ -111,7 +112,6 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     server.handle(deliveryMentions, async input => deliveries.mentions(input));
     const descriptions = new TaskDescriptions(store);
     server.registerProvider(createMulticaProvider(store, threads, runs, stops, deliveries, descriptions, lifecycle, askusers));
-    server.handle(observeTaskDescription, input => descriptions.observe(input));
     server.handle(readTaskDescription, async input => {
       // The host authenticates this RPC. Cached history belongs to its persisted
       // connection, even while the CLI is offline, logged out, or using another account.

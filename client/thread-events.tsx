@@ -1,4 +1,3 @@
-import { useSyncStatus } from "./sync-status.js";
 import { useEffect, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { useRpc, type PluginTimelineItemProps } from "@getpaseo/plugin/client";
@@ -7,7 +6,6 @@ import { threadOpen, threadSummarySchema, commentEventSchema, commentEventDetail
 
 export function ThreadSummary({ item, theme }: PluginTimelineItemProps<z.infer<typeof threadSummarySchema>>) {
   const open = useRpc(threadOpen);
-  const sync = useSyncStatus();
   const [message, setMessage] = useState("");
   const [attempt, setAttempt] = useState(0);
   const { connectionKey, issueId, rootId } = item.data;
@@ -18,9 +16,8 @@ export function ThreadSummary({ item, theme }: PluginTimelineItemProps<z.infer<t
     }).catch(() => { if (active) setMessage("无法读取远端历史，已读记录仍保存在本地。"); });
     return () => { active = false; };
   }, [open, connectionKey, issueId, rootId, attempt]);
-  if (!message && sync.tone === "muted") return null;
+  if (!message) return null;
   return <View style={{ gap: 6 }}>
-    {sync.tone !== "muted" ? <Text style={{ color: theme.colors.foregroundMuted }}>{[sync.label, sync.message].filter(Boolean).join(" · ")}</Text> : null}
     {message ? <Text style={{ color: theme.colors.foregroundMuted }}>{message}</Text> : null}
     <Pressable accessibilityRole="button" onPress={() => setAttempt(value => value + 1)}><Text style={{ color: theme.colors.foreground }}>重新读取历史</Text></Pressable>
   </View>;

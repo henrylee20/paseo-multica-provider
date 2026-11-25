@@ -61,9 +61,10 @@ function RunSummaryBody({ item, theme }: Props) {
     };
     setNotice("正在读取执行明细…");
     void refresh();
+    if (["completed", "failed", "cancelled"].includes(status)) return () => { active = false; };
     const timer = setInterval(() => { void refresh(); }, 2000);
     return () => { active = false; clearInterval(timer); };
-  }, [expanded, open, read, readMetadata, connectionKey, issueId, rootId, runId, attempt]);
+  }, [expanded, open, read, readMetadata, connectionKey, issueId, rootId, runId, status, attempt]);
 
   const color = { color: theme.colors.foreground };
   const muted = { color: theme.colors.foregroundMuted };

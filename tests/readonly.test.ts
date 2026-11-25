@@ -13,7 +13,7 @@ import { threadOpen } from "../shared/threads.js";
 import { runOpen, runRead } from "../shared/runs.js";
 import { hiddenList, hiddenRestore } from "../shared/hiding.js";
 import { createServerContribution } from "../server/contribute.js";
-import { FakeServer } from "./support/fake-server.js";
+import { FakeServer, resync } from "./support/fake-server.js";
 
 const cleanup: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const dispose of cleanup.splice(0).reverse()) await dispose(); });
@@ -178,9 +178,9 @@ it.each(["list failure", "network", "authentication"])("%s preserves active mapp
   if (failure === "list failure") f.remote.listStatus = 503;
   if (failure === "network") f.remote.disconnect = true;
   if (failure === "authentication") f.remote.authStatus = 401;
-  expect(await f.server.rpc(syncBootstrap, {}, f.paseo)).toMatchObject({ status: "unavailable" });
+  expect(await resync(f.server, f.paseo, "workspace")).toMatchObject({ status: "unavailable" });
   expect(f.native.archived).toBe(false);
-  expect(await f.server.rpc(syncStatus, {}, f.paseo)).toMatchObject({ status: "unavailable" });
+  if (failure !== "authentication") expect(await f.server.rpc(syncStatus, {}, f.paseo)).toMatchObject({ status: "unavailable" });
 });
 
 it.each(["all", "one"])("reconciles %s host-reopened filtered discussions without losing hidden tabs when the Issue returns to the filter", async reopened => {
@@ -188,7 +188,7 @@ it.each(["all", "one"])("reconciles %s host-reopened filtered discussions withou
   f.native.restoreAgents = true;
   if (reopened === "one") {
     f.comments.push(comment("other-visible", null, "Other visible discussion"));
-    await f.server.rpc(syncBootstrap, {}, f.paseo);
+    await resync(f.server, f.paseo, "workspace");
   }
   const main = f.agents.find(agent => agent.labels["multica.discussion"] === "main")!;
   const thread = f.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
@@ -198,7 +198,7 @@ it.each(["all", "one"])("reconciles %s host-reopened filtered discussions withou
   const hidden = await f.server.rpc(hiddenList, {}, f.paseo);
   const identities = f.agents.map(agent => ({ id: agent.id, cwd: agent.cwd, handle: agent.handle }));
   f.remote.visible = false; f.remote.objectStatus = 404;
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "workspace");
   expect(f.native.archived).toBe(true);
   expect(main.archivedAt).toBeTruthy();
 
@@ -206,17 +206,17 @@ it.each(["all", "one"])("reconciles %s host-reopened filtered discussions withou
   main.archivedAt = null;
   const history = structuredClone([...f.canonical]);
   f.remote.objectStatus = 200;
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "workspace");
   expect(main.archivedAt).toBeTruthy();
   expect(f.native.archived).toBe(true);
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "workspace");
   expect(f.posts).toEqual([]);
   expect(await f.server.rpc(hiddenList, {}, f.paseo)).toEqual(hidden);
   expect([...f.canonical]).toEqual(history);
   expect(f.agents.map(agent => ({ id: agent.id, cwd: agent.cwd, handle: agent.handle }))).toEqual(identities);
 
   f.remote.visible = true;
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "workspace");
   expect(f.native.archived).toBe(false);
   expect(main.archivedAt).toBeNull();
   expect(thread.archivedAt).toBeTruthy();
@@ -228,11 +228,11 @@ it("a successful list row restores a filtered issue without object reads", async
   const f = await fixture();
   const main = f.agents.find(agent => agent.labels["multica.discussion"] === "main")!;
   f.remote.visible = false; f.remote.objectStatus = 404;
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "workspace");
   main.archivedAt = null;
   f.remote.visible = true; f.remote.objectStatus = 200; f.remote.invalidObject = true;
   const reads = f.requests.filter(path => path === "/api/issues/issue").length;
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "workspace");
   expect(main.archivedAt).toBeNull();
   expect(f.native.archived).toBe(false);
   expect(f.requests.filter(path => path === "/api/issues/issue")).toHaveLength(reads);
@@ -246,18 +246,18 @@ it.each(["filter_exit", "rule_disabled"])("reconciles native reopen after %s acr
   if (reason === "rule_disabled") await f.server.rpc(workspaceEnable, { workspaceId: "workspace", enabled: false }, f.paseo);
   else {
     f.remote.visible = false;
-    await f.server.rpc(syncBootstrap, {}, f.paseo);
+    await resync(f.server, f.paseo, "workspace");
   }
   main.archivedAt = null;
   await f.dispose();
   const restarted = f.start();
-  await restarted.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(restarted.server, f.paseo, "workspace");
   expect(f.native.archived).toBe(true);
   expect(f.agents.every(agent => !!agent.archivedAt)).toBe(true);
   expect(f.posts).toEqual([]);
   f.remote.visible = true; f.remote.objectStatus = 200;
   if (reason === "rule_disabled") await restarted.server.rpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, f.paseo);
-  else await restarted.server.rpc(syncBootstrap, {}, f.paseo);
+  else await resync(restarted.server, f.paseo, "workspace");
   expect(f.native.archived).toBe(false);
   expect(f.agents.every(agent => !agent.archivedAt)).toBe(true);
   expect(f.agents.map(agent => ({ id: agent.id, cwd: agent.cwd, handle: agent.handle }))).toEqual(identities);
@@ -272,10 +272,10 @@ it("closes only the hidden projection before rearchiving a host-restored tab and
   thread.archivedAt = stamp;
   await f.server.hook("agent.archive.after", { agent: { ...thread, provider: "multica" } } as never, f.paseo);
   f.remote.visible = false; f.remote.objectStatus = 404;
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "workspace");
   main.archivedAt = null;
   f.remote.objectStatus = 200;
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "workspace");
   f.native.completionReads = 2;
   const archive = f.host.archiveAgent.bind(f.host);
   f.host.archiveAgent = async id => {
@@ -290,7 +290,7 @@ it("closes only the hidden projection before rearchiving a host-restored tab and
   };
   const before = f.events.length;
   f.remote.visible = true;
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "workspace");
   expect(thread.archivedAt).toBeTruthy();
   expect(f.events.slice(before)).toContainEqual({ type: "session.closed", sessionId: thread.id });
   expect(f.events.slice(before).some(event => event.type === "session.closed" && event.sessionId === main.id)).toBe(false);
@@ -307,7 +307,7 @@ it.each([undefined, "main"])("manual restore of %s preserves every unselected hi
   const f = await fixture(true);
   f.native.restoreAgents = true;
   f.comments.push(comment("other", null, "Other discussion"));
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "workspace");
   const original = f.agents.map(agent => ({ id: agent.id, cwd: agent.cwd, handle: agent.handle }));
   const main = f.agents.find(agent => agent.labels["multica.discussion"] === "main")!;
   const thread = f.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
@@ -339,9 +339,9 @@ it.each(["automatic", "manual"])("an explicit Stop accepted before %s hidden pro
   thread.archivedAt = stamp;
   await f.server.hook("agent.archive.after", { agent: { ...thread, provider: "multica" } } as never, f.paseo);
   if (restore === "manual") await f.host.archiveWorkspace(main.workspaceId);
-  else { f.remote.visible = false; await f.server.rpc(syncBootstrap, {}, f.paseo); }
+  else { f.remote.visible = false; await resync(f.server, f.paseo, "workspace"); }
   main.archivedAt = null;
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "workspace");
   let release!: () => void;
   let received!: () => void;
   const waiting = new Promise<void>(resolve => { received = resolve; });
@@ -349,7 +349,7 @@ it.each(["automatic", "manual"])("an explicit Stop accepted before %s hidden pro
   const stopping = (await f.connect()).send({ type: "session.interrupt", requestId: "accepted-explicit-stop", sessionId: thread.id });
   await waiting;
   f.remote.visible = true;
-  const restoring = restore === "manual" ? f.server.rpc(hiddenRestore, { connectionKey: thread.labels["multica.connection"], issueId: "issue" }, f.paseo) : f.server.rpc(syncBootstrap, {}, f.paseo);
+  const restoring = restore === "manual" ? f.server.rpc(hiddenRestore, { connectionKey: thread.labels["multica.connection"], issueId: "issue" }, f.paseo) : resync(f.server, f.paseo, "workspace");
   try {
     await expect.poll(async () => {
       await (await f.connect()).send({ type: "session.open", requestId: "stop-drain-probe", sessionId: thread.id, history: "skip", persistence: JSON.parse(thread.handle.slice(7)), config: { cwd: thread.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });

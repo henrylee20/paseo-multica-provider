@@ -2,10 +2,10 @@ import { useEffect, useState } from "react";
 import { Text, View } from "react-native";
 import { useRpc, useSettings, type PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { copyText, SettingsAction, SettingsCard, SettingsInput, SettingsRow, SettingsSection, SettingsSwitch } from "@getpaseo/plugin/client/ui";
-import { connectionStatus, multicaSettings, workspaceList, workspaceEnable, type ConnectionStatus, type TaskRule } from "../shared/contracts.js";
-import { useSyncStatus } from "./sync-status.js";
+import { connectionStatus, multicaSettings, workspaceList, workspaceEnable, type ConnectionStatus, type TaskRule, type SyncStatus } from "../shared/contracts.js";
+import { describeSync } from "./sync-status.js";
 import { describeRule, WorkspaceRuleEditor } from "./workspace-rule.js";
-import { HiddenObjects } from "./hidden-objects.js";
+import { HiddenObjects, type HiddenObject } from "./hidden-objects.js";
 import { HeaderAction, Notice } from "./ui-kit.js";
 
 type Workspace = { connectionKey: string; id: string; name: string; enabled: boolean; rule: TaskRule };
@@ -20,7 +20,8 @@ export function ConnectionScreen({ host, theme }: PluginSurfaceProps) {
   const readStatus = useRpc(connectionStatus);
   const listWorkspaces = useRpc(workspaceList);
   const enableWorkspace = useRpc(workspaceEnable);
-  const sync = useSyncStatus();
+  const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
+  const [hidden, setHidden] = useState<HiddenObject[]>([]);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   /** Whether the workspace list was read for what is on screen; until then "no workspaces" would be a guess. */
   const [workspacesRead, setWorkspacesRead] = useState(false);
@@ -38,7 +39,7 @@ export function ConnectionScreen({ host, theme }: PluginSurfaceProps) {
 
   useEffect(() => { if (configuredProfile !== undefined) setDraft(configuredProfile); }, [configuredProfile]);
   // Another host or profile may be another identity: never keep showing the previous one's status or rules.
-  useEffect(() => { setStatus(null); setWorkspaces([]); setWorkspacesRead(false); setEditingWorkspace(null); setEditorDirty(false); setCopied(null); }, [host.id, configuredProfile]);
+  useEffect(() => { setStatus(null); setHidden([]); setWorkspaces([]); setWorkspacesRead(false); setEditingWorkspace(null); setEditorDirty(false); setCopied(null); }, [host.id, configuredProfile]);
   useEffect(() => {
     // Refreshes and rule changes keep the current rows on screen until the next reading replaces them.
     let active = true;
@@ -46,7 +47,7 @@ export function ConnectionScreen({ host, theme }: PluginSurfaceProps) {
     async function update() {
       try {
         const next = await readStatus({});
-        if (active) { setStatus(next); setFailure(null); }
+        if (active) { setStatus(next); setSyncStatus(next.sync); setHidden(next.hidden); setFailure(null); }
         if (next.status === "ready") {
           try {
             const result = await listWorkspaces({});
@@ -87,10 +88,10 @@ export function ConnectionScreen({ host, theme }: PluginSurfaceProps) {
   }
 
   const refresh = () => { void settings.reload(); setAttempt(value => value + 1); };
-  const refreshKey = `${host.id}:${configuredProfile}:${attempt}`;
   const text = { color: theme.colors.foreground };
   const statusColor = (value: ConnectionStatus["status"]) => value === "ready" ? theme.colors.statusSuccess
     : value === "offline" || value === "isolated_context" ? theme.colors.statusWarning : theme.colors.statusDanger;
+  const sync = describeSync(syncStatus, failure !== null);
   const syncColor = sync.tone === "danger" ? theme.colors.statusDanger : sync.tone === "warning" ? theme.colors.statusWarning : theme.colors.foreground;
   const syncHint = sync.tone !== "muted" ? sync.message || sync.label : undefined;
   const current = workspaces.filter(workspace => workspace.connectionKey === status?.connectionKey);
@@ -160,6 +161,6 @@ export function ConnectionScreen({ host, theme }: PluginSurfaceProps) {
   return <View>
     {connection}
     {rules}
-    <HiddenObjects theme={theme} refreshKey={refreshKey} />
+    <HiddenObjects theme={theme} objects={hidden} onRefresh={refresh} />
   </View>;
 }

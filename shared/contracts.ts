@@ -1,5 +1,6 @@
 import { defineRpc, defineSettings } from "@getpaseo/plugin";
 import { z } from "zod";
+import { hiddenList } from "./hiding.js";
 
 export const multicaSettings = defineSettings({
   id: "multica", scope: "host", version: 1,
@@ -19,7 +20,6 @@ export const connectionStatusSchema = z.object({
   loginCommand: z.string(),
 });
 export type ConnectionStatus = z.output<typeof connectionStatusSchema>;
-export const connectionStatus = defineRpc({ name: "connection.status", input: z.object({}), output: connectionStatusSchema });
 
 export const syncBootstrap = defineRpc({ name: "sync.bootstrap", input: z.object({}), output: z.object({
   status: z.enum(["ready", "unavailable"]), message: z.string().optional(),
@@ -53,3 +53,5 @@ export const syncStatusSchema = z.object({
 });
 export type SyncStatus = z.output<typeof syncStatusSchema>;
 export const syncStatus = defineRpc({ name: "sync.status", input: z.object({}), output: syncStatusSchema });
+
+export const connectionStatus = defineRpc({ name: "connection.status", input: z.object({}), output: connectionStatusSchema.extend({ sync: syncStatusSchema, hidden: hiddenList.output.shape.objects }) });

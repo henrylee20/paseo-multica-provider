@@ -10,7 +10,7 @@ import { workspaceEnable, syncBootstrap } from "../shared/contracts.js";
 import { deliveryMentions } from "../shared/delivery.js";
 import { threadOpen } from "../shared/threads.js";
 import { createServerContribution } from "../server/contribute.js";
-import { FakeServer } from "./support/fake-server.js";
+import { FakeServer, resync } from "./support/fake-server.js";
 
 const cleanup: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const dispose of cleanup.splice(0).reverse()) await dispose(); });
@@ -130,7 +130,7 @@ it("matches a saved reply to its native input through sync, duplicate dispatch a
   await f.send("root", "A reply", "reply");
   await expect.poll(() => f.canonical.get(thread.id)?.filter(entry => entry.item.clientMessageId === "reply").length).toBe(1);
   await f.send("root", "A reply", "reply");
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "workspace");
   expect(f.posts).toHaveLength(1);
   expect(f.canonical.get(thread.id)?.filter(entry => entry.item.clientMessageId === "reply")).toHaveLength(1);
   const state = JSON.parse(await readFile(join(f.home, "multica-provider/state.json"), "utf8"));
@@ -141,7 +141,7 @@ it("matches a saved reply to its native input through sync, duplicate dispatch a
   const boundary = f.events.length;
   await (await f.connect()).send({ type: "session.open", requestId: "replay", sessionId: thread.id, history: "replay", persistence: JSON.parse(thread.handle.slice(7)), config: { cwd: thread.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
   expect(f.events.slice(boundary).filter(event => event.type === "timeline.item" && event.item.type === "user_message" && event.item.clientMessageId === "reply")).toHaveLength(1);
-  await restarted.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(restarted.server, f.paseo, "workspace");
   expect(f.posts).toHaveLength(1);
 });
 
@@ -174,7 +174,7 @@ it("exhausts bounded retries with one native error and never restores failed inp
   expect(await readFile(join(f.home, "multica-provider/state.json"), "utf8")).not.toContain("Failed text");
   await f.dispose(); const restarted = f.start();
   const boundary = f.events.length;
-  await restarted.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(restarted.server, f.paseo, "workspace");
   expect(f.posts).toHaveLength(3);
   expect(f.events.slice(boundary).some(event => event.type === "timeline.item" && event.item.type === "user_message" && event.item.text === "Failed text")).toBe(false);
 });

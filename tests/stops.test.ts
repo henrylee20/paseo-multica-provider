@@ -14,7 +14,7 @@ import { runObserve, runOpen, runMetadataRead } from "../shared/runs.js";
 import { workspaceEnable, syncBootstrap } from "../shared/contracts.js";
 import { createServerContribution } from "../server/contribute.js";
 
-import { FakeServer } from "./support/fake-server.js";
+import { FakeServer, resync } from "./support/fake-server.js";
 
 const cleanup: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const dispose of cleanup.splice(0).reverse()) await dispose(); });
@@ -175,7 +175,7 @@ it("native Stop cancels exactly the current tab's five unfinished statuses as wh
   const f = await fixture([run("queued", "queued"), run("dispatched", "dispatched"), run("running", "running"), run("waiting", "waiting_local_directory"), run("deferred", "deferred"), run("history", "completed"), run("other-tab", "running", "other")]);
   f.comments.push(comment("other", null, "Other"));
   f.runs[2].coalesced_comment_ids = ["other"];
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "remote-workspace");
   const thread = f.native.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
   const provider = await f.connect();
   await provider.send({ type: "session.interrupt", requestId: "stop", sessionId: thread.id });
@@ -228,7 +228,7 @@ it("reports partial failures natively without expanding the cancellation set", a
   const interrupt = (await f.connect()).send({ type: "session.interrupt", requestId: "close-running", sessionId: thread.id });
   await expect.poll(() => f.requests.some(request => request.url.endsWith("/ok/cancel"))).toBe(true);
   f.runs.push(run("later", "running"));
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "remote-workspace");
   release(); await interrupt;
   expect(f.providerEvents).toContainEqual(expect.objectContaining({ type: "request.failed", requestId: "close-running", error: expect.objectContaining({ code: "stop_incomplete" }) }));
   expect(f.providerEvents.filter(event => event.type === "session.turn" && event.sessionId === thread.id)).toEqual([original]);
@@ -254,7 +254,7 @@ it("settles the interrupted native turn and keeps later runs active without expa
   const interrupt = (await f.connect()).send({ type: "session.interrupt", requestId: "fixed", sessionId: thread.id });
   await expect.poll(() => f.requests.some(request => request.url.endsWith("/first/cancel"))).toBe(true);
   f.runs.push(run("later", "running"));
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "remote-workspace");
   expect(turns()).toEqual([original]);
   release(); await interrupt;
   expect(f.requests.filter(request => request.method === "POST").map(request => request.url)).toEqual(["/api/issues/issue/tasks/first/cancel", "/api/issues/issue/tasks/second/cancel"]);
@@ -266,10 +266,10 @@ it("settles the interrupted native turn and keeps later runs active without expa
   expect(later.turnId).not.toBe(original.turnId);
   expect(f.providerEvents.indexOf(later)).toBeLessThan(f.providerEvents.findIndex(event => event.type === "request.completed" && event.requestId === "fixed"));
   await f.server.rpc(runObserve, JSON.parse(thread.handle.slice(7)).data, f.paseo);
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "remote-workspace");
   expect(turns()).toEqual([original, { ...original, state: "completed" }, later]);
   f.runs.find(run => run.id === "later")!.status = "completed";
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "remote-workspace");
   expect(turns()).toEqual([original, { ...original, state: "completed" }, later, { ...later, state: "completed" }]);
 });
 
@@ -284,9 +284,9 @@ it("does not settle a later native turn when the interrupted turn ended before t
   const interrupt = (await f.connect()).send({ type: "session.interrupt", requestId: "completed-race", sessionId: thread.id });
   await expect.poll(() => f.requests.some(request => request.url.endsWith("/first/cancel"))).toBe(true);
   f.runs[0].status = "completed";
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "remote-workspace");
   f.runs.push(run("later", "running"));
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "remote-workspace");
   const later = turns()[2];
   expect(later).toMatchObject({ state: "started" });
   expect(later.turnId).not.toBe(original.turnId);
@@ -305,7 +305,7 @@ it("never cancels on whole-workspace archive, replay, session lifecycle or conne
   await provider.close();
   await f.dispose();
   const restarted = f.start();
-  await restarted.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(restarted.server, f.paseo, "remote-workspace");
   expect(f.requests.filter(request => request.method !== "GET")).toEqual([]);
   expect(f.runs[0].status).toBe("running");
 });
@@ -313,7 +313,7 @@ it("never cancels on whole-workspace archive, replay, session lifecycle or conne
 it("never cancels when filtering a running Issue out or disabling its workspace rule", async () => {
   const f = await fixture([run("active", "running")]);
   f.matching(false);
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "remote-workspace");
   f.matching(true);
   await f.server.rpc(workspaceEnable, { workspaceId: "remote-workspace", enabled: false }, f.paseo);
   await f.dispose();
@@ -337,7 +337,7 @@ it("does not reactivate a cancelled run when an older in-flight snapshot finishe
   const blocked = new Promise<void>(resolve => { release = resolve; });
   const snapshotReached = new Promise<void>(resolve => { reached = resolve; });
   f.beforeAgents(async () => { reached(); await blocked; });
-  const staleSnapshot = f.server.rpc(syncBootstrap, {}, f.paseo);
+  const staleSnapshot = resync(f.server, f.paseo, "remote-workspace");
   await snapshotReached;
   const thread = f.native.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
   await (await f.connect()).send({ type: "session.interrupt", requestId: "stop", sessionId: thread.id });

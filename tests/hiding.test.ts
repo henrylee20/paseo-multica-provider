@@ -11,7 +11,7 @@ import type { ProviderConnection, ProviderEvent } from "@getpaseo/plugin/server/
 import { z } from "zod";
 import { createServerContribution } from "../server/contribute.js";
 import { syncBootstrap, workspaceEnable } from "../shared/contracts.js";
-import { FakeServer } from "./support/fake-server.js";
+import { FakeServer, resync } from "./support/fake-server.js";
 
 const hiddenList = defineRpc({ name: "hidden.list", input: z.object({}), output: z.object({ objects: z.array(z.object({
   connectionKey: z.string(), issueId: z.string(), workspaceId: z.string(), title: z.string(), cwd: z.string(),
@@ -133,11 +133,11 @@ it("keeps a manually closed Thread hidden through new discovery, filter reentry,
   f.remote.roots.push("new-root");
   f.signal("comment:created"); f.signal("comment:updated");
   await expect.poll(() => f.native.agents.length).toBe(3);
-  await Promise.all([f.server.rpc(syncBootstrap, {}, f.paseo), f.server.rpc(syncBootstrap, {}, f.paseo)]);
-  f.remote.matching = false; await f.server.rpc(syncBootstrap, {}, f.paseo);
-  f.remote.matching = true; await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await Promise.all([resync(f.server, f.paseo, "remote"), resync(f.server, f.paseo, "remote")]);
+  f.remote.matching = false; await resync(f.server, f.paseo, "remote");
+  f.remote.matching = true; await resync(f.server, f.paseo, "remote");
   await f.dispose(); const restarted = await f.start();
-  await restarted.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(restarted.server, f.paseo, "remote");
   const hidden = await restarted.server.rpc(hiddenList, {}, f.paseo);
   expect(hidden.objects).toEqual([expect.objectContaining({ kind: "thread", rootId: "root", agentId: thread.id, cwd: thread.cwd })]);
   expect(thread.archivedAt).toBeTruthy();
@@ -151,7 +151,7 @@ it("keeps an archived workspace hidden and restores only explicitly selected ori
   const workspace = f.native.workspaces[0];
   await f.archiveWorkspace(workspace.id);
   f.remote.roots.push("new-root");
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "remote");
   expect(workspace.archivedAt).toBeTruthy();
   expect(f.native.agents).toHaveLength(2);
   const hidden = await f.server.rpc(hiddenList, {}, f.paseo);
@@ -167,7 +167,7 @@ it("keeps an archived workspace hidden and restores only explicitly selected ori
   expect((await f.server.rpc(hiddenList, {}, f.paseo)).objects).toEqual([expect.objectContaining({ kind: "main" })]);
   expect(await f.server.rpc(hiddenRestore, { connectionKey: selected.connectionKey, issueId: selected.issueId, rootId: selected.rootId }, f.paseo)).toEqual({ status: "ready" });
   expect(f.native.effects).toEqual([`restore:${workspace.id}`, `refresh:${selected.agentId}`]);
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "remote");
   expect(f.native.agents).toHaveLength(3);
   expect(f.native.agents[0].archivedAt).toBeTruthy();
   expect(f.requests.every(request => request.startsWith("GET "))).toBe(true);
@@ -178,8 +178,8 @@ it("restores a manually hidden Thread in its active workspace after filter reent
   const original = f.native.agents.map(agent => ({ id: agent.id, cwd: agent.cwd, handle: agent.handle }));
   const thread = f.native.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
   await f.archiveAgent(thread);
-  f.remote.matching = false; await f.server.rpc(syncBootstrap, {}, f.paseo);
-  f.remote.matching = true; await f.server.rpc(syncBootstrap, {}, f.paseo);
+  f.remote.matching = false; await resync(f.server, f.paseo, "remote");
+  f.remote.matching = true; await resync(f.server, f.paseo, "remote");
   expect(f.native.workspaces[0].archivedAt).toBeNull();
   expect(f.native.agents.find(agent => agent.labels["multica.discussion"] === "main")!.archivedAt).toBeNull();
   const hidden = (await f.server.rpc(hiddenList, {}, f.paseo)).objects[0];
@@ -211,9 +211,9 @@ it("keeps main-discussion hiding independent from session resource close and pre
   expect(await f.server.rpc(hiddenList, {}, f.paseo)).toEqual({ objects: [] });
   await f.archiveAgent(main);
   f.remote.roots.push("new-root");
-  await f.server.rpc(syncBootstrap, {}, f.paseo);
-  f.remote.matching = false; await f.server.rpc(syncBootstrap, {}, f.paseo);
-  f.remote.matching = true; await f.server.rpc(syncBootstrap, {}, f.paseo);
+  await resync(f.server, f.paseo, "remote");
+  f.remote.matching = false; await resync(f.server, f.paseo, "remote");
+  f.remote.matching = true; await resync(f.server, f.paseo, "remote");
   expect(main.archivedAt).toBeTruthy();
   expect(f.native.agents.filter(agent => !agent.archivedAt).map(agent => agent.labels["multica.discussion"])).toEqual(["root", "new-root"]);
   const hidden = (await f.server.rpc(hiddenList, {}, f.paseo)).objects[0];

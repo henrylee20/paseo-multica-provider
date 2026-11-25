@@ -1,6 +1,4 @@
-import { useEffect, useState } from "react";
-import { useRpc } from "@getpaseo/plugin/client";
-import { syncStatus, type SyncStatus } from "../shared/contracts.js";
+import type { SyncStatus } from "../shared/contracts.js";
 import { formatTime } from "./format.js";
 
 const stages: Record<SyncStatus["stage"], string> = { idle: "", connection: "连接验证", workspaces: "Multica 工作区核对", issues: "任务与筛选核对", history: "讨论与执行摘要核对" };
@@ -28,26 +26,4 @@ export function describeSync(status: SyncStatus | null, disconnected: boolean): 
     message: status.message || undefined, lastSuccess: formatTime(status.lastSuccessAt),
     tone: status.status === "unavailable" ? "warning" : "muted",
   };
-}
-
-/** One daemon-owned status is visible from management and every discussion. */
-export function useSyncStatus() {
-  const read = useRpc(syncStatus);
-  const [status, setStatus] = useState<SyncStatus | null>(null);
-  const [disconnected, setDisconnected] = useState(false);
-  useEffect(() => {
-    let active = true;
-    let pending = false;
-    async function update() {
-      if (pending) return;
-      pending = true;
-      try { const value = await read({}); if (active) { setStatus(value); setDisconnected(false); } }
-      catch { if (active) setDisconnected(true); }
-      finally { pending = false; }
-    }
-    void update();
-    const timer = setInterval(() => { void update(); }, 5_000);
-    return () => { active = false; clearInterval(timer); };
-  }, [read]);
-  return describeSync(status, disconnected);
 }
