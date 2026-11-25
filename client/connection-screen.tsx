@@ -33,6 +33,8 @@ export function ConnectionScreen({ host, theme, layout, navigation, scope = "man
   const enableWorkspace = useRpc(workspaceEnable);
   const sync = useSyncStatus();
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  /** Whether the workspace list was read for what is on screen; until then "no workspaces" would be a guess. */
+  const [workspacesRead, setWorkspacesRead] = useState(false);
   const [editingWorkspace, setEditingWorkspace] = useState<string | null>(null);
   const [editorDirty, setEditorDirty] = useState(false);
   const [workspaceFailure, setWorkspaceFailure] = useState<string | null>(null);
@@ -47,7 +49,7 @@ export function ConnectionScreen({ host, theme, layout, navigation, scope = "man
 
   useEffect(() => { if (configuredProfile !== undefined) setDraft(configuredProfile); }, [configuredProfile]);
   // Another host or profile may be another identity: never keep showing the previous one's status or rules.
-  useEffect(() => { setStatus(null); setWorkspaces([]); setEditingWorkspace(null); setEditorDirty(false); setCopied(null); }, [host.id, configuredProfile]);
+  useEffect(() => { setStatus(null); setWorkspaces([]); setWorkspacesRead(false); setEditingWorkspace(null); setEditorDirty(false); setCopied(null); }, [host.id, configuredProfile]);
   useEffect(() => {
     // Refreshes and rule changes keep the current rows on screen until the next reading replaces them.
     let active = true;
@@ -59,7 +61,7 @@ export function ConnectionScreen({ host, theme, layout, navigation, scope = "man
         if (next.status === "ready") {
           try {
             const result = await listWorkspaces({});
-            if (active) { setWorkspaces(result.connectionKey === next.connectionKey ? result.workspaces.map(workspace => ({ ...workspace, connectionKey: result.connectionKey })) : []); setWorkspaceFailure(null); }
+            if (active) { setWorkspaces(result.connectionKey === next.connectionKey ? result.workspaces.map(workspace => ({ ...workspace, connectionKey: result.connectionKey })) : []); setWorkspacesRead(true); setWorkspaceFailure(null); }
           } catch { if (active) setWorkspaceFailure("无法读取 Multica 工作区，请检查连接后刷新。"); }
         } else if (active) setWorkspaces([]);
       } catch {
@@ -168,7 +170,10 @@ export function ConnectionScreen({ host, theme, layout, navigation, scope = "man
           }} /> : null}
       </View>;
     })}
-    {status?.status === "ready" && !current.length && !workspaceFailure ? <SettingsCard>
+    {status?.status === "ready" && !workspacesRead && !workspaceFailure ? <SettingsCard>
+      <SettingsRow label="正在读取 Multica 工作区…" />
+    </SettingsCard> : null}
+    {status?.status === "ready" && workspacesRead && !current.length && !workspaceFailure ? <SettingsCard>
       <SettingsRow label="当前没有可用的 Multica 工作区" hint="在 Multica 加入或创建工作区后点击刷新。" />
     </SettingsCard> : null}
     {status && status.status !== "ready" ? <SettingsCard>

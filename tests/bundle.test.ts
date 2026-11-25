@@ -622,6 +622,23 @@ it("refreshing or toggling a Multica workspace keeps the connection, rules and a
   } finally { h.dispose(); }
 });
 
+it("does not report an empty Multica workspace list before the list has been read", async () => {
+  // The connection reads ready before the workspace list arrives, so an empty list is first a pending read.
+  let release: ((value: unknown) => void) | undefined;
+  const h = await managementHarness((name, input) => name === "workspace.list" ? new Promise(resolve => { release = resolve; }) : name === "connection.status" ? readyStatus : empty(name, input));
+  try {
+    await vi.waitFor(() => { h.render("settings"); expect(release).toBeDefined(); });
+    let page = h.render("settings");
+    expect(page).toContain("已连接");
+    expect(page).toContain("正在读取 Multica 工作区");
+    expect(page).not.toContain("当前没有可用的 Multica 工作区");
+    release!({ connectionKey: "current", workspaces: [] });
+    await vi.waitFor(() => expect(h.render("settings")).toContain("当前没有可用的 Multica 工作区"));
+    page = h.render("settings");
+    expect(page).not.toContain("正在读取 Multica 工作区");
+  } finally { h.dispose(); }
+});
+
 it("the filter editor filters by category or by specific status, collapses long catalogs and saves the visible rule", async () => {
   const labels = Array.from({ length: 10 }, (_, index) => ({ id: `label-${index}`, name: `Label ${index}` }));
   const h = await managementHarness((name, input) => {
