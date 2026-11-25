@@ -7,6 +7,7 @@ import { stopRecordSchema } from "./stop-state.js";
 import { threadSchema } from "./thread-state.js";
 import { deliveryRecordSchema } from "./delivery-state.js";
 import { connectionIdentitySchema, taskRuleSchema } from "../shared/contracts.js";
+import { askuserAttachmentSchema, storedAskuserCardSchema } from "./askuser-state.js";
 import { issueAccessSchema } from "../shared/access.js";
 
 const projectSchema = z.object({ cwd: z.string(), name: z.string(), projectId: z.string().optional(), removed: z.boolean().optional() });
@@ -22,6 +23,8 @@ const issueSchema = z.object({
   runDetails: z.record(z.string(), z.object({ messages: z.array(runMessageSchema) })).default({}),
   stopEpochs: z.record(z.string(), z.number().int().nonnegative()).default({}),
   stopRecords: z.record(z.string(), stopRecordSchema).default({}),
+  askuserAttachments: z.record(z.string(), askuserAttachmentSchema).optional(),
+  askuserCards: z.record(z.string(), storedAskuserCardSchema).optional(),
   deliveries: z.record(z.string(), deliveryRecordSchema).default({}),
   commentSourceTaskIds: z.record(z.string(), z.string()).default({}),
   commentCreatedAt: z.record(z.string(), z.string()).default({}),
@@ -43,6 +46,8 @@ export type IssueMapping = z.infer<typeof issueSchema>;
 /** Atomic, daemon-only state. Credentials are deliberately absent from its schema. */
 export class StateStore {
   private pending: Promise<unknown> = Promise.resolve();
+  private readonly listeners = new Set<(state: LocalState) => void>();
+  subscribe(listener: (state: LocalState) => void) { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
   constructor(readonly directory: string) {}
   async read(): Promise<LocalState> {
     await this.pending;
@@ -61,6 +66,7 @@ export class StateStore {
       const temporary = join(this.directory, "state.json.next");
       await writeFile(temporary, JSON.stringify(validated), { mode: 0o600 });
       await rename(temporary, join(this.directory, "state.json"));
+      for (const listener of this.listeners) listener(validated);
     });
     this.pending = operation.catch(() => {});
     return operation;

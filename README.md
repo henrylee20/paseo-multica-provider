@@ -2,7 +2,7 @@
 
 在 Paseo 中处理 Multica 任务：Multica 工作区对应 Paseo 项目（project），Issue 对应 Paseo 工作区（workspace），Thread 对应 agent tab。每项任务另有本地主讨论，展示任务描述及首次无评论关联的 Run；在主讨论发送会建立新的远端 Thread。
 
-插件已实现规格 [#1](https://github.com/henrylee20/paseo-multica-provider/issues/1) 的 CLI 登录复用、动态筛选、评论历史、Run 展开、发送与停止、隐藏及故障恢复。它直接使用 daemon 主机现有的 Multica CLI 登录，支持云服务和自部署地址，无需新建插件 Token。真实验收的覆盖范围与尚未验证的项目见 [交付验收记录](docs/acceptance.md)；自部署真实服务和原生 queue 控件仍待验证。
+插件已实现规格 [#1](https://github.com/henrylee20/paseo-multica-provider/issues/1) 的 CLI 登录复用、动态筛选、评论历史、Run 展开、发送与停止、隐藏及故障恢复，并加入 [#20](https://github.com/henrylee20/paseo-multica-provider/issues/20) 的结构化提问表单与时间线卡片。它直接使用 daemon 主机现有的 Multica CLI 登录，支持云服务和自部署地址，无需新建插件 Token。真实验收的覆盖范围与尚未验证的项目见 [交付验收记录](docs/acceptance.md)；askuser 本轮仅完成模拟验证，真实自部署与原生界面验收由用户按 [手动清单](docs/askuser-acceptance.md) 执行，原生 queue 控件仍待验证。
 
 ## 构建与安装
 
@@ -29,7 +29,7 @@ npm ci --omit=dev --ignore-scripts
 paseo plugin install /srv/paseo-plugins/paseo-multica-provider-0.1.0
 ```
 
-本地目录安装会引用该目录，**保留目录及其依赖**。本地安装不会自动执行 manifest 的依赖安装命令；上面的 `npm ci` 必须先完成。Paseo 的托管 Git 来源安装才执行 manifest `build`。若 daemon 使用自定义 home，在 Paseo 命令末尾加 `--home /absolute/daemon/home`，确保操作正确实例。插件 ID 为 `multica`；可用 `paseo plugin list --json` 查看加载状态。更新既有安装时，在同一固定目录替换源码、重新运行生产依赖安装，再执行 `paseo plugin reload multica`，不要重复安装相同 ID。请在没有待发送操作时更新，并保留原 daemon home 的插件状态和占位目录。
+本地目录安装会引用该目录，**保留目录及其依赖**。本地安装不会自动执行 manifest 的依赖安装命令；上面的 `npm ci` 必须先完成。Paseo 的托管 Git 来源安装才执行 manifest `build`。若 daemon 使用自定义 home，在 Paseo 命令末尾加 `--home /absolute/daemon/home`，确保操作正确实例。插件 ID 为 `multica`；可用 `paseo plugin list --json` 查看加载状态。更新既有安装时，在已配置的固定目录更新源码、重新运行生产依赖安装，再执行 `paseo plugin reload multica`，不要重复安装相同 ID。目录若是开发工作区，先保留其本地改动与未跟踪文件。reload 会替换 provider 并释放已加载的讨论资源；请在没有相关运行、投递或待核实操作时更新，并保留原 daemon home 的插件状态和占位目录。
 
 ## 复用 CLI 登录
 
@@ -69,6 +69,16 @@ multica setup self-host --server-url https://api.example.com --app-url https://a
 
 原生 **Stop** 和关闭运行中 tab，只取消操作开始时归属此 tab 的全部未结束 Run；不扩大到后来 Run 或其他 tab。跨 Thread 的同一 Run 整体取消。取消与完成竞态保留服务器实际终态；HTTP 成功不等于进程已退出。部分失败会使原生停止失败，在管理页 **停止结果** 查看逐 Run 告警及 **重试此 Run**，关闭 tab 后仍保留；重试不会恢复隐藏讨论。
 
+## 结构化提问卡片
+
+普通评论（含子回复）中的 `askuser.json`（`version: "1"`、附件类型 `application/json`）会在所属 Thread 显示稳定的时间线卡片，保留标题、完整警示说明、题目与选项。当前连接用户可答且卡片未决时，插件提供 Paseo 原生 `QuestionFormCard`；后台同步也会主动加载符合条件的未打开讨论，使宿主根据待决问题显示 `needs_input`，人工隐藏和归档仍优先。卡片支持文本、单选、多选、自定义选项及条件必填校验；提交会生成 Multica 网页格式的 `**确认结果**` 评论，子回复卡片的回答直接指向卡片评论。投递复用 7 天幂等核实与待核实保护；**评论已保存**不等于 Run 已开始，结果未知时从管理页核实原投递。
+
+原生 **Dismiss** 仅本地收起，随后可在时间线点 **重新展开作答**；远端跳过使用独立的 **跳过此卡 → 确认远端跳过** 两步操作。全选填文本表单额外显示一题 **提交确认**：选中「确认提交以上非空回答」后再提交，确认题不进入远端回答正文；即使已填写文字并选中确认，Dismiss 仍仅本地收起。缺少确认的模糊 allow 或原题全空的回答也仅本地收起；含必填题或选项题的表单不增加确认题。每题携带「仅本地收起（不跳过）」按钮文案。条件校验失败会保留表单，宿主显示通用错误，详细条件提示见题目与时间线。首次发现的新卡片在原生加载完成后走 live 权限路径，重启缓存仍静默回放；通知正文包含可读标题和说明，实际系统通知仍待手动验收，详见 [主动加载与通知边界](docs/askuser-wakeup.md)。
+
+已答、已跳过、非指定用户、离线或失权卡片保留只读信息；跳过时间和操作者仅在远端提供时显示。内容较长时点 **读取完整提问** 阅读全部详情。Stop 会清理本地待决表单并阻止尚未发出的旧回答／跳过，不会远端跳过卡片；普通聊天保持普通评论语义。本功能尚未安装或 reload 到用户 daemon，真实原生表单、通知及远端跳过协议仍待 [#26 手动验收](docs/askuser-acceptance.md)。
+
+附件按连接、Issue 和附件 ID 持久缓存，后台同步与打开 Thread 共用下载；只允许当前 API 同源地址，拒绝重定向和超过 64 KiB 的正文。下载或严格 schema 校验失败会显示原因及原评论／附件引用，普通评论继续同步。仅有未确认终态卡片的 Issue 才额外读取一次完整 `timeline`，同时核对直接回复与跳过状态，避免摘要正文截断造成误判。已确认终态继续使用缓存；删除、失权、离线及换账号后的已读卡片可在 **只读历史** 阅读。
+
 ## 同步与问题处理
 
 客户端贡献加载后立即引导同步，失败每 10 秒重试；daemon 建立唯一后台循环，每 15 秒核对。管理页无需先打开，多客户端不会重复建 worker；关闭客户端后已启动的 daemon 继续同步。daemon／插件进程重启后需要**至少一次客户端连接**重新引导，不承诺没有客户端时无人值守自启。管理页和讨论中显示同步阶段、最后完成时间（本地时间）及缓存提示；WebSocket 重连还需分页快照核对。
@@ -91,6 +101,7 @@ multica setup self-host --server-url https://api.example.com --app-url https://a
 ## 文档与开发依据
 
 - [交付验收记录](docs/acceptance.md)：版本、实际结果、自动化范围和未验证项。
+- [askuser 验收与手动清单](docs/askuser-acceptance.md)、[主动加载与通知边界](docs/askuser-wakeup.md)。
 - [GitHub 规格正文](docs/github-spec.md)、[首版规格](docs/spec.md)、[实现计划](docs/implementation-plan.md)。
 - [术语表](GLOSSARY.md)、[设计与原始证据](docs/design.md)、[实现上下文](CONTEXT.md)。
 - [架构决定](docs/adr)：[Thread](docs/adr/0001-thread-as-paseo-session.md)、[目录](docs/adr/0002-use-existing-paseo-with-placeholder-directories.md)、[Run 归属](docs/adr/0003-unique-run-display-ownership.md)、[Stop](docs/adr/0004-native-interrupt-stops-remote-run.md)、[历史](docs/adr/0005-preserve-native-comment-history.md)、[身份](docs/adr/0006-isolate-connection-identities.md)、[幂等恢复](docs/adr/0007-retry-comments-only-with-deduplication.md)、[CLI 登录](docs/adr/0008-reuse-multica-cli-authentication.md)、[提及选择器](docs/adr/0009-composer-mention-picker.md)。

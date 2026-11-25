@@ -1,6 +1,12 @@
 # 交付与组合验收
 
-记录日期：2026-11-25（Asia/Shanghai）。本记录区分真实 Multica 云服务、实际 Paseo daemon 配合隔离服务、公开边界自动化、以及尚未执行的验收。通过一层不代表其他层已通过。目标用户选择的真实测试 Issue 为 [HENR-2](https://multica.ai/henrylee/issues/HENR-2)；未提供真实自部署 profile，因此不能宣称自部署端到端验收完成。
+记录日期：2026-11-25（Asia/Shanghai）。本记录区分真实 Multica 云服务、实际 Paseo daemon 配合隔离服务、公开边界自动化、以及尚未执行的验收。通过一层不代表其他层已通过。此前 #1 及后续修复的真实测试 Issue 为 [HENR-2](https://multica.ai/henrylee/issues/HENR-2)；这些历史证据不构成 #20 askuser 的真实验收。
+
+## askuser（#20）：本轮模拟验证
+
+用户明确要求“就Mock测试即可，之后的真实测试我手动执行。”因此 #21–#25 的功能只完成公开贡献／provider／RPC、隔离 HTTP／WebSocket／CLI／原生宿主替身和编译后客户端测试。本轮没有连接真实 daemon 或 Multica 服务，没有安装、reload、操作原生界面或执行真实写入。[askuser 验收记录与手动清单](askuser-acceptance.md) 列出最终检查、覆盖矩阵、宿主限制及待采集协议证据；[#26](https://github.com/henrylee20/paseo-multica-provider/issues/26) 的真实验收保持未完成。
+
+manifest 仍为 `requirements.paseo = >=0.15.3`、没有最高版本，不修改 Paseo 核心。真实验收以用户当前 `0.17.4` daemon 和目标自部署测试 Issue 为准；本轮产物需要用户手动更新已安装源码后再部署验证。以下“交付版本与构建”及组合矩阵保留 #1 与后续修复的原证据、版本和测试数量；#20 的最新结果单列于上述清单，不将历史安装或云服务结果记作 askuser 通过。
 
 ## 交付版本与构建
 
@@ -90,3 +96,11 @@ Run 任务元数据回归覆盖执行前失败、空／不可用执行消息、�
 原评审发现 3 项 P2：Run 任务错误丢失、远端执行路径未展示、手动恢复意外撤销其他讨论的隐藏。修复保留完整来源元数据及有界读取，使手动与自动恢复共享隐藏保护。原评审 agent 定向复核确认全部解决；最终实际宿主组合复测另行验证元数据及手动恢复。
 
 复核汇总：Standards 原 1 项低影响违规与 2 项判断性重复均已解决，剩余 0；Spec 原 3 项 P2 均已解决，剩余 0。
+
+## askuser 本地收起与跳过（#23，模拟验证）
+
+本轮只运行公开服务端贡献／provider／RPC 与宿主编译客户端 bundle 的隔离测试，没有安装或 reload 插件，没有操作真实 daemon 或 Multica 服务。覆盖本地 Dismiss（含全选填文本的空 `allow`）、同步／重启后保持收起、显式重展、跳过二次确认与取消零请求、失败保真、指定用户／连接／归档隐藏检查、同卡并发和原 Stop epoch 栅栏。
+
+`askuser-skip` 的真实响应码与正文仍未采样。模拟服务使用成功的空 `204` 响应；客户端不依赖返回 JSON，服务端在成功 HTTP 响应后尽力读取完整 timeline 的 `askuser_skipped_at`／`askuser_skipped_by`，然后持久化 `skipped`。`202 Accepted` 仅在 timeline 确认已跳过时进入终态，否则如实报告待核对。没有远端元数据时不生成本地时间戳或推测操作者；HTTP 4xx／5xx 与网络断线不标记已跳过、不清除原生权限，错误明确要求核对远端最后状态。失败后没有自动重发跳过请求。真实响应及原生视觉行为需在 #26 手动验收中核实。
+
+固定宿主的全选填文本表单在已经输入文字后，Dismiss 与 Submit 产生相同的非空 `allow`，插件无法区分。本轮只保证规格中的全空 `allow` 按本地收起处理；不宣称已经解决或实测所有非空 Dismiss 场景。

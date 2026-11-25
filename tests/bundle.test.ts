@@ -287,7 +287,7 @@ it("the native thread renderer lazily opens history and comment events render as
   });
   const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {},
     addTimelineRenderer: (renderer: any) => { renderers.push(renderer); return () => {}; } });
-  expect(renderers.map(renderer => renderer.kind)).toEqual(["task-description", "thread", "run-summary", "comment-event", "comment-delivery"]);
+  expect(renderers.map(renderer => renderer.kind)).toEqual(["task-description", "thread", "run-summary", "comment-event", "askuser", "comment-delivery"]);
   expect(calls).toEqual([]);
   const address = { connectionKey: "connection", issueId: "issue", rootId: "root" };
   const theme = { colors: { foreground: "black", foregroundMuted: "gray" } };
@@ -854,4 +854,162 @@ it("the native discussion shows the same daemon sync failure and cached-history 
     expect(render()).toContain(`上次完成核对：${formatTime("2026-11-24T10:00:00Z")}`);
     for (const cleanup of unmount) cleanup();
   } finally { dispose(); }
+});
+
+it.each([
+  ["pending", {}, ["待答"]],
+  ["pending", { delivery: { status: "pending_verification", clientMessageId: "answer", message: "响应无法核实" } }, ["待核实", "响应无法核实", "核实原投递", "重新发送"]],
+  ["answered", { answer: { commentId: "reply", content: "**确认结果**\n\n1. **理由**：已核对", actorId: "reviewer", actorType: "member" } }, ["已答", "reviewer", "已核对"]],
+  ["skipped", { skippedAt: "2026-11-24T10:00:00Z", skippedBy: "operator" }, ["已跳过", "operator"]],
+  ["invalid", { error: "附件超过 64 KiB 上限。" }, ["不可解析", "64 KiB"]],
+  ["pending", { readOnly: true, readOnlyReason: "仅指定用户 reviewer 可作答。" }, ["只读", "reviewer"]],
+  ["pending", { offline: true, readOnly: true }, ["离线缓存", "只读"]],
+])("the host-compiled askuser renderer shows %s with its warning, questions and source references", async (status, extra, labels) => {
+  const renderers: PluginTimelineRendererContribution[] = [];
+  const setup = await bundledContribution("../index.client.tsx", {
+    react: { useEffect: () => {}, useState: (value: unknown) => [value, () => {}] },
+    "@getpaseo/plugin/client": { useRpc: () => async () => ({}) },
+    "@getpaseo/plugin/client/ui": { Markdown: ({ children }: { children: string }) => children },
+    "react-native": { View: "View", Text: "Text" },
+  });
+  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {},
+    addTimelineRenderer: (renderer: PluginTimelineRendererContribution) => { renderers.push(renderer); return () => { renderers.splice(renderers.indexOf(renderer), 1); }; } });
+  try {
+    const renderer = renderers.find(value => value.kind === "askuser" && value.version === 1);
+    expect(renderer).toBeDefined();
+    const data = renderer!.schema.parse({ connectionKey: "connection", issueId: "issue", rootId: "root", commentId: "card-comment", attachmentId: "file", revision: "v1",
+      title: "发布确认", description: "警示：此操作会影响生产环境。", questions: [{ id: "reason", type: "text", title: "理由" }], status, readOnly: false, offline: false, truncated: false, ...extra });
+    const text = renderedText((renderer!.Component as (props: unknown) => unknown)({ item: { type: "plugin", kind: "askuser", version: 1, data }, theme: { colors: { foreground: "black", foregroundMuted: "gray", statusDanger: "red" } } }));
+    for (const label of ["发布确认", "警示：此操作会影响生产环境。", "理由", "card-comment", "file", ...labels]) expect(text).toContain(label);
+  } finally { dispose(); }
+  expect(renderers).toEqual([]);
+});
+
+it("the compiled askuser card loads complete warning details only on explicit read and follows every page", async () => {
+  const renderers: PluginTimelineRendererContribution[] = [];
+  const actions: Array<{ actionLabel: string; onPress(): void }> = [];
+  const calls: Array<{ name: string; input: unknown }> = [];
+  const state: unknown[] = []; let cursor = 0;
+  const base = { connectionKey: "connection", issueId: "issue", rootId: "root", commentId: "comment", attachmentId: "file", revision: "v1", title: "确认", description: "警示摘要", questions: [], status: "pending", readOnly: false, offline: false, truncated: true };
+  const full = JSON.stringify({ ...base, description: "完整警示说明：请先核对生产环境。", truncated: false });
+  const setup = await bundledContribution("../index.client.tsx", {
+    react: { useEffect: () => {}, useState: (initial: unknown) => { const index = cursor++; if (!(index in state)) state[index] = initial; return [state[index], (value: unknown) => { state[index] = value; }]; } },
+    "@getpaseo/plugin/client": { useRpc: (contract: { name: string }) => async (input: { offset: number }) => { calls.push({ name: contract.name, input }); return input.offset === 0 ? { text: full.slice(0, 110), nextOffset: 110 } : { text: full.slice(110), nextOffset: null }; } },
+    "@getpaseo/plugin/client/ui": { Markdown: ({ children }: { children: string }) => children, SettingsAction: (props: typeof actions[number]) => { actions.push(props); return props.actionLabel; } },
+    "react-native": { View: "View", Text: "Text" },
+  });
+  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: PluginTimelineRendererContribution) => { renderers.push(renderer); return () => {}; } });
+  try {
+    const renderer = renderers.find(value => value.kind === "askuser")!;
+    const render = () => { cursor = 0; actions.length = 0; return renderedText((renderer.Component as (props: unknown) => unknown)({ item: { data: renderer.schema.parse(base) }, theme: { colors: { foreground: "fg", foregroundMuted: "muted", statusDanger: "danger" } } })); };
+    expect(render()).toContain("警示摘要"); expect(calls).toEqual([]);
+    actions[0].onPress();
+    await vi.waitFor(() => expect(render()).toContain("完整警示说明：请先核对生产环境。"));
+    expect(calls).toEqual([0, 110].map(offset => ({ name: "askuser.read", input: { connectionKey: "connection", issueId: "issue", commentId: "comment", attachmentId: "file", revision: "v1", offset } })));
+  } finally { dispose(); }
+});
+
+it("compiled cache-only history renders a complete askuser card without requesting CLI or remote card data", async () => {
+  const h = await managementHarness((name, input) => {
+    if (name === "issue.history.list") return { issues: [{ connectionKey: "old", issueId: "issue", workspaceId: "workspace", title: "History", status: "inaccessible", revision: "history-v1" }] };
+    if (name === "issue.history.read") return { text: JSON.stringify({ title: "History", description: "", discussions: [], runs: [], deliveries: [], stops: [], askuserCards: [
+      { connectionKey: "old", issueId: "issue", rootId: "root", commentId: "card", attachmentId: "file", revision: "v1", title: "历史提问", description: "完整历史警示说明", questions: [{ id: "reason", title: "说明原因", type: "text" }], status: "answered", readOnly: true, offline: true, truncated: false, answer: { commentId: "answer", actorId: "original-user", content: "已确认完整回答" } },
+      { connectionKey: "old", issueId: "issue", rootId: "root", commentId: "skipped", attachmentId: "skipped-file", revision: "v1", title: "历史跳过卡片", description: "跳过前的完整警示", questions: [{ id: "scope", title: "历史范围", type: "single", options: [{ id: "canary", label: "仅灰度" }] }], status: "skipped", skippedBy: "skip-operator", readOnly: true, offline: true, truncated: false },
+      { connectionKey: "old", issueId: "issue", rootId: "root", commentId: "pending", attachmentId: "pending-file", revision: "v1", title: "历史待答卡片", description: "待答完整警示", questions: [{ id: "reason", title: "补充理由", type: "text", required: false }], status: "pending", collapsed: true, readOnly: true, offline: true, truncated: false },
+    ] }), nextOffset: null };
+    return empty(name, input) ?? { status: "offline", message: "offline", profile: "", source: { api: "none", credentials: "none", app: "none" }, loginCommand: "multica login" };
+  });
+  try {
+    await vi.waitFor(() => expect(h.render()).toContain("History")); h.action("读取缓存历史").onPress();
+    await vi.waitFor(() => expect(h.render()).toContain("历史提问"));
+    for (const text of ["完整历史警示说明", "说明原因", "只读", "离线缓存", "original-user", "已确认完整回答", "历史跳过卡片", "跳过前的完整警示", "历史范围", "仅灰度", "已跳过", "skip-operator", "历史待答卡片", "待答完整警示", "补充理由", "已在本地收起"]) expect(h.render()).toContain(text);
+    expect(h.calls.some(call => call.name.startsWith("askuser."))).toBe(false);
+  } finally { h.dispose(); }
+});
+
+async function askuserActionHarness(answer: Answer, extra: Record<string, unknown> = {}) {
+  const tree = componentTree();
+  const calls: Array<{ name: string; input: unknown }> = [];
+  const buttons: Array<{ accessibilityLabel: string; disabled?: boolean; onPress(): unknown }> = [];
+  const renderers: PluginTimelineRendererContribution[] = [];
+  const rpcs = new Map<string, (input: unknown) => Promise<unknown>>();
+  const base = { connectionKey: "connection", issueId: "issue", rootId: "root", commentId: "card", attachmentId: "file", revision: "v1", title: "发布确认", questions: [{ id: "reason", title: "理由", type: "text" }], status: "pending", readOnly: false, offline: false, truncated: false, collapsed: true, ...extra };
+  const setup = await bundledContribution("../index.client.tsx", {
+    react: tree.react,
+    "@getpaseo/plugin/client": { useRpc: (contract: { name: string }) => {
+      if (!rpcs.has(contract.name)) rpcs.set(contract.name, async input => { calls.push({ name: contract.name, input }); return contract.name === "askuser.observe" ? base : answer(contract.name, input); });
+      return rpcs.get(contract.name);
+    } },
+    "@getpaseo/plugin/client/ui": { Markdown: ({ children }: { children: unknown }) => children },
+    "react-native": { View: "View", Text: "Text", Pressable: (props: typeof buttons[number] & { children: unknown }) => { buttons.push(props); return props.children; } },
+  });
+  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: PluginTimelineRendererContribution) => { renderers.push(renderer); return () => {}; } });
+  const renderer = renderers.find(value => value.kind === "askuser")!;
+  const render = () => { buttons.length = 0; return tree.render(createElement(renderer.Component as FunctionComponent<any>, { item: { data: renderer.schema.parse(base) }, theme: { colors: { foreground: "fg", foregroundMuted: "muted", statusDanger: "danger" } } })); };
+  return { calls, buttons, render, button: (label: string) => { render(); const button = buttons.find(button => button.accessibilityLabel === label); expect(button, label).toBeDefined(); return button!; }, dispose: () => { tree.unmount(); dispose(); } };
+}
+
+it("the compiled askuser card reopens locally collapsed forms and requires a separate confirmation before remote skip", async () => {
+  const h = await askuserActionHarness((name) => ({ connectionKey: "connection", issueId: "issue", rootId: "root", commentId: "card", attachmentId: "file", revision: "v2", title: "发布确认", questions: [], status: name === "askuser.skip" ? "skipped" : "pending", collapsed: false, readOnly: name === "askuser.skip", offline: false, truncated: false }));
+  try {
+    expect(h.render()).toContain("已在本地收起");
+    h.button("跳过此卡").onPress(); expect(h.render()).toContain("此操作会在 Multica 跳过此卡");
+    h.button("取消").onPress(); h.render();
+    expect(h.calls.filter(call => call.name === "askuser.skip")).toEqual([]);
+    h.button("重新展开作答").onPress();
+    await vi.waitFor(() => expect(h.calls.filter(call => call.name === "askuser.reopen")).toHaveLength(1));
+    await vi.waitFor(() => expect(h.render()).not.toContain("已在本地收起"));
+    expect(h.calls.find(call => call.name === "askuser.reopen")?.input).toEqual({ connectionKey: "connection", issueId: "issue", commentId: "card", attachmentId: "file" });
+    h.button("跳过此卡").onPress(); h.button("确认远端跳过").onPress();
+    await vi.waitFor(() => expect(h.render()).toContain("已跳过"));
+    expect(h.calls.filter(call => call.name === "askuser.skip")).toEqual([{ name: "askuser.skip", input: { connectionKey: "connection", issueId: "issue", commentId: "card", attachmentId: "file", confirmed: true } }]);
+  } finally { h.dispose(); }
+});
+
+it("the compiled card reports a failed skip honestly, blocks repeated clicks, and requires confirmation again for retry", async () => {
+  let reject!: (error: Error) => void;
+  const h = await askuserActionHarness(() => new Promise((_, fail) => { reject = fail; }));
+  try {
+    h.render(); await Promise.resolve();
+    h.button("跳过此卡").onPress();
+    const confirm = h.button("确认远端跳过"); confirm.onPress(); confirm.onPress();
+    expect(h.calls.filter(call => call.name === "askuser.skip")).toHaveLength(1);
+    reject(new Error("跳过未确认（HTTP 403），请核对权限。"));
+    await vi.waitFor(() => expect(h.render()).toContain("HTTP 403"));
+    expect(h.render()).toContain("待答"); expect(h.render()).not.toContain("已跳过");
+    expect(h.buttons.some(button => button.accessibilityLabel === "确认远端跳过")).toBe(false);
+    h.button("跳过此卡").onPress(); h.button("取消").onPress();
+    expect(h.calls.filter(call => call.name === "askuser.skip")).toHaveLength(1);
+  } finally { h.dispose(); }
+});
+
+it.each([{ readOnly: true, readOnlyReason: "仅指定用户 other 可作答。" }, { readOnly: true, offline: true }, { status: "answered" }, { status: "skipped" }, { status: "invalid" }])("the compiled card hides reopen and skip controls for read-only or terminal cards: %j", async extra => {
+  const h = await askuserActionHarness(() => { throw new Error("Unexpected action"); }, extra);
+  try {
+    h.render(); await Promise.resolve(); h.render();
+    expect(h.buttons).toEqual([]);
+    expect(h.calls.some(call => call.name === "askuser.skip" || call.name === "askuser.reopen")).toBe(false);
+  } finally { h.dispose(); }
+});
+
+it("the compiled uncertain-answer card opens delivery management and explains conditions with question titles and labels", async () => {
+  const renderers: PluginTimelineRendererContribution[] = [];
+  const pressables: Array<{ onPress(): void }> = [];
+  const opened: unknown[] = [];
+  const tree = componentTree();
+  const data = { connectionKey: "connection", issueId: "issue", rootId: "root", commentId: "card", attachmentId: "file", revision: "revision", title: "发布确认", status: "pending", readOnly: true, offline: false, truncated: false,
+    delivery: { status: "pending_verification", clientMessageId: "answer", message: "响应丢失" },
+    questions: [{ id: "choice", type: "single", title: "发布范围", options: [{ id: "all", label: "全量" }, { id: "small", label: "灰度" }] }, { id: "detail", type: "text", title: "理由", required_when: { question_id: "choice", option_ids: ["all"] } }] };
+  const setup = await bundledContribution("../index.client.tsx", {
+    react: tree.react, "@getpaseo/plugin/client": { useRpc: () => async () => data },
+    "@getpaseo/plugin/client/ui": { Markdown: ({ children }: { children: string }) => children },
+    "react-native": { View: "View", Text: "Text", Pressable: (props: typeof pressables[number] & { children: unknown }) => { pressables.push(props); return props.children; } },
+  });
+  const dispose = setup({ rpc: async () => ({ status: "ready" }), openScreen: (value: unknown) => { opened.push(value); }, addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: PluginTimelineRendererContribution) => { renderers.push(renderer); return () => {}; } });
+  try {
+    const renderer = renderers.find(value => value.kind === "askuser")!;
+    const text = tree.render(createElement(renderer.Component as FunctionComponent<any>, { item: { type: "plugin", kind: "askuser", version: 1, data: renderer.schema.parse(data) }, theme: { colors: {} } }));
+    expect(text).toContain("「发布范围」选择「全量」时必填"); expect(text).toContain("待核实");
+    expect(pressables).toHaveLength(1); pressables[0].onPress(); expect(opened).toEqual([{ screenId: "management" }]);
+  } finally { tree.unmount(); dispose(); }
 });

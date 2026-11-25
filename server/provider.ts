@@ -1,3 +1,6 @@
+import { askuserPermission, askuserPermissionId, isLocalAskuserDismiss } from "./askuser-answers.js";
+import type { AskuserCardData } from "../shared/askuser.js";
+import type { AskUsers } from "./askuser.js";
 import { randomUUID } from "node:crypto";
 import { isActiveRun, runSummary, type RunSynchronizer } from "./runs.js";
 import { z } from "zod";
@@ -16,10 +19,10 @@ import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
 const persistenceSchema = z.object({ version: z.literal(1), data: z.object({
   connectionKey: z.string(), issueId: z.string(),
 }).and(z.discriminatedUnion("discussion", [z.object({ discussion: z.literal("main") }), z.object({ discussion: z.literal("thread"), rootId: z.string() })])) });
-const supported = ["prompt.message", "prompt.steer", "session.persistence", "session.list", "timeline.plugin", "session.archive", "session.unarchive"];
+const supported = ["prompt.message", "prompt.steer", "session.persistence", "session.list", "timeline.plugin", "session.archive", "session.unarchive", "permission"];
 
 /** A Multica discussion projection, never a local code execution engine. */
-export function createMulticaProvider(store: StateStore, threads: ThreadSynchronizer, runs: RunSynchronizer, stops: StopCoordinator, deliveries: CommentDelivery, descriptions: TaskDescriptions, lifecycle: DiscussionLifecycle): ProviderRegistration {
+export function createMulticaProvider(store: StateStore, threads: ThreadSynchronizer, runs: RunSynchronizer, stops: StopCoordinator, deliveries: CommentDelivery, descriptions: TaskDescriptions, lifecycle: DiscussionLifecycle, askusers: AskUsers): ProviderRegistration {
   return {
     id: providerId, label: "Multica", description: "Multica 任务讨论（目录仅为本地占位目录）",
     status: async () => ({ available: true }),
@@ -32,6 +35,8 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
       const runSubscriptions = new Map<string, () => void>();
       const descriptionSubscriptions = new Map<string, () => void>();
       const subscriptions = new Map<string, () => void>();
+      const permissions = new Map<string, Map<string, AskuserCardData>>();
+      const askuserSubscriptions = new Map<string, () => void>();
       const deliverySubscriptions = new Map<string, () => void>();
       const activeTurns = new Map<string, string>();
       const lifecycleSubscriptions = new Map<string, () => void>();
@@ -40,6 +45,9 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
       let closed = false;
       const emit = (event: ProviderEvent) => { if (!closed) for (const listener of listeners) listener(event); };
       const releaseSession = (sessionId: string) => {
+        for (const permissionId of permissions.get(sessionId)?.keys() ?? []) emit({ type: "session.permission_resolved", sessionId, permissionId });
+        permissions.delete(sessionId);
+        askuserSubscriptions.get(sessionId)?.(); askuserSubscriptions.delete(sessionId);
         sessions.delete(sessionId);
         emittedRows.delete(sessionId);
         originalIdentities.delete(sessionId);
@@ -142,6 +150,31 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
             }
             const address = { connectionKey: parsed.data.data.connectionKey, issueId: parsed.data.data.issueId, rootId: parsed.data.data.discussion === "thread" ? parsed.data.data.rootId : "main" };
             addresses.set(input.sessionId, address);
+            let opening = true;
+            const deferredFresh = new Set<string>();
+            const projectPermission = (card: AskuserCardData, announceFresh = false) => {
+              if (!capabilities.includes("permission")) return;
+              const permissionId = askuserPermissionId(card);
+              const pending = permissions.get(input.sessionId) ?? new Map();
+              permissions.set(input.sessionId, pending);
+              if (card.status === "pending" && !card.collapsed && !card.readOnly && !lifecycle.unavailable(address)) {
+                if (askusers.isFresh(card) && opening) { deferredFresh.add(permissionId); askusers.deferFresh(card); }
+                // Ready only finishes provider replay. The native manager may still
+                // be registering this session until import/listCommands returns.
+                if (deferredFresh.has(permissionId) && !announceFresh) return;
+                if (!pending.has(permissionId)) {
+                  pending.set(permissionId, card); emit({ type: "session.permission", sessionId: input.sessionId, request: askuserPermission(card) });
+                  deferredFresh.delete(permissionId); askusers.projectedFresh(card);
+                }
+              } else if (pending.delete(permissionId)) emit({ type: "session.permission_resolved", sessionId: input.sessionId, permissionId });
+            };
+            const projectAskuser = (item: import("@getpaseo/plugin/server/provider").ProviderTimelineItem, card: AskuserCardData, announceFresh: boolean) => {
+              emit({ type: "timeline.item", sessionId: input.sessionId, item });
+              projectPermission(card, announceFresh);
+            };
+            askuserSubscriptions.set(input.sessionId, askusers.subscribe(address, projectAskuser));
+            for (const item of await askusers.rows(address)) emit({ type: "timeline.item", sessionId: input.sessionId, item });
+            for (const card of await askusers.cards(address)) projectPermission(card);
             lifecycleSubscriptions.set(input.sessionId, lifecycle.subscribe(address, async () => {
               // A Stop accepted before this resource began closing retains its
               // result before session.closed rejects outstanding host requests.
@@ -197,6 +230,7 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
             });
             runSubscriptions.set(input.sessionId, runs.subscribe(address, owned => projectRuns(owned)));
             emit({ type: "session.ready", requestId: input.requestId, sessionId: input.sessionId });
+            opening = false;
             return;
           }
           if (input.type === "session.close") {
@@ -211,7 +245,8 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
               try {
                 const address = addresses.get(input.sessionId);
                 if (!address || lifecycle.unavailable(address)) throw new Error("Discussion unavailable");
-                await stops.interrupt(address);
+                try { await stops.interrupt(address); }
+                finally { await askusers.collapsePending(address); }
                 if (interruptedTurnId) interruptSettlements.get(input.sessionId)?.(interruptedTurnId);
                 emit({ type: "request.completed", requestId: input.requestId });
               } catch (error) {
@@ -228,6 +263,19 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
             emit({ type: "request.completed", requestId: input.requestId });
             return;
           }
+          if (input.type === "session.permission") {
+            const card = permissions.get(input.sessionId)?.get(input.permissionId);
+            if (!card) throw new Error("提问权限不可用。");
+            const address = addresses.get(input.sessionId);
+            if (!address || lifecycle.unavailable(address)) throw new Error("讨论不可写。");
+            const target = { connectionKey: address.connectionKey, issueId: address.issueId, commentId: card.commentId, attachmentId: card.attachmentId };
+            if (input.response.behavior === "deny" || isLocalAskuserDismiss(card, input.response.updatedInput)) { await askusers.collapse(target); return; }
+            const record = await askusers.submit(target, input.response.updatedInput, deliveries);
+            const row = deliveryInput(record);
+            if (rememberOriginal(input.sessionId, row)) emit({ type: "timeline.item", sessionId: input.sessionId, item: projectRow(address, row) });
+            if (permissions.get(input.sessionId)?.delete(input.permissionId)) emit({ type: "session.permission_resolved", sessionId: input.sessionId, permissionId: input.permissionId });
+            return;
+          }
           if (input.type === "session.prompt") {
             // Capture before awaiting durability: returning a replacement cycle's ID
             // violates the host's actual changed-turn admission guard.
@@ -237,6 +285,9 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
               if (!address) throw new Error("请在 Multica 管理页启用任务工作区后打开已导入的讨论。");
               if (lifecycle.unavailable(address)) throw new Error("此隐藏讨论正在核对本地归档状态，请稍后重试。");
               const record = await deliveries.admit(address, input.prompt);
+              // Newer hosts may request local permission clearing on chat. This
+              // is local collapse only; the prompt remains an ordinary comment.
+              if ("clearPendingPermissions" in input.prompt && input.prompt.clearPendingPermissions === true) await askusers.collapsePending(address);
               emit({ type: "timeline.item", sessionId: input.sessionId, item: projectRow(address, deliveryInput(record)) });
               emit({ type: "session.prompt_result", sessionId: input.sessionId, clientMessageId: input.prompt.clientMessageId,
                 result: input.prompt.delivery === "steer" && capturedTurnId ? { type: "steer", turnId: capturedTurnId } : { type: "completed" } });

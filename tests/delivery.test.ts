@@ -388,8 +388,11 @@ it("recovers a saved comment after a lost response and restart using its authori
 
 it("retries a missing receipt only after fresh positive proof, preserving key, content and original native input", async () => {
   const f = await fixture(false, true);
-  await f.send("root", "Capability anchor", "anchor");
-  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[0]?.status).toBe("saved");
+  await f.send("main", "Capability anchor", "anchor");
+  // Observe the saved anchor's newly imported Thread before admitting the next
+  // input, so its projection cannot consume that input's retry during setup.
+  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[0]?.threadAgentId).toBeTruthy();
+  await f.server.rpc(syncBootstrap, {}, f.paseo);
   f.post(async () => ({ status: 503 }));
   await f.send("root", "Same immutable body", "safe-retry");
   await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[1]?.status).toBe("pending_verification");
@@ -492,17 +495,24 @@ it("a CLI credential change during receipt lookup cannot authorize an old recove
   const f = await fixture(false, true);
   await f.send("root", "Positive receipt proof", "identity-proof");
   await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[0]?.status).toBe("saved");
+  // Finish the anchor's post-save synchronization before creating the input
+  // whose recovery lookup will change credentials.
+  await f.server.rpc(syncBootstrap, {}, f.paseo);
   f.post(async () => ({ status: 503 }));
   await f.send("root", "Original identity only", "identity-recovery");
   await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[1]?.status).toBe("pending_verification");
   const original = (await f.server.rpc(deliveryList, {}, f.paseo)).records[1];
+  expect(f.posts).toHaveLength(2);
+  let changedCredentials = false;
   f.beforeLookup(async key => {
     if (key !== original.idempotencyKey) return;
     const path = join(f.home, ".multica/config.json");
     const config = JSON.parse(await readFile(path, "utf8"));
     await writeFile(path, JSON.stringify({ ...config, token: "replacement-cli-credential" }));
+    changedCredentials = true;
   });
   await f.server.rpc(syncBootstrap, {}, f.paseo);
+  expect(changedCredentials).toBe(true);
   expect(f.posts).toHaveLength(2);
   expect((await f.server.rpc(deliveryList, {}, f.paseo)).records[1]).toMatchObject({ body: original.body, idempotencyKey: original.idempotencyKey, status: "pending_verification" });
 });
@@ -537,4 +547,42 @@ it("a replay whose remotely edited body differs cannot bind to or replace the im
   await f.server.rpc(syncBootstrap, {}, f.paseo);
   expect((await f.server.rpc(deliveryList, {}, f.paseo)).records[0]).toMatchObject({ body: "Keep exactly this original body", status: "pending_verification" });
   expect(f.posts).toHaveLength(1);
+});
+
+it("accepts ordinary comment receipts whose optional askuser target is explicitly null", async () => {
+  const f = await fixture(false, true);
+  f.post(async body => ({ body: { ...comment("ordinary-null-target", body.parent_id ?? null, body.content), askuser_answer_to: null } }));
+  await f.send("root", "Ordinary discussion", "ordinary-null-target");
+  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[0]?.status).toBe("saved");
+  const record = (await f.server.rpc(deliveryList, {}, f.paseo)).records[0];
+  expect(await f.server.rpc(deliveryVerify, record, f.paseo)).toMatchObject({ status: "saved" });
+  expect(f.posts).toHaveLength(1);
+});
+
+
+it.each([403, 200])("preserves the confirmed HTTP %s outcome when an older pending recovery snapshot resumes", async status => {
+  const f = await fixture(false, true);
+  await f.send("root", "Saved proof", "settled-proof");
+  await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[0]?.status).toBe("saved");
+  await f.server.rpc(syncBootstrap, {}, f.paseo);
+  const anchor = (await f.server.rpc(deliveryList, {}, f.paseo)).records[0];
+  let enteredPost!: () => void; let releasePost!: () => void; let enteredLookup!: () => void; let releaseLookup!: () => void;
+  const postArrived = new Promise<void>(resolve => { enteredPost = resolve; }); const postBlocked = new Promise<void>(resolve => { releasePost = resolve; });
+  const lookupArrived = new Promise<void>(resolve => { enteredLookup = resolve; }); const lookupBlocked = new Promise<void>(resolve => { releaseLookup = resolve; });
+  f.post(async body => {
+    enteredPost(); await postBlocked;
+    if (status === 403) return { status };
+    const saved = comment("settled-success", "root", body.content); f.comments.push(saved); return { body: saved };
+  });
+  f.lookupFailure(503);
+  f.beforeLookup(async key => { if (key === anchor.idempotencyKey) { enteredLookup(); await lookupBlocked; } });
+  await f.send("root", "Settled immutable input", "settled-rejection"); await postArrived;
+  const synchronization = f.server.rpc(syncBootstrap, {}, f.paseo);
+  try {
+    await lookupArrived;
+    releasePost();
+    await expect.poll(async () => (await f.server.rpc(deliveryList, {}, f.paseo)).records[1]?.status).toBe(status === 403 ? "failed" : "saved");
+  } finally { releasePost(); releaseLookup(); await synchronization; }
+  expect((await f.server.rpc(deliveryList, {}, f.paseo)).records[1]).toMatchObject({ status: status === 403 ? "failed" : "saved", body: "Settled immutable input", message: expect.stringContaining(status === 403 ? "HTTP 403" : "评论已保存") });
+  expect(f.posts).toHaveLength(2);
 });
