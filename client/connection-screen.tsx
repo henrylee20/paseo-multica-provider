@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { Text, View } from "react-native";
 import { useRpc, useSettings, type PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { copyText, Modal, SettingsAction, SettingsCard, SettingsRow, SettingsSection, SettingsSelect } from "@getpaseo/plugin/client/ui";
-import { connectionStatus, multicaSettings, profileList, workspaceList, type ConnectionStatus, type ProfileList, type SyncStatus } from "../shared/contracts.js";
+import { connectionStatus, multicaSettings, profileList, workspaceList, syncIntervalSecondsOptions, syncIntervalSecondsSchema, type ConnectionStatus, type ProfileList, type SyncStatus } from "../shared/contracts.js";
 import { describeSync } from "./sync-status.js";
 import { WorkspaceList, type Workspace } from "./workspace-list.js";
 import type { HiddenObject } from "../shared/hiding.js";
@@ -32,12 +32,16 @@ export function ConnectionScreen({ host, theme }: PluginSurfaceProps) {
   const [profileRefresh, setProfileRefresh] = useState(0);
   const [profileState, setProfileState] = useState<{ key: string; value?: ProfileList; error?: string } | null>(null);
   const [profileError, setProfileError] = useState<string | null>(null);
+  const [intervalError, setIntervalError] = useState<string | null>(null);
+  const [saveSource, setSaveSource] = useState<"profile" | "interval" | null>(null);
   const [pendingProfile, setPendingProfile] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [copied, setCopied] = useState<"done" | "failed" | null>(null);
   const configuredProfile = settings.status === "ready" ? settings.values.profile : undefined;
   const profileKey = JSON.stringify([host.id, profileRefresh]);
   const profiles = profileState?.key === profileKey ? profileState : null;
+  const profileSaveError = (saveSource === "profile" ? settings.saveError : null) ?? profileError;
+  const intervalSaveError = (saveSource === "interval" ? settings.saveError : null) ?? intervalError;
 
   useEffect(() => {
     let active = true;
@@ -95,14 +99,26 @@ export function ConnectionScreen({ host, theme }: PluginSurfaceProps) {
   async function confirmProfile() {
     if (pendingProfile === null || settings.status !== "ready" || settings.saving || confirming || purging) return;
     setConfirming(true);
+    setSaveSource("profile");
     setProfileError(null);
     try {
-      if (await settings.save({ profile: pendingProfile }, settings.revision)) {
+      if (await settings.save({ ...settings.values, profile: pendingProfile }, settings.revision)) {
         setPendingProfile(null);
         setAttempt(value => value + 1);
       } else setProfileError("无法保存 profile，请重试。");
     } catch { setProfileError("无法保存 profile，请重试。"); }
     finally { setConfirming(false); }
+  }
+
+  async function selectInterval(value: string) {
+    if (settings.status !== "ready" || settings.saving || confirming) return;
+    const parsed = syncIntervalSecondsSchema.safeParse(Number(value));
+    if (!parsed.success || parsed.data === settings.values.syncIntervalSeconds) return;
+    setSaveSource("interval");
+    setIntervalError(null);
+    try {
+      if (!await settings.save({ ...settings.values, syncIntervalSeconds: parsed.data }, settings.revision)) setIntervalError("无法保存后台轮询间隔，请重试。");
+    } catch { setIntervalError("无法保存后台轮询间隔，请重试。"); }
   }
 
   async function copyLogin(command: string) {
@@ -144,13 +160,19 @@ export function ConnectionScreen({ host, theme }: PluginSurfaceProps) {
     </SettingsCard>
     <SettingsCard>
       {settings.status === "ready" ? <SettingsSelect label="CLI profile" value={settings.values.profile} options={profileOptions}
-        disabled={settings.saving || purging || !profiles || profiles.value?.isolated} hint={profileHint} error={settings.saveError ?? profileError ?? profiles?.error}
+        disabled={settings.saving || purging || !profiles || profiles.value?.isolated} hint={profileHint} error={profileSaveError ?? profiles?.error}
         onValueChange={selectProfile} />
         : settings.status === "invalid" ? <SettingsAction label="CLI profile" hint={`已保存的插件设置无效：${settings.error}`} actionLabel="重置为默认 profile"
         disabled={settings.saving} onPress={() => { void settings.reset().then(saved => { if (saved) setAttempt(value => value + 1); }); }} />
         : <SettingsRow label="CLI profile" hint={settings.status === "loading" ? "正在读取设置…" : "无法读取插件设置，请点击刷新。"}>
           {status ? <Text selectable style={text}>{status.profile || "默认"}</Text> : null}
         </SettingsRow>}
+      {settings.status === "ready" ? <SettingsSelect label="后台轮询间隔" value={String(settings.values.syncIntervalSeconds)}
+        options={syncIntervalSecondsOptions.map(seconds => ({ value: String(seconds),
+          label: seconds === 15 ? "15 秒（默认）" : seconds < 60 ? `${seconds} 秒` : `${seconds / 60} 分钟` }))}
+        hint="Multica 事件到达时立即同步；此间隔是事件遗漏时的定时兜底。"
+        disabled={settings.saving || confirming} error={intervalSaveError}
+        onValueChange={value => { void selectInterval(value); }} /> : null}
     </SettingsCard>
   </SettingsSection>;
 
@@ -176,7 +198,7 @@ export function ConnectionScreen({ host, theme }: PluginSurfaceProps) {
         <Text style={text}>当前本地数据：Project {status?.localData?.projects ?? 0} · 任务 {status?.localData?.issues ?? 0} · 讨论 {status?.localData?.discussions ?? 0}</Text>
         <Text style={text}>将清理上一 profile 的全部本地规则、映射、缓存、讨论、插件 Project 和占位目录。含用户自建工作区的 Project 将保留。</Text>
         <Text style={text}>不影响 Multica 远端数据（不会取消远端 Run 或删除评论）</Text>
-        {settings.saveError ?? profileError ? <Text style={{ color: theme.colors.statusDanger }}>{settings.saveError ?? profileError}</Text> : null}
+        {profileSaveError ? <Text style={{ color: theme.colors.statusDanger }}>{profileSaveError}</Text> : null}
         <View style={{ flexDirection: "row", justifyContent: "flex-end", gap: 8 }}>
           <RuleButton theme={theme} disabled={confirming || settings.saving} onPress={() => setPendingProfile(null)}>取消</RuleButton>
           <RuleButton theme={theme} tone="danger" disabled={confirming || settings.saving || purging} onPress={() => { void confirmProfile(); }}>{confirming ? "正在保存…" : "确认切换"}</RuleButton>

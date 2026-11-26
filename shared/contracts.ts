@@ -2,9 +2,13 @@ import { defineRpc, defineSettings } from "@getpaseo/plugin";
 import { z } from "zod";
 import { hiddenObjectsSchema } from "./hiding.js";
 
+export const syncIntervalSecondsOptions = [10, 15, 30, 60, 120, 300, 600] as const;
+export const syncIntervalSecondsSchema = z.union(syncIntervalSecondsOptions.map(value => z.literal(value)));
+
 export const multicaSettings = defineSettings({
   id: "multica", scope: "host", version: 1,
-  schema: z.object({ profile: z.string().trim().max(128).refine(value => value !== "." && value !== ".." && !/[\\/\u0000-\u001f]/.test(value), "Profile must be a single safe name").default("") }),
+  schema: z.object({ profile: z.string().trim().max(128).refine(value => value !== "." && value !== ".." && !/[\\/\u0000-\u001f]/.test(value), "Profile must be a single safe name").default(""),
+    syncIntervalSeconds: syncIntervalSecondsSchema.default(15) }),
 });
 
 export const profileList = defineRpc({ name: "profile.list", input: z.object({}), output: z.object({
@@ -33,6 +37,7 @@ export const syncStatusSchema = z.object({
   stage: z.enum(["idle", "connection", "workspaces", "issues", "history", "archiving", "purging"]),
   connectionKey: z.string().optional(), lastSuccessAt: z.string().optional(),
   retainedProjects: z.array(z.object({ name: z.string(), cwd: z.string() })).optional(),
+  failedWorkspaces: z.array(z.object({ workspaceId: z.string(), name: z.string(), message: z.string() })).optional(),
   completedWorkspaces: z.number().int().nonnegative(), enabledWorkspaces: z.number().int().nonnegative(),
   completedArchives: z.number().int().nonnegative().optional(), pendingArchives: z.number().int().nonnegative().optional(),
   message: z.string().optional(),

@@ -38,7 +38,7 @@ const catalogRpc = defineRpc({ name: "workspace.catalog", input: z.object({ work
 const cleanup: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const dispose of cleanup.splice(0).reverse()) await dispose(); });
 
-async function fixture(syncIntervalMs = 15_000, homePrefix = "multica-sidebar-") {
+async function fixture(syncIntervalMs: number | null = 15_000, homePrefix = "multica-sidebar-") {
   const home = await mkdtemp(join(tmpdir(), homePrefix));
   cleanup.push(() => rm(home, { recursive: true, force: true }));
   const requests: string[] = [];
@@ -50,11 +50,12 @@ async function fixture(syncIntervalMs = 15_000, homePrefix = "multica-sidebar-")
     { id: "issue-one", workspace_id: "remote-workspace", identifier: "PRD-1", title: "实现登录", description: "用户可以使用现有 CLI 登录。", assignee_type: "member", assignee_id: "user-42", project_id: "project-a", labels: [{ id: "red" }], status: "custom-ready", status_category: "unstarted", updated_at: "2026-11-24T12:00:00Z" },
     { id: "issue-two", workspace_id: "remote-workspace", identifier: "PRD-2", title: "修复同步", description: "保留任务身份。", assignee_type: "agent", assignee_id: "agent-owned", project_id: "project-a", labels: [{ id: "blue" }], status: "custom-review", status_category: "started", updated_at: "2026-11-24T12:00:00Z" },
   ];
+  const workspaceIssues = new Map([["product", issues]]);
   const scopes: Array<{ path: string; slug?: string }> = [];
   const workspaces = [{ id: "remote-workspace", name: "产品开发", slug: "product" }];
   const heldIssueReads: Array<() => void> = [];
   const heldRunReads: Array<() => void> = [];
-  const remote = { acknowledgeEvents: true, workspacesStatus: 200, holdIssueReads: false, holdRunReads: false, disconnectRuns: false, disconnect: false, authStatus: 200, issueStatus: 200, invalidIssuePage: false, nextPageFails: false, emptyNextPage: false };
+  const remote = { acknowledgeEvents: true, workspacesStatus: 200, holdIssueReads: false, holdRunReads: false, disconnectRuns: false, disconnect: false, authStatus: 200, issueStatus: 200, invalidIssuePage: false, nextPageFails: false, failingWorkspace: "", emptyNextPage: false };
   const http = createServer((request, response) => {
     requests.push(request.url!);
     scopes.push({ path: request.url!, slug: request.headers["x-workspace-slug"] as string | undefined });
@@ -62,9 +63,9 @@ async function fixture(syncIntervalMs = 15_000, homePrefix = "multica-sidebar-")
     const url = new URL(request.url!, "http://localhost");
     if (url.pathname === "/api/issues") {
       if (remote.disconnect) { response.destroy(); return; }
-      response.statusCode = remote.nextPageFails && Number(url.searchParams.get("offset")) > 0 ? 503 : remote.issueStatus;
+      response.statusCode = remote.nextPageFails && (!remote.failingWorkspace || remote.failingWorkspace === request.headers["x-workspace-slug"]) && Number(url.searchParams.get("offset")) > 0 ? 503 : remote.issueStatus;
       const values = (key: string) => url.searchParams.get(key)?.split(",").filter(Boolean) ?? [];
-      const found = issues.filter(issue => (!values("status_categories").length || values("status_categories").includes(issue.status_category)) &&
+      const found = (workspaceIssues.get(request.headers["x-workspace-slug"] as string) ?? issues).filter(issue => (!values("status_categories").length || values("status_categories").includes(issue.status_category)) &&
         (!values("statuses").length || values("statuses").includes(issue.status)) &&
         (!values("assignee_filters").length || values("assignee_filters").includes(`${issue.assignee_type}:${issue.assignee_id}`)) &&
         (!values("project_ids").length || values("project_ids").includes(issue.project_id)) &&
@@ -194,15 +195,16 @@ async function fixture(syncIntervalMs = 15_000, homePrefix = "multica-sidebar-")
     close: async () => {},
   } as unknown as DaemonClient;
   const connectHost = vi.fn(async () => host);
-  function start() {
+  function start(values?: unknown) {
     const server = new FakeServer();
-    const dispose = createServerContribution({ homeDirectory: home, workingDirectory: home, environment: { PASEO_HOME: home }, connectHost, syncIntervalMs })(server.context);
+    if (values) server.setSettings(multicaSettings.id, values);
+    const dispose = createServerContribution({ homeDirectory: home, workingDirectory: home, environment: { PASEO_HOME: home }, connectHost, syncIntervalMs: syncIntervalMs ?? undefined })(server.context);
     cleanup.push(dispose);
     return { server, dispose };
   }
   const { server, dispose } = start();
   const paseo = { hosts: { list: async () => ({ self: { serverId: "owning-daemon" } }) } } as unknown as PaseoApi;
-  return { server, requests, paseo, native, home, issues, start, dispose, host, connectHost, remote, heldIssueReads, heldRunReads, runResponses, websocket, websocketRequests, signal, scopes, workspaces, runs, effects, creations };
+  return { server, requests, paseo, native, home, issues, start, dispose, host, connectHost, remote, heldIssueReads, heldRunReads, runResponses, websocket, websocketRequests, signal, scopes, workspaces, workspaceIssues, runs, effects, creations };
 }
 
 it("client bootstrap leaves the native sidebar empty until a workspace rule is explicitly enabled", async () => {
@@ -934,7 +936,7 @@ it("shares truthful sync progress and retains cached task identity through faile
   const ids = f.native.agents.map(agent => agent.id);
   f.remote.invalidIssuePage = true;
   expect(await resync(f.server, f.paseo, "remote-workspace")).toMatchObject({ status: "unavailable" });
-  expect((await f.server.rpc(connectionStatus, {}, f.paseo)).sync).toMatchObject({ status: "unavailable", stage: "issues", lastSuccessAt: ready.lastSuccessAt });
+  expect((await f.server.rpc(connectionStatus, {}, f.paseo)).sync).toMatchObject({ status: "unavailable", stage: "idle", lastSuccessAt: ready.lastSuccessAt });
   expect(f.native.agents.map(agent => agent.id)).toEqual(ids);
   expect(f.native.workspaces.every(workspace => !workspace.archived)).toBe(true);
   f.remote.invalidIssuePage = false;
@@ -987,6 +989,206 @@ it("coalesces multiple reconnecting clients and periodic opportunities into one 
     expect(f.native.agents).toHaveLength(2);
     await restarted.dispose();
   } finally { vi.useRealTimers(); }
+});
+
+it("initial settings and repeated interval changes keep one timer, reset its deadline, and leave active snapshots alone", async () => {
+  const f = await fixture(null);
+  await f.dispose();
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  const changed = vi.spyOn(SidebarSynchronizer.prototype, "settingsChanged");
+  const restarted = f.start({ profile: "", syncIntervalSeconds: 30 });
+  const issueReads = () => f.requests.filter(path => path.startsWith("/api/issues?")).length;
+  try {
+    // Initialization records the interval without starting a timer or a pass.
+    await restarted.server.rpc(connectionStatus, {}, f.paseo);
+    expect(vi.getTimerCount()).toBe(1); // Only the existing RunDetails timer.
+    expect(changed).not.toHaveBeenCalled();
+    await restarted.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+    await expect.poll(() => f.websocketRequests[0]?.auth).toBeDefined();
+    expect(vi.getTimerCount()).toBe(2);
+    changed.mockClear();
+    const before = issueReads(), sockets = f.websocketRequests.length, me = f.requests.filter(path => path === "/api/me").length;
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(issueReads()).toBe(before);
+    f.remote.holdIssueReads = true;
+    await vi.advanceTimersByTimeAsync(1);
+    await expect.poll(() => f.heldIssueReads.length).toBe(1);
+    for (const seconds of [10, 60, 120, 120]) {
+      restarted.server.setSettings(multicaSettings.id, { profile: "", syncIntervalSeconds: seconds });
+      await restarted.server.rpc(connectionStatus, {}, f.paseo);
+      expect(vi.getTimerCount()).toBe(2);
+    }
+    await vi.advanceTimersByTimeAsync(360_000);
+    expect(issueReads()).toBe(before + 1);
+    expect(changed).not.toHaveBeenCalled();
+    expect(f.websocketRequests).toHaveLength(sockets);
+    expect(f.requests.filter(path => path === "/api/me")).toHaveLength(me);
+    expect(f.effects).toEqual([]);
+    expect((await restarted.server.rpc(connectionStatus, {}, f.paseo)).sync.status).toBe("syncing");
+    f.remote.holdIssueReads = false;
+    for (const reply of f.heldIssueReads.splice(0)) reply();
+    expect((await waitForSync(restarted.server, f.paseo)).status).toBe("ready");
+    expect(issueReads()).toBe(before + 2);
+    // Reapplying the same interval must keep the existing deadline.
+    await vi.advanceTimersByTimeAsync(60_000);
+    restarted.server.setSettings(multicaSettings.id, { profile: "", syncIntervalSeconds: 120 });
+    await restarted.server.rpc(connectionStatus, {}, f.paseo);
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(issueReads()).toBe(before + 2);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect.poll(issueReads).toBe(before + 4);
+    await waitForSync(restarted.server, f.paseo);
+  } finally {
+    f.remote.holdIssueReads = false;
+    for (const reply of f.heldIssueReads.splice(0)) reply();
+    await restarted.dispose(); changed.mockRestore(); vi.useRealTimers();
+  }
+});
+
+it("the injected polling interval overrides settings, including subsequent changes", async () => {
+  const f = await fixture(1_000);
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  try {
+    f.server.setSettings(multicaSettings.id, { syncIntervalSeconds: 600 });
+    await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+    const before = f.requests.length;
+    f.server.setSettings(multicaSettings.id, { syncIntervalSeconds: 60 });
+    await f.server.rpc(connectionStatus, {}, f.paseo);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect.poll(() => f.requests.length).toBeGreaterThan(before);
+    await waitForSync(f.server, f.paseo);
+  } finally { await f.dispose(); vi.useRealTimers(); }
+});
+
+async function enableSecondWorkspace(f: Awaited<ReturnType<typeof fixture>>) {
+  f.workspaces.push({ id: "second-workspace", name: "第二个 Multica 工作区", slug: "second" });
+  const issues = [0, 1].map(index => ({ ...f.issues[index], id: `second-${index}`, workspace_id: "second-workspace" }));
+  f.workspaceIssues.set("second", issues);
+  await f.server.syncRpc(enable, { workspaceId: "second-workspace", enabled: true }, f.paseo);
+  return issues;
+}
+
+it.each(["pagination", "missing"])("isolates a %s failure to one Multica workspace, retains its cache and clears partial status after recovery", async failure => {
+  const f = await fixture(60_000);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const second = await enableSecondWorkspace(f);
+  const before = (await f.server.rpc(connectionStatus, {}, f.paseo)).sync;
+  const original = f.workspaces[0];
+  const name = failure === "pagination" ? "已改名的产品开发" : "产品开发";
+  if (failure === "pagination") { original.name = name; f.remote.nextPageFails = true; f.remote.failingWorkspace = "product"; }
+  else f.workspaces.shift();
+  f.issues[0].status_category = "done";
+  // Keep a two-page snapshot, even with the cached task no longer matching.
+  f.issues.push({ ...f.issues[1], id: "new-primary" });
+  second[0].title = "第二个 Multica 工作区继续完成";
+  await resync(f.server, f.paseo, "second-workspace");
+  const status = (await f.server.rpc(connectionStatus, {}, f.paseo)).sync;
+  expect(status).toMatchObject({ status: "unavailable", completedWorkspaces: 1, enabledWorkspaces: 2, lastSuccessAt: before.lastSuccessAt,
+    message: `1 个 Multica 工作区同步失败：${name}`, failedWorkspaces: [{ workspaceId: "remote-workspace", name, message: expect.stringContaining(failure === "pagination" ? "HTTP 503" : "权限") }] });
+  const local = Object.values((await new StateStore(join(f.home, "multica-provider")).read()).connections)[0];
+  expect(local.issues["issue-one"].archiveReason).toBeUndefined();
+  expect(local.issues["new-primary"]).toBeUndefined();
+  expect(local.issues["second-0"].title).toContain("继续完成");
+  expect(f.effects).toEqual([]);
+  f.remote.issueStatus = 503;
+  await resync(f.server, f.paseo, "second-workspace");
+  expect((await f.server.rpc(connectionStatus, {}, f.paseo)).sync).toMatchObject({ status: "unavailable", lastSuccessAt: before.lastSuccessAt,
+    message: `2 个 Multica 工作区同步失败：${name}、第二个 Multica 工作区`, failedWorkspaces: [
+      { workspaceId: "remote-workspace", name }, { workspaceId: "second-workspace", name: "第二个 Multica 工作区" },
+    ] });
+  f.remote.issueStatus = 200;
+  f.remote.nextPageFails = false;
+  if (failure === "missing") f.workspaces.unshift(original);
+  await resync(f.server, f.paseo, "second-workspace");
+  expect((await f.server.rpc(connectionStatus, {}, f.paseo)).sync).toMatchObject({ status: "ready", completedWorkspaces: 2 });
+  expect((await f.server.rpc(connectionStatus, {}, f.paseo)).sync.failedWorkspaces).toBeUndefined();
+});
+
+it("a missing Multica workspace without a cached project name falls back to its ID in the failure summary", async () => {
+  const f = await fixture(60_000);
+  const add = vi.spyOn(f.host, "addProject").mockRejectedValue(new Error("Import unavailable"));
+  try {
+    expect(await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo)).toMatchObject({ status: "unavailable" });
+    add.mockRestore();
+    f.workspaces.shift();
+    await enableSecondWorkspace(f);
+    expect((await f.server.rpc(connectionStatus, {}, f.paseo)).sync).toMatchObject({ status: "unavailable", completedWorkspaces: 1,
+      message: "1 个 Multica 工作区同步失败：remote-workspace", failedWorkspaces: [{ workspaceId: "remote-workspace", name: "remote-workspace" }] });
+  } finally { add.mockRestore(); }
+});
+
+it("revoking the CLI identity during a blocked snapshot fails the whole pass and stops later Multica workspaces", async () => {
+  const f = await fixture(60_000);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await enableSecondWorkspace(f);
+  f.remote.holdIssueReads = true;
+  const before = f.scopes.length;
+  try {
+    await f.server.rpc(workspaceRule, { workspaceId: "remote-workspace", rule: taskRuleSchema.parse({}) }, f.paseo);
+    await expect.poll(() => f.heldIssueReads.length).toBe(1);
+    const path = join(f.home, ".multica/config.json");
+    const config = JSON.parse(await readFile(path, "utf8"));
+    await writeFile(path, JSON.stringify({ ...config, token: "replacement-token" }));
+  } finally {
+    f.remote.holdIssueReads = false;
+    for (const reply of f.heldIssueReads.splice(0)) reply();
+  }
+  const status = await waitForSync(f.server, f.paseo);
+  expect(status).toMatchObject({ status: "unavailable", message: expect.stringContaining("同步失败；已保存的规则与开关不受影响") });
+  expect(status.failedWorkspaces).toBeUndefined();
+  expect(f.scopes.slice(before).filter(scope => scope.slug === "second")).toEqual([]);
+});
+
+it("a superseded snapshot yields before later Multica workspaces and applies only the new rule", async () => {
+  const f = await fixture(60_000);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const second = await enableSecondWorkspace(f);
+  second[0].title = "最新轮次"; f.issues[0].title = "旧轮次不应写入";
+  f.remote.holdIssueReads = true;
+  const before = f.scopes.length;
+  try {
+    await f.server.rpc(workspaceRule, { workspaceId: "remote-workspace", rule: taskRuleSchema.parse({}) }, f.paseo);
+    await expect.poll(() => f.heldIssueReads.length).toBe(1);
+    await f.server.rpc(workspaceRule, { workspaceId: "remote-workspace", rule: taskRuleSchema.parse({ labelIds: ["blue"] }) }, f.paseo);
+    f.heldIssueReads.shift()!();
+    await expect.poll(() => f.scopes.slice(before).filter(scope => scope.path.startsWith("/api/issues?")).length).toBe(2);
+    expect(f.scopes.slice(before).filter(scope => scope.slug === "second")).toEqual([]);
+    const local = Object.values((await new StateStore(join(f.home, "multica-provider")).read()).connections)[0];
+    expect(local.issues["issue-one"].title).not.toContain("不应写入");
+    expect(local.issues["second-0"].title).not.toContain("最新轮次");
+  } finally {
+    f.remote.holdIssueReads = false;
+    for (const reply of f.heldIssueReads.splice(0)) reply();
+  }
+  expect((await waitForSync(f.server, f.paseo)).status).toBe("ready");
+  expect(f.native.workspaces.find(workspace => workspace.title.includes("最新轮次"))).toBeDefined();
+});
+
+it("reimport continues after a workspace import fails, lists it in the failed rebuild and hides raw errors", async () => {
+  const f = await fixture(60_000);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await enableSecondWorkspace(f);
+  const connectionKey = (await f.server.rpc(connectionStatus, {}, f.paseo)).connectionKey!;
+  const add = f.host.addProject.bind(f.host);
+  let fail = true;
+  f.host.addProject = async (...args) => { if (fail) { fail = false; throw new Error("private-token raw upstream body"); } return add(...args); };
+  await f.server.rpc(rebuildStart, { connectionKey }, f.paseo);
+  const result = await finishRebuild(f.server, f.paseo, connectionKey);
+  expect(result).toMatchObject({ status: "failed", stage: "importing", completed: 2, total: 4, message: expect.stringContaining("产品开发") });
+  expect(result.message).not.toContain("remote-workspace");
+  expect(result.message).not.toContain("private-token");
+  expect(f.native.agents.some(agent => agent.labels["multica.issue"] === "second-0")).toBe(true);
+});
+
+it("reimport preparation stays strict when an enabled Multica workspace is missing", async () => {
+  const f = await fixture(60_000);
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await enableSecondWorkspace(f);
+  const connectionKey = (await f.server.rpc(connectionStatus, {}, f.paseo)).connectionKey!;
+  f.workspaces.shift();
+  await f.server.rpc(rebuildStart, { connectionKey }, f.paseo);
+  expect(await finishRebuild(f.server, f.paseo, connectionKey)).toMatchObject({ status: "failed", stage: "importing", completed: 0 });
+  await waitForSync(f.server, f.paseo);
 });
 
 it("keeps cached tasks and reports incomplete recovery when an enabled workspace is absent from the accessible snapshot", async () => {
@@ -1068,7 +1270,7 @@ it("keeps a saved rule readable after background failure and reloads it on resta
   f.remote.invalidIssuePage = true;
   const rule = taskRuleSchema.parse({ labelIds: ["red"] });
   expect(await f.server.rpc(workspaceRule, { workspaceId: "remote-workspace", rule }, f.paseo)).toMatchObject({ status: "saved", sync: { status: "syncing" } });
-  expect(await waitForSync(f.server, f.paseo)).toMatchObject({ status: "unavailable", stage: "issues", message: expect.stringContaining("已保存的规则与开关不受影响") });
+  expect(await waitForSync(f.server, f.paseo)).toMatchObject({ status: "unavailable", stage: "idle", message: "1 个 Multica 工作区同步失败：产品开发", failedWorkspaces: [{ workspaceId: "remote-workspace", name: "产品开发", message: expect.any(String) }] });
   expect((await f.server.rpc(workspaceList, {}, f.paseo)).workspaces[0]).toMatchObject({ enabled: true, rule });
   expect(f.native.workspaces.every(item => !item.archived)).toBe(true);
   await f.dispose();
@@ -1556,7 +1758,7 @@ it("ordinary sync after an import failure uses the rebuild generation and a retr
   let fail = true;
   f.host.addProject = async (...args) => { if (fail) { fail = false; throw new Error("one import failure"); } return add(...args); };
   await f.server.rpc(rebuildStart, { connectionKey }, f.paseo);
-  expect(await finishRebuild(f.server, f.paseo, connectionKey)).toMatchObject({ status: "failed", stage: "importing", message: expect.stringContaining("one import failure") });
+  expect(await finishRebuild(f.server, f.paseo, connectionKey)).toMatchObject({ status: "failed", stage: "importing", message: expect.stringContaining("产品开发") });
   expect((await waitForSync(f.server, f.paseo)).status).toBe("ready");
   const first = f.creations.slice(original.length);
   expect(first).toHaveLength(2);

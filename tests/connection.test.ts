@@ -9,6 +9,13 @@ import { connectionStatus, multicaSettings, profileList, workspaceList } from ".
 import { FakeServer } from "./support/fake-server.js";
 
 const cleanup: Array<() => void | Promise<void>> = [];
+it("settings keep version 1, default legacy documents to 15 seconds and reject unsupported polling intervals", () => {
+  expect(multicaSettings.version).toBe(1);
+  expect(multicaSettings.schema.parse({})).toEqual({ profile: "", syncIntervalSeconds: 15 });
+  expect(multicaSettings.schema.parse({ profile: "office" })).toEqual({ profile: "office", syncIntervalSeconds: 15 });
+  for (const value of [10, 15, 30, 60, 120, 300, 600]) expect(multicaSettings.schema.parse({ syncIntervalSeconds: value }).syncIntervalSeconds).toBe(value);
+  for (const value of [0, 9, 11, 16, 30.5, 601, "15", null]) expect(multicaSettings.schema.safeParse({ syncIntervalSeconds: value }).success).toBe(false);
+});
 afterEach(async () => { for (const dispose of cleanup.splice(0).reverse()) await dispose(); vi.restoreAllMocks(); });
 
 async function fixture(profile = "", environment: NodeJS.ProcessEnv = {}) {
