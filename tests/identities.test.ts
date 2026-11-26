@@ -479,6 +479,7 @@ it("rejects rebuild during profile purge, retains its owner, and keeps Run polli
   expect(JSON.parse(await f.persisted()).owner).toEqual({ profile: "office" });
   await f.server.syncRpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, f.paseo);
   const parent = f.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
+  await f.server.rpc(threadOpen, f.address(), f.paseo);
   f.messages.push({ task_id: "run", issue_id: "issue", seq: 1, type: "text", content: "New profile periodic output" });
   await expect.poll(() => f.events.some(event => event.type === "timeline.item" && event.sessionId === `${parent.id}:run:run` && event.item.type === "assistant_message" && event.item.text === "New profile periodic output"), { timeout: 4000 }).toBe(true);
 });

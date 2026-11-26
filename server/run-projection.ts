@@ -42,9 +42,10 @@ function messageItems(runId: string, message: RunMessage): ProviderTimelineItem[
 export class RunProjection {
   private readonly children = new Map<string, { sessionId: string; status: StoredRun["status"]; rows: Set<string>; messages: Set<number>; ended?: StoredRun["status"]; changes: number }>();
   constructor(private readonly parentSessionId: string, private readonly rootId: string, private readonly emit: (event: ProviderEvent) => void) {}
-  project(issue: IssueMapping, replayMarkers = true) {
+  project(issue: IssueMapping, replayMarkers = true, runIds: Iterable<string> = Object.keys(issue.runs)) {
     const markers: string[] = [];
-    for (const [runId, run] of Object.entries(issue.runs)) {
+    for (const runId of runIds) {
+      const run = issue.runs[runId];
       if (run.ownerRootId !== this.rootId) continue;
       let child = this.children.get(runId);
       const fresh = !child;

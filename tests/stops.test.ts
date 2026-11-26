@@ -8,6 +8,7 @@ import type { PaseoApi } from "@getpaseo/client";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { ProviderConnection, ProviderEvent, ProviderTimelineItem } from "@getpaseo/plugin/server/provider";
 import { workspaceEnable } from "../shared/contracts.js";
+import { threadOpen } from "../shared/threads.js";
 import { createServerContribution } from "../server/contribute.js";
 
 import { FakeServer, resync } from "./support/fake-server.js";
@@ -211,6 +212,7 @@ it("native Stop cancels exactly the current tab's five unfinished statuses as wh
 
 it("reads actual terminal race outcomes without tracking cleanup evidence", async () => {
   const f = await fixture([run("finished", "running"), run("failed", "queued"), run("pending", "running"), run("unknown", "deferred"), run("confirmed", "running"), run("unconfirmed", "running"), run("opaque-result", "running")]);
+  await f.server.rpc(threadOpen, JSON.parse(f.native.agents[1].handle.slice(7)).data, f.paseo);
   f.cancel(async id => ({ body: { ...f.runs.find(run => run.id === id), status: id === "finished" || id === "opaque-result" ? "completed" : id === "failed" ? "failed" : "cancelled",
     ...(id === "pending" ? { result: { process_cleanup_pending: true } } : {}),
     ...(id === "confirmed" ? { result: { process_cleanup_confirmed: true } } : {}),
@@ -226,6 +228,7 @@ it("reads actual terminal race outcomes without tracking cleanup evidence", asyn
 
 it("keeps available failure metadata from a per-Run Stop receipt when execution messages are unavailable", async () => {
   const f = await fixture([run("failed-during-stop", "running")]);
+  await f.server.rpc(threadOpen, JSON.parse(f.native.agents[1].handle.slice(7)).data, f.paseo);
   const metadata = { error: "Runtime failed before streaming", failure_reason: "local_directory_error", work_dir: "/remote/original", relative_work_dir: null };
   f.cancel(async () => ({ body: { ...f.runs[0], status: "failed", ...metadata } }));
   const thread = f.native.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
@@ -352,6 +355,7 @@ it("retains unknown or malformed per-run results without preventing cancellation
 
 it("does not reactivate a cancelled run when an older in-flight snapshot finishes later", async () => {
   const f = await fixture([run("active", "running")]);
+  await f.server.rpc(threadOpen, JSON.parse(f.native.agents[1].handle.slice(7)).data, f.paseo);
   let release: () => void = () => {};
   let reached: () => void = () => {};
   const blocked = new Promise<void>(resolve => { release = resolve; });

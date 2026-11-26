@@ -24,7 +24,7 @@ const attachment = (id: string, download_url = `/api/attachments/${id}/download`
 const comment = (id: string, parent_id: string | null, attachments: unknown[] = []) => ({ id, parent_id, issue_id: "issue", type: "comment", author_type: "member", author_id: "me", content: `Comment ${id}`, created_at: stamp, attachments });
 type TimelineEntry = { id: string; type: string; parent_id?: string | null; content?: string; actor_id?: string; actor_type?: string; delegated_by?: string | null; deleted_at?: string | null; askuser_skipped_at?: string | null; askuser_skipped_by?: string | null };
 
-async function fixture() {
+async function fixture(loadHistory = true) {
   const home = await mkdtemp(join(tmpdir(), "multica-askuser-"));
   cleanup.push(() => rm(home, { recursive: true, force: true }));
   const comments = [comment("root", null)];
@@ -67,7 +67,12 @@ async function fixture() {
     else if (url.pathname === "/api/agents") body = [{ id: "agent", name: "Builder" }];
     else if (url.pathname === "/api/issues") body = { issues: remote.visible ? [{ id: "issue", workspace_id: "workspace", title: "Task", description: "Description", status: "todo" }] : [], total: remote.visible ? 1 : 0 };
     else if (url.pathname === "/api/issues/issue") { await remote.beforeIssueCheck?.(); response.statusCode = remote.objectChecksUntilDeny === 0 ? 403 : remote.issueStatus; if (remote.objectChecksUntilDeny > 0) remote.objectChecksUntilDeny--; body = response.statusCode === 200 ? { id: "issue", workspace_id: "workspace", title: "Task", status: "todo" } : { error: response.statusCode === 404 ? "issue not found" : "issue permission denied" }; }
-    else if (url.pathname === "/api/issues/issue/comments") body = comments.map(c => url.searchParams.has("summary") ? { ...c, content: [...c.content].slice(0, 200).join(""), content_truncated: [...c.content].length > 200 } : c);
+    else if (url.pathname === "/api/issues/issue/comments") body = comments.filter(c => {
+      if (!url.searchParams.has("thread")) return true;
+      const seen = new Set<string>(); let root = c;
+      while (root.parent_id && !seen.has(root.id)) { seen.add(root.id); root = comments.find(parent => parent.id === root.parent_id) ?? root; }
+      return root.id === url.searchParams.get("thread");
+    }).map(c => url.searchParams.has("summary") ? { ...c, content: [...c.content].slice(0, 200).join(""), content_truncated: [...c.content].length > 200 } : c);
     else if (url.pathname === "/api/issues/issue/timeline") { await remote.beforeTimeline?.(); body = timeline; }
     else if (url.pathname === "/api/issues/issue/task-runs") body = runs;
     else if (url.pathname.startsWith("/api/attachments/")) {
@@ -131,7 +136,7 @@ async function fixture() {
     }, updateAgent: async () => {}, close: async () => {},
     fetchAgent: async (id: string) => ({ agent: { provider: "multica", ...agents.find(agent => agent.id === id)! } }), restoreWorkspace: async () => {},
     listCommands: async (id: string) => ({ agentId: id, commands: [], error: null, requestId: "commands" }),
-    fetchAgentTimeline: async () => ({ agentId: "unused", epoch: "epoch", entries: [], hasOlder: false, hasNewer: false }),
+    fetchAgentTimeline: async (agentId: string) => ({ agentId, epoch: "epoch", entries: (rows.get(agentId) ?? []).map((item, index) => ({ seqStart: index + 1, seqEnd: index + 1, item, timestamp: stamp })), hasOlder: false, hasNewer: false }),
   } as unknown as DaemonClient;
   const paseo = { hosts: { list: async () => ({ self: { serverId: "daemon" } }) } } as unknown as PaseoApi;
   const start = () => {
@@ -144,9 +149,95 @@ async function fixture() {
   await server!.syncRpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, paseo);
   const address = () => ({ connectionKey: agents[1].labels["multica.connection"], issueId: "issue", rootId: "root" });
   const cards = () => (rows.get(agents[1].id) ?? []).filter(row => row.type === "plugin" && row.kind === "askuser") as Array<Extract<ProviderTimelineItem, { type: "plugin" }> & { data: Record<string, any> }>;
+  // Most card tests model an already open discussion; ordering tests opt into lazy history.
+  if (loadHistory) await server!.rpc(threadOpen, address(), paseo);
   return { ...started, start, connect, events, posts, skips, receipts, setClock: (value: Date) => { clock = value; }, comments, timeline, runs, documents, requests, remote, rows, agents, cards, address, open, home, configPath, paseo, refreshLogin,
     disconnect: async () => { await provider?.close(); provider = undefined; }, signal: (type: string) => { for (const socket of websocket.clients) socket.send(JSON.stringify({ type })); }, eventsReady: () => expect.poll(() => websocket.clients.size).toBeGreaterThan(0), sync: () => resync(server, paseo, "workspace") };
 }
+
+it.each(["background", "opening", "replay"])("places %s AskUser cards immediately after their source and keeps updates in place", async phase => {
+  const f = await fixture(false);
+  f.comments.push(comment("c1", "root"), comment("c2", "root", [attachment("a"), attachment("b")]), comment("c3", "root"));
+  f.documents.set("a", card); f.documents.set("b", { ...card, title: "Second card" });
+  if (phase !== "opening") {
+    await f.sync();
+    expect(f.cards()).toEqual([]);
+  }
+  await f.server.rpc(threadOpen, f.address(), f.paseo);
+  let sessionId = f.agents[1].id;
+  if (phase === "replay") {
+    const parent = f.agents[1]; sessionId = "card-replay";
+    await (await f.connect()).send({ type: "session.open", requestId: sessionId, sessionId, history: "replay", persistence: JSON.parse(parent.handle.slice(7)), config: { cwd: parent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
+  }
+  const order = () => f.rows.get(sessionId)!.filter(row => /^multica:(comment:|divider:|askuser:)/.test(row.id)).map(row => row.id.replace("multica:", ""));
+  const expected = ["comment:root", "divider:c1", "comment:c1", "divider:c2", "comment:c2", "askuser:c2:a", "askuser:c2:b", "divider:c3", "comment:c3"];
+  expect(order()).toEqual(expected);
+  f.timeline.push({ id: "c2", type: "comment", askuser_skipped_at: stamp });
+  await f.sync();
+  expect(order()).toEqual(expected);
+  expect(f.rows.get(sessionId)!.filter(row => row.type === "plugin" && row.kind === "askuser")).toMatchObject([{ data: { status: "skipped" } }, { data: { status: "skipped" } }]);
+});
+
+it("waits for a later discussion refresh before releasing a card whose original was never loaded and is now missing", async () => {
+  const f = await fixture(false);
+  f.comments.push(comment("removed", "root", [attachment("removed")])); f.documents.set("removed", card);
+  await f.sync();
+  expect(f.cards()).toEqual([]);
+  f.comments.splice(1, 1);
+  await f.server.rpc(threadOpen, f.address(), f.paseo);
+  expect(f.rows.get(f.agents[1].id)!.filter(row => /^multica:(comment:|askuser:)/.test(row.id)).map(row => row.id)).toEqual(["multica:comment:root", "multica:askuser:removed:removed"]);
+  expect(f.cards()[0].data).toMatchObject({ readOnly: true, readOnlyReason: expect.stringContaining("删除") });
+});
+
+it("keeps a newly discovered card behind its unread source after restoring an old complete cache", async () => {
+  const f = await fixture();
+  await f.dispose(); await f.disconnect(); const restarted = f.start(); await f.open("skip"); await f.sync();
+  f.comments.push({ ...comment("unread", "root", [attachment("unread")]), created_at: "2026-11-24T10:00:01Z" },
+    { ...comment("later", "root"), created_at: "2026-11-24T10:00:02Z" }); f.documents.set("unread", card);
+  const reads = f.requests.filter(request => request.path.includes("thread=")).length;
+  await f.sync();
+  expect(f.requests.filter(request => request.path.includes("thread="))).toHaveLength(reads);
+  expect(f.cards()).toEqual([]);
+  expect(f.events).toContainEqual(expect.objectContaining({ type: "session.permission", request: expect.objectContaining({ id: "multica:askuser:unread:unread" }) }));
+  await restarted.server.rpc(threadOpen, f.address(), f.paseo);
+  expect(f.rows.get(f.agents[1].id)!.filter(row => /^multica:(comment:|divider:|askuser:)/.test(row.id)).map(row => row.id.replace("multica:", ""))).toEqual([
+    "comment:root", "divider:unread", "comment:unread", "askuser:unread:unread", "divider:later", "comment:later",
+  ]);
+});
+
+it("still delivers refreshed comments when AskUser discovery fails while announcing a native permission", async () => {
+  const f = await fixture(false);
+  f.comments.push(comment("failure", "root", [attachment("failure")]), comment("later", "root")); f.documents.set("failure", card);
+  const unsubscribe = (await f.connect()).onEvent(event => { if (event.type === "session.permission") throw new Error("host permission projection failed"); });
+  try {
+    const result = await f.server.rpc(threadOpen, f.address(), f.paseo);
+    expect(result.status).toBe("unavailable");
+    expect(f.rows.get(f.agents[1].id)!.filter(row => row.id.startsWith("multica:comment:")).map(row => row.id)).toEqual(["multica:comment:root", "multica:comment:failure", "multica:comment:later"]);
+  } finally { unsubscribe(); }
+});
+
+it("replays cached comments before live rows delivered during the card identity check", async () => {
+  const f = await fixture();
+  f.comments[0].attachments = [attachment("cached")]; f.documents.set("cached", card);
+  f.comments.push({ ...comment("older", "root"), created_at: "2026-11-24T10:00:01Z" });
+  await f.sync(); await f.dispose(); await f.disconnect(); const restarted = f.start();
+  let entered!: () => void, release!: () => void, checks = 0;
+  const arrived = new Promise<void>(resolve => { entered = resolve; }), blocked = new Promise<void>(resolve => { release = resolve; });
+  f.remote.beforeMe = async () => { if (++checks === 1) { entered(); await blocked; } };
+  const parent = f.agents[1], sessionId = "racing-replay";
+  const opening = (await f.connect()).send({ type: "session.open", requestId: sessionId, sessionId, history: "replay", persistence: JSON.parse(parent.handle.slice(7)), config: { cwd: parent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
+  const comments = () => (f.rows.get(sessionId) ?? []).filter(row => row.id.startsWith("multica:comment:")).map(row => row.id);
+  let during: string[] = [];
+  try {
+    await arrived;
+    f.comments.push({ ...comment("newer", "root"), created_at: "2026-11-24T10:00:02Z" });
+    expect((await restarted.server.rpc(threadOpen, f.address(), f.paseo)).status).toBe("ready");
+    during = comments();
+  } finally { f.remote.beforeMe = undefined; release(); await opening; }
+  expect(during).toEqual([]);
+  expect(comments()).toEqual(["multica:comment:root", "multica:comment:older", "multica:comment:newer"]);
+  expect((f.rows.get(sessionId) ?? []).filter(row => row.id === "multica:comment:newer")).toHaveLength(1);
+});
 
 it("discovers root and descendant cards on their owning Thread and downloads each attachment only once across restart", async () => {
   const f = await fixture();
@@ -360,6 +451,8 @@ it("places a generated root card in its new Thread while its unanchored Run stay
   f.comments.push({ ...comment("generated", null, [attachment("generated-file")]), source_task_id: "unanchored" } as ReturnType<typeof comment>);
   f.documents.set("generated-file", card); await f.sync();
   const generated = f.agents.find(agent => agent.labels["multica.discussion"] === "generated")!;
+  await f.server.rpc(threadOpen, { ...f.address(), rootId: "generated" }, f.paseo);
+  await f.server.rpc(threadOpen, { ...f.address(), rootId: "main" }, f.paseo);
   expect(f.rows.get(generated.id)).toContainEqual(expect.objectContaining({ type: "plugin", kind: "askuser", data: expect.objectContaining({ rootId: "generated", commentId: "generated" }) }));
   expect(f.rows.get(f.agents[0].id)).toContainEqual(expect.objectContaining({ type: "tool_call", id: "multica:run-marker:unanchored", status: "completed" }));
   expect(f.rows.get(generated.id)?.some(row => row.type === "tool_call" && row.detail.type === "sub_agent")).toBe(false);
@@ -671,6 +764,7 @@ it.each(["lost response", "server error"])("waits for bounded answer retries aft
   expect(f.events.some(event => event.type === "session.permission_resolved")).toBe(false);
   const before = f.posts.length;
   await f.dispose(); await f.disconnect(); f.events.length = 0; f.start(); await f.open("skip");
+  await f.sync(); // Confirm the host's cached source comments before projecting card updates.
   expect(f.posts).toHaveLength(before);
   expect(f.events.some(event => event.type === "session.permission")).toBe(true);
   f.remote.loseResponse = false; f.remote.postStatus = 200;

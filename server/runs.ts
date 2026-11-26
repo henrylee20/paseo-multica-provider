@@ -15,7 +15,7 @@ const remoteRunSchema = z.object({
   created_at: z.string().max(128).optional(), started_at: z.string().max(128).nullish(), completed_at: z.string().max(128).nullish(),
 });
 
-function sourceTime(value: string | undefined): bigint | undefined {
+export function sourceTime(value: string | undefined): bigint | undefined {
   if (!value) return undefined;
   // RFC3339Nano source times can distinguish comments within one millisecond.
   const match = /^(.*T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})$/.exec(value);

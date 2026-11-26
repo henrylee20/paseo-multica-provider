@@ -12,6 +12,8 @@ import { createServerContribution } from "../server/contribute.js";
 import { threadOpen, commentEventDetail } from "../shared/threads.js";
 import { FakeServer, resync } from "./support/fake-server.js";
 import { metadataHost } from "./support/metadata-host.js";
+import { readTaskDescription } from "../shared/description.js";
+import { textRevision } from "../server/chunked-text.js";
 
 const cleanup: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const dispose of cleanup.splice(0).reverse()) await dispose(); });
@@ -22,6 +24,10 @@ const comment = (id: string, parent_id: string | null, content: string, author_i
 type Comment = ReturnType<typeof comment>;
 function conversationRows(rows: ProviderTimelineItem[] | undefined) {
   return rows?.filter(row => row.type !== "plugin" || (row.kind !== "comment-divider" && (!row.data || typeof row.data !== "object" || Array.isArray(row.data) || row.data.category !== "source")));
+}
+
+function discussionOrder(rows: ProviderTimelineItem[] = []) {
+  return rows.filter(row => /^multica:(comment:|divider:|run-marker:)/.test(row.id)).map(row => row.id.replace("multica:", ""));
 }
 
 
@@ -36,6 +42,7 @@ async function fixture(initialRuns: Run[] = [], openOnImport = true, initialMess
   const messages: RunMessage[] = [...initialMessages];
   let failMessages = false;
   let beforeMessages: (() => Promise<void>) | undefined;
+  let beforeHistory: (() => Promise<void>) | undefined;
   let identity = "member-me";
   let failRuns = false;
   let failDiscovery = false;
@@ -83,6 +90,7 @@ async function fixture(initialRuns: Run[] = [], openOnImport = true, initialMess
           if (start > 0) { response.setHeader("X-Multica-Next-Before", stamp); response.setHeader("X-Multica-Next-Before-Id", page[0].id); }
           body = [root, ...page];
         }
+        await beforeHistory?.();
       } else if (discoveryPages) {
         const index = Number(url.searchParams.get("before_id") ?? "0");
         if (index + 1 < discoveryPages.length) {
@@ -176,10 +184,14 @@ async function fixture(initialRuns: Run[] = [], openOnImport = true, initialMess
     return { server, dispose };
   };
   const started = start();
-  cleanup.push(async () => { await provider?.close(); });
+  cleanup.push(async () => {
+    await provider?.close();
+    // A cached RPC read drains pending marker writes before the fixture directory is removed.
+    if (native.agents[0]) await server.rpc(readTaskDescription, { connectionKey: native.agents[0].labels["multica.connection"], issueId: "issue", revision: textRevision("Task description"), offset: 0 }, paseo);
+  });
   const paseo = { hosts: { list: async () => ({ self: { serverId: "owning-daemon" } }) } } as unknown as PaseoApi;
   await server!.syncRpc(workspaceEnable, { workspaceId: "remote-workspace", enabled: true }, paseo);
-  return { blockMessages: (handler?: () => Promise<void>) => { beforeMessages = handler; }, ...started, native, timelines, droppedOriginals, nativeHistory, reconnect, comments, requests, paseo, home, start, connect, eventsReady, signal, runs, messages, providerEvents, failMessages: (value: boolean) => {
+  return { blockHistory: (handler?: () => Promise<void>) => { beforeHistory = handler; }, blockMessages: (handler?: () => Promise<void>) => { beforeMessages = handler; }, ...started, native, timelines, droppedOriginals, nativeHistory, reconnect, comments, requests, paseo, home, start, connect, eventsReady, signal, runs, messages, providerEvents, failMessages: (value: boolean) => {
     failMessages = value;
   }, identity: async (value: string) => {
     identity = value;
@@ -198,6 +210,178 @@ async function fixture(initialRuns: Run[] = [], openOnImport = true, initialMess
     failHistory = value;
   } };
 }
+
+async function loadDiscussion(f: Awaited<ReturnType<typeof fixture>>, rootId = "root") {
+  const parent = f.native.agents.find(agent => agent.labels["multica.discussion"] === rootId)!;
+  return f.server.rpc(threadOpen, { ...JSON.parse(parent.handle.slice(7)).data, rootId }, f.paseo);
+}
+
+it.each(["empty", "cached"])("interleaves cached Run markers and children with %s comment history on replay", async cache => {
+  const f = await fixture([
+    { id: "b", issue_id: "issue", agent_id: "owned-agent", status: "completed", trigger_comment_id: "grandchild", created_at: "2026-11-24T10:00:02.5Z" },
+    { id: "a", issue_id: "issue", agent_id: "owned-agent", status: "completed", trigger_comment_id: "child", created_at: "2026-11-24T10:00:01.5Z" },
+  ], false, [{ task_id: "a", issue_id: "issue", seq: 1, type: "text", content: "Cached execution" }]);
+  f.comments[1].created_at = "2026-11-24T10:00:01Z";
+  f.comments[2].created_at = "2026-11-24T10:00:02Z";
+  await resync(f.server, f.paseo, "remote-workspace");
+  const parent = f.native.agents[1], address = JSON.parse(parent.handle.slice(7)).data;
+  if (cache === "cached") await f.server.rpc(threadOpen, address, f.paseo);
+  const sessionId = `ordered-${cache}`, provider = await f.connect();
+  await provider.send({ type: "session.open", requestId: sessionId, sessionId, history: "replay", persistence: JSON.parse(parent.handle.slice(7)), config: { cwd: parent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
+  if (cache === "empty") {
+    await expect.poll(() => f.requests.some(request => request.url.includes("/tasks/a/messages"))).toBe(true);
+    expect(f.providerEvents.some(event => event.type === "session.opened" && event.parentSessionId === sessionId)).toBe(false);
+    expect(discussionOrder(f.timelines.get(sessionId))).toEqual([]);
+    await f.server.rpc(threadOpen, address, f.paseo);
+  }
+  expect(discussionOrder(f.timelines.get(sessionId))).toEqual([
+    "comment:root", "divider:child", "comment:child", "run-marker:a", "divider:grandchild", "comment:grandchild", "run-marker:b",
+  ]);
+  await expect.poll(() => f.timelines.get(`${sessionId}:run:a`)?.some(row => row.type === "assistant_message" && row.text === "Cached execution")).toBe(true);
+  const marker = f.providerEvents.findIndex(event => event.type === "timeline.item" && event.sessionId === sessionId && event.item.id === "multica:run-marker:a");
+  const child = f.providerEvents.findIndex(event => event.type === "session.opened" && event.sessionId === `${sessionId}:run:a`);
+  expect(marker).toBeLessThan(child);
+  expect(f.providerEvents).toContainEqual({ type: "session.turn", sessionId: `${sessionId}:run:a`, turnId: "a", state: "completed" });
+});
+
+it("orders Runs sharing a trigger by nanosecond creation time then ID and places a later rerun after intervening comments", async () => {
+  const base = { issue_id: "issue", agent_id: "owned-agent", status: "completed", trigger_comment_id: "root" };
+  const f = await fixture([
+    { ...base, id: "rerun", created_at: "2026-11-24T10:00:01.5Z" },
+    { ...base, id: "b", created_at: "2026-11-24T11:00:00.000000002+01:00" },
+    { ...base, id: "z", created_at: "2026-11-24T10:00:00.000000001Z" },
+    { ...base, id: "a", created_at: "2026-11-24T10:00:00.000000002Z" },
+    { ...base, id: "untimed", created_at: "invalid" },
+  ], false);
+  f.comments[1].created_at = "2026-11-24T10:00:00.000000002Z";
+  f.comments[2].created_at = "2026-11-24T10:00:02Z";
+  const parent = f.native.agents[1], provider = await f.connect();
+  await provider.send({ type: "session.open", requestId: "ordered", sessionId: parent.id, history: "replay", persistence: JSON.parse(parent.handle.slice(7)), config: { cwd: parent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
+  await f.server.rpc(threadOpen, JSON.parse(parent.handle.slice(7)).data, f.paseo);
+  expect(discussionOrder(f.timelines.get(parent.id))).toEqual([
+    "comment:root", "run-marker:untimed", "run-marker:z", "divider:child", "comment:child", "run-marker:a", "run-marker:b", "run-marker:rerun", "divider:grandchild", "comment:grandchild",
+  ]);
+});
+
+it.each(["missing", "deleted"])("releases a Run with a %s trigger once the complete comment baseline is delivered", async mode => {
+  const f = await fixture([{ id: "orphan", issue_id: "issue", agent_id: "owned-agent", status: "completed", trigger_comment_id: "child", created_at: "2026-11-24T10:00:01.5Z" }], false);
+  f.comments[1].created_at = "2026-11-24T10:00:01Z"; f.comments[2].created_at = "2026-11-24T10:00:02Z";
+  if (mode === "deleted") Object.assign(f.comments[1], { deleted_at: stamp });
+  else { f.comments.splice(1, 1); f.comments[1].parent_id = "root"; }
+  const parent = f.native.agents[1], provider = await f.connect();
+  await provider.send({ type: "session.open", requestId: "orphan", sessionId: parent.id, history: "replay", persistence: JSON.parse(parent.handle.slice(7)), config: { cwd: parent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
+  expect(discussionOrder(f.timelines.get(parent.id))).toEqual([]);
+  await f.server.rpc(threadOpen, JSON.parse(parent.handle.slice(7)).data, f.paseo);
+  expect(discussionOrder(f.timelines.get(parent.id))).toEqual(mode === "missing"
+    ? ["comment:root", "divider:grandchild", "comment:grandchild", "run-marker:orphan"]
+    : ["comment:root", "run-marker:orphan", "divider:grandchild", "comment:grandchild"]);
+  if (mode === "deleted") {
+    const rows = f.timelines.get(parent.id)!;
+    expect(rows.findIndex(row => row.id.startsWith("multica:deletion:child:"))).toBeLessThan(rows.findIndex(row => row.id === "multica:run-marker:orphan"));
+  }
+  await resync(f.server, f.paseo, "remote-workspace");
+  expect(f.providerEvents.filter(event => event.type === "timeline.item" && event.sessionId === parent.id && event.item.id === "multica:run-marker:orphan")).toHaveLength(1);
+});
+
+it("places a task-level Run between system comments by source time without using generated output as an anchor", async () => {
+  const f = await fixture([{ id: "task", issue_id: "issue", agent_id: "owned-agent", status: "completed", created_at: "2026-11-24T10:00:00.5Z" }], false);
+  f.comments.push(comment("system-root", null, "System", "system", "system"),
+    { ...comment("system-later", "system-root", "Generated", "system", "system"), created_at: "2026-11-24T10:00:01Z", source_task_id: "task" });
+  await resync(f.server, f.paseo, "remote-workspace");
+  const parent = f.native.agents[0];
+  await (await f.connect()).send({ type: "session.open", requestId: "task-order", sessionId: parent.id, history: "replay", persistence: JSON.parse(parent.handle.slice(7)), config: { cwd: parent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
+  expect(discussionOrder(f.timelines.get(parent.id))).toEqual([]);
+  await f.server.rpc(threadOpen, { ...JSON.parse(parent.handle.slice(7)).data, rootId: "main" }, f.paseo);
+  expect(discussionOrder(f.timelines.get(parent.id))).toEqual(["comment:system-root", "run-marker:task", "comment:system-later"]);
+});
+
+it("anchors an untriggered Run to the earliest input association in its fixed discussion", async () => {
+  const f = await fixture([{ id: "associated", issue_id: "issue", agent_id: "owned-agent", status: "completed", trigger_comment_id: "root", created_at: stamp }], false);
+  f.comments[1].created_at = "2026-11-24T10:00:01Z";
+  f.comments[2].created_at = "2026-11-24T10:00:02Z";
+  f.comments.push({ ...comment("other", null, "Other discussion"), created_at: "2020-01-01T00:00:00Z" });
+  f.runs[0].trigger_comment_id = undefined;
+  f.runs[0].coalesced_comment_ids = ["other", "grandchild"];
+  f.runs[0].delivered_comment_ids = ["child"];
+  f.runs[0].supplement_comment_ids = ["grandchild"];
+  await resync(f.server, f.paseo, "remote-workspace");
+  const parent = f.native.agents[1];
+  await (await f.connect()).send({ type: "session.open", requestId: "associated", sessionId: parent.id, history: "replay", persistence: JSON.parse(parent.handle.slice(7)), config: { cwd: parent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
+  await f.server.rpc(threadOpen, JSON.parse(parent.handle.slice(7)).data, f.paseo);
+  expect(discussionOrder(f.timelines.get(parent.id))).toEqual(["comment:root", "divider:child", "comment:child", "run-marker:associated", "divider:grandchild", "comment:grandchild"]);
+});
+
+it.each([true, false])("ignores a trigger in another discussion and uses local inputs when available: %s", async associated => {
+  const f = await fixture([{ id: "cross-thread", issue_id: "issue", agent_id: "owned-agent", status: "completed", trigger_comment_id: "root", created_at: "2026-11-24T10:00:00.5Z" }], false);
+  f.comments[1].created_at = "2026-11-24T10:00:01Z"; f.comments[2].created_at = "2026-11-24T10:00:02Z";
+  f.comments.push(comment("other", null, "Other discussion"));
+  f.runs[0].trigger_comment_id = "other";
+  f.runs[0].delivered_comment_ids = associated ? ["grandchild", "child"] : [];
+  await resync(f.server, f.paseo, "remote-workspace");
+  await loadDiscussion(f);
+  const parent = f.native.agents[1], reads = f.requests.filter(request => request.url.includes("thread=")).length;
+  await (await f.connect()).send({ type: "session.open", requestId: "cross-thread", sessionId: parent.id, history: "replay", persistence: JSON.parse(parent.handle.slice(7)), config: { cwd: parent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
+  expect(f.requests.filter(request => request.url.includes("thread="))).toHaveLength(reads);
+  expect(discussionOrder(f.timelines.get(parent.id))).toEqual(associated
+    ? ["comment:root", "divider:child", "comment:child", "run-marker:cross-thread", "divider:grandchild", "comment:grandchild"]
+    : ["comment:root", "run-marker:cross-thread", "divider:child", "comment:child", "divider:grandchild", "comment:grandchild"]);
+});
+
+it("defers a newly discovered skip marker until its trigger is confirmed and restores existing children immediately", async () => {
+  const f = await fixture([{ id: "old", issue_id: "issue", agent_id: "owned-agent", status: "completed", trigger_comment_id: "root" }]);
+  const parent = f.native.agents[1], address = JSON.parse(parent.handle.slice(7)).data, provider = await f.connect();
+  await f.server.rpc(threadOpen, address, f.paseo);
+  await provider.send({ type: "session.close", requestId: "close", sessionId: parent.id });
+  f.comments.push(comment("new-input", "root", "While closed"));
+  f.runs.push({ id: "new", issue_id: "issue", agent_id: "owned-agent", status: "completed", trigger_comment_id: "new-input" });
+  await resync(f.server, f.paseo, "remote-workspace");
+  await provider.send({ type: "session.open", requestId: "skip", sessionId: "skip", history: "skip", persistence: JSON.parse(parent.handle.slice(7)), config: { cwd: parent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
+  expect(f.providerEvents).toContainEqual(expect.objectContaining({ type: "session.opened", sessionId: "skip:run:old" }));
+  expect(discussionOrder(f.timelines.get("skip"))).toEqual([]);
+  await resync(f.server, f.paseo, "remote-workspace");
+  const order = discussionOrder(f.timelines.get("skip"));
+  expect(order).toEqual(["divider:new-input", "comment:new-input", "run-marker:new"]);
+  await f.reconnect();
+  expect(f.providerEvents.filter(event => event.type === "timeline.item" && event.item.id === "multica:run-marker:new")).toHaveLength(1);
+});
+
+it("does not mistake an old complete cache for proof that a newly discovered trigger is missing", async () => {
+  const f = await fixture(); await loadDiscussion(f);
+  await f.dispose(); const restarted = f.start(); await f.reconnect();
+  await resync(restarted.server, f.paseo, "remote-workspace");
+  f.comments.push(comment("unread", "root", "Not loaded in this process"));
+  f.runs.push({ id: "unread", issue_id: "issue", agent_id: "owned-agent", status: "completed", trigger_comment_id: "unread" });
+  const reads = f.requests.filter(request => request.url.includes("thread=")).length;
+  await resync(restarted.server, f.paseo, "remote-workspace");
+  expect(f.requests.filter(request => request.url.includes("thread="))).toHaveLength(reads);
+  expect(f.providerEvents.some(event => event.type === "timeline.item" && event.item.id === "multica:run-marker:unread")).toBe(false);
+  const parent = f.native.agents[1];
+  await restarted.server.rpc(threadOpen, JSON.parse(parent.handle.slice(7)).data, f.paseo);
+  expect(discussionOrder(f.timelines.get(parent.id)).slice(-3)).toEqual(["divider:unread", "comment:unread", "run-marker:unread"]);
+});
+
+it("requires a refresh started after a Run begins waiting before declaring its trigger missing", async () => {
+  const f = await fixture([], false);
+  f.comments.push(comment("future", "root", "Discovered input"));
+  await resync(f.server, f.paseo, "remote-workspace");
+  f.comments.pop();
+  const parent = f.native.agents[1];
+  await (await f.connect()).send({ type: "session.open", requestId: "waiting", sessionId: parent.id, history: "replay", persistence: JSON.parse(parent.handle.slice(7)), config: { cwd: parent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
+  let entered!: () => void, release!: () => void;
+  const arrived = new Promise<void>(resolve => { entered = resolve; }), blocked = new Promise<void>(resolve => { release = resolve; });
+  f.blockHistory(async () => { entered(); await blocked; });
+  const reading = loadDiscussion(f);
+  try {
+    await arrived;
+    f.runs.push({ id: "waiting", issue_id: "issue", agent_id: "owned-agent", status: "completed", trigger_comment_id: "future" });
+    await resync(f.server, f.paseo, "remote-workspace");
+  } finally { release(); }
+  await reading; f.blockHistory();
+  expect(f.providerEvents.some(event => event.type === "timeline.item" && event.item.id === "multica:run-marker:waiting")).toBe(false);
+  await loadDiscussion(f);
+  expect(discussionOrder(f.timelines.get(parent.id)).at(-1)).toBe("run-marker:waiting");
+  expect(f.providerEvents.filter(event => event.type === "timeline.item" && event.item.id === "multica:run-marker:waiting")).toHaveLength(1);
+});
 
 it("discovers one stable native tab for a root and recursive replies without loading full background history", async () => {
   const f = await fixture();
@@ -433,6 +617,7 @@ it("fixes first ownership across cross-Thread coalescing, later associations and
   );
   await resync(f.server, f.paseo, "remote-workspace");
   const ownerOf = (id: string) => f.native.agents.filter(agent => f.timelines.get(agent.id)?.some(row => row.id === `multica:run-marker:${id}`)).map(agent => agent.labels["multica.discussion"]);
+  for (const agent of f.native.agents) await loadDiscussion(f, agent.labels["multica.discussion"]);
   expect(ownerOf("earliest")).toEqual(["z-earliest"]);
   expect(ownerOf("unanchored")).toEqual(["main"]);
   expect(ownerOf("trigger")).toEqual(["a-later"]);
@@ -446,8 +631,10 @@ it("fixes first ownership across cross-Thread coalescing, later associations and
   const provider = await restarted.server.providers.get("multica")!.connect({ versions: [1], capabilities: ["session.persistence", "session.subsession"] });
   const replay: ProviderEvent[] = [];
   provider.onEvent(event => replay.push(event));
-  for (const agent of f.native.agents)
+  for (const agent of f.native.agents) {
     await provider.send({ type: "session.open", requestId: `replay-${agent.id}`, sessionId: agent.id, history: "replay", persistence: JSON.parse(agent.handle.slice(7)), config: { cwd: agent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
+    await restarted.server.rpc(threadOpen, { ...JSON.parse(agent.handle.slice(7)).data, rootId: agent.labels["multica.discussion"] }, f.paseo);
+  }
   const owners = (runId: string) => replay.flatMap(event => event.type === "timeline.item" && event.item.id === `multica:run-marker:${runId}` ? [f.native.agents.find(agent => agent.id === event.sessionId)!.labels["multica.discussion"]] : []);
   expect(owners("earliest")).toEqual(["z-earliest"]);
   expect(owners("unanchored")).toEqual(["main"]);
@@ -460,6 +647,7 @@ it("uses source timestamps including sub-millisecond precision and timezone offs
   f.comments.push({ ...comment("early", null, "Early"), created_at: "2020-01-01T01:00:00.000000001+01:00" }, { ...comment("later", null, "Later"), created_at: "2020-01-01T00:00:00.000000002Z" });
   f.runs.push({ id: "precise", issue_id: "issue", agent_id: "owned-agent", status: "completed", delivered_comment_ids: ["later", "early"] });
   await resync(f.server, f.paseo, "remote-workspace");
+  await loadDiscussion(f, "early");
   const summaries = [...f.timelines.values()].flat().filter(row => row.id === "multica:run-marker:precise");
   expect(summaries).toHaveLength(1);
   expect(f.timelines.get(f.native.agents.find(agent => agent.labels["multica.discussion"] === "early")!.id)).toContain(summaries[0]);
@@ -478,12 +666,12 @@ it("uses generated-comment provenance as first-discovery associations but never 
     { id: "trigger-priority", issue_id: "issue", agent_id: "owned-agent", status: "completed", trigger_comment_id: "root" },
   );
   await resync(f.server, f.paseo, "remote-workspace");
+  expect(f.requests.some(request => request.url.includes("thread="))).toBe(false);
+  for (const agent of f.native.agents) await loadDiscussion(f, agent.labels["multica.discussion"]);
   const owners = (id: string) => f.native.agents.filter(agent => f.timelines.get(agent.id)?.some(row => row.id === `multica:run-marker:${id}`)).map(agent => agent.labels["multica.discussion"]);
   expect(owners("generated-only")).toEqual(["generated-early"]);
   expect(owners("fixed-main")).toEqual(["main"]);
   expect(owners("trigger-priority")).toEqual(["root"]);
-  expect(f.requests.some(request => request.url.includes("thread="))).toBe(false);
-
 });
 
 it("reconciles a cached original missing after process loss against complete native source IDs", async () => {
@@ -540,6 +728,7 @@ it("shares agent and member reads across an opened Thread and Run summaries in o
 
 it("negotiates read-only Run children and static completed markers, appending granular active states", async () => {
   const f = await fixture([{ id: "one", issue_id: "issue", agent_id: "owned-agent", status: "queued", trigger_comment_id: "child" }]);
+  await loadDiscussion(f);
   const parent = f.native.agents[1].id, child = `${parent}:run:one`;
   expect((await f.connect()).capabilities).toContain("session.subsession");
   expect(f.providerEvents).toContainEqual(expect.objectContaining({ type: "session.opened", sessionId: child, parentSessionId: parent, toolCallId: "multica:run-marker:one", restoration: "parent", title: "Lin Agent", description: "由 River 的评论触发", capabilities: [] }));
@@ -572,6 +761,7 @@ it("pushes ordered text, reasoning, tool input/results and full failure/remote m
     { ...input, seq: 5, type: "error", content: "Source error" },
   ];
   const f = await fixture([{ id: "detail", issue_id: "issue", agent_id: "owned-agent", status: "failed", trigger_comment_id: "root", error: "Pre-stream error", failure_reason: "directory_error", work_dir: "/remote/path", relative_work_dir: "../code" }], true, messages);
+  await loadDiscussion(f);
   const parent = f.native.agents[1].id, child = `${parent}:run:detail`;
   const rows = f.timelines.get(child)!;
   const messagesOnly = rows.filter(row => row.id.startsWith("run-message:"));
@@ -582,7 +772,7 @@ it("pushes ordered text, reasoning, tool input/results and full failure/remote m
   expect(rows).toContainEqual(expect.objectContaining({ type: "notification", message: "远端目录：/remote/path" }));
   expect(rows.every(row => Buffer.byteLength(JSON.stringify(row)) < 64 * 1024)).toBe(true);
   expect(f.native.agents.every(agent => agent.cwd !== "/remote/path")).toBe(true);
-  expect(f.timelines.get(parent)!.some(row => row.type === "assistant_message" || row.type === "error")).toBe(false);
+  expect(f.timelines.get(parent)!.some(row => row.id.startsWith("run-message:") || row.id.startsWith("run-metadata:"))).toBe(false);
   const count = f.requests.filter(request => request.url.includes("/messages")).length;
   await resync(f.server, f.paseo, "remote-workspace");
   expect(f.requests.filter(request => request.url.includes("/messages"))).toHaveLength(count);
@@ -593,6 +783,7 @@ it("reads details only for discussions opened in this process, refreshes active 
   expect(f.requests.some(request => request.url.includes("/messages"))).toBe(false);
   const agent = f.native.agents[1], provider = await f.connect();
   await provider.send({ type: "session.open", requestId: "open", sessionId: agent.id, history: "replay", persistence: JSON.parse(agent.handle.slice(7)), config: { cwd: agent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
+  await loadDiscussion(f);
   await expect.poll(() => f.requests.filter(request => request.url.includes("/tasks/live/messages")).length).toBe(1);
   f.messages.push({ task_id: "live", issue_id: "issue", seq: 1, type: "text", content: "Periodic output" });
   await expect.poll(() => f.timelines.get(`${agent.id}:run:live`)?.some(row => row.type === "assistant_message" && row.text === "Periodic output"), { timeout: 4000 }).toBe(true);
@@ -610,6 +801,7 @@ it("reads details only for discussions opened in this process, refreshes active 
 
 it("fills delayed source gaps without reordering projected messages and retains cached children offline", async () => {
   const f = await fixture([{ id: "gap", issue_id: "issue", agent_id: "owned-agent", status: "running", trigger_comment_id: "root" }]);
+  await loadDiscussion(f);
   const base = { task_id: "gap", issue_id: "issue" };
   f.messages.push({ ...base, seq: 3, type: "text", content: "Third" }, { ...base, seq: 1, type: "text", content: "First" });
   await resync(f.server, f.paseo, "remote-workspace");
@@ -633,6 +825,7 @@ it("describes comment-triggered children with creation time and unassociated Run
   const created_at = "2026-11-25T06:03:00Z", date = new Date(created_at);
   const stamp = `${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")} ${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
   const f = await fixture([{ id: "triggered", issue_id: "issue", agent_id: "owned-agent", status: "completed", trigger_comment_id: "child", created_at }, { id: "task", issue_id: "issue", agent_id: "owned-agent", status: "failed" }]);
+  await loadDiscussion(f); await loadDiscussion(f, "main");
   expect(f.providerEvents).toContainEqual(expect.objectContaining({ type: "session.opened", parentSessionId: f.native.agents[1].id, description: `由 River 的评论触发 · ${stamp}` }));
   expect(f.providerEvents).toContainEqual(expect.objectContaining({ type: "session.opened", parentSessionId: f.native.agents[0].id, description: "任务级执行" }));
   const address = JSON.parse(f.native.agents[1].handle.slice(7)).data;
@@ -641,6 +834,7 @@ it("describes comment-triggered children with creation time and unassociated Run
 
 it("rejects cross-Issue execution messages and keeps previously cached child content", async () => {
   const f = await fixture([{ id: "safe", issue_id: "issue", agent_id: "owned-agent", status: "running", trigger_comment_id: "root" }], true, [{ task_id: "safe", issue_id: "issue", seq: 1, type: "text", content: "Authorized" }]);
+  await loadDiscussion(f);
   f.messages.push({ task_id: "safe", issue_id: "other-issue", seq: 2, type: "text", content: "Wrong Issue" });
   await resync(f.server, f.paseo, "remote-workspace");
   const rows = f.timelines.get(`${f.native.agents[1].id}:run:safe`)!;
@@ -649,6 +843,7 @@ it("rejects cross-Issue execution messages and keeps previously cached child con
 
 it("does not render null or empty Run metadata as errors or paths", async () => {
   const f = await fixture([{ id: "healthy", issue_id: "issue", agent_id: "owned-agent", status: "completed", trigger_comment_id: "root", error: null, failure_reason: null, work_dir: null, relative_work_dir: "" }]);
+  await loadDiscussion(f);
   const rows = f.timelines.get(`${f.native.agents[1].id}:run:healthy`)!;
   expect(rows.filter(row => row.id.startsWith("run-metadata:"))).toEqual([]);
   expect(rows.filter(row => row.type === "error")).toEqual([]);
@@ -656,6 +851,7 @@ it("does not render null or empty Run metadata as errors or paths", async () => 
 
 it("leaves running child teardown to the host when its parent closes", async () => {
   const f = await fixture([{ id: "live-close", issue_id: "issue", agent_id: "owned-agent", status: "running", trigger_comment_id: "root" }]);
+  await loadDiscussion(f);
   const parent = f.native.agents[1].id, child = `${parent}:run:live-close`;
   const start = f.providerEvents.length;
   await (await f.connect()).send({ type: "session.close", requestId: "close-parent", sessionId: parent });
@@ -666,12 +862,14 @@ it("leaves running child teardown to the host when its parent closes", async () 
 
 it("skip restoration emits markers discovered while closed exactly once and preserves them across restart", async () => {
   const f = await fixture([{ id: "old", issue_id: "issue", agent_id: "owned-agent", status: "completed", trigger_comment_id: "root" }]);
+  await loadDiscussion(f);
   const parent = f.native.agents[1], provider = await f.connect();
   await provider.send({ type: "session.close", requestId: "close", sessionId: parent.id });
   f.runs.push({ id: "while-closed", issue_id: "issue", agent_id: "owned-agent", status: "completed", trigger_comment_id: "root" });
   await resync(f.server, f.paseo, "remote-workspace");
   const open = (sessionId: string) => provider.send({ type: "session.open", requestId: sessionId, sessionId, history: "skip", persistence: JSON.parse(parent.handle.slice(7)), config: { cwd: parent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
   await open("skip-first");
+  await resync(f.server, f.paseo, "remote-workspace"); // Recovery confirms the host's existing trigger before releasing the new marker.
   expect(f.timelines.get("skip-first")!.filter(row => row.type === "tool_call").map(row => row.id)).toEqual(["multica:run-marker:while-closed"]);
   await resync(f.server, f.paseo, "remote-workspace");
   await provider.send({ type: "session.close", requestId: "close-again", sessionId: "skip-first" });
@@ -693,6 +891,7 @@ it("does not poll execution details when subsessions are not negotiated", async 
 it("ends a terminal child immediately while deferring messages behind a missing prefix until final fill", async () => {
   const base = { task_id: "gap-end", issue_id: "issue" };
   const f = await fixture([{ id: "gap-end", issue_id: "issue", agent_id: "owned-agent", status: "running", trigger_comment_id: "root" }], true, [{ ...base, seq: 3, type: "text", content: "Third" }]);
+  await loadDiscussion(f);
   const child = `${f.native.agents[1].id}:run:gap-end`;
   expect(f.timelines.get(child)!.some(row => row.type === "assistant_message")).toBe(false);
   let release!: () => void, entered!: () => void;
@@ -721,6 +920,7 @@ it("labels system triggers and never treats a Run's own generated comment as its
   f.comments.push({ ...comment("system-trigger", null, "System", "system-id", "system"), type: "system" }, { ...comment("own-output", null, "Output", "owned-agent", "agent"), source_task_id: "generated" });
   f.runs.push({ id: "system-run", issue_id: "issue", agent_id: "owned-agent", status: "completed", trigger_comment_id: "system-trigger" }, { id: "generated", issue_id: "issue", agent_id: "owned-agent", status: "completed", created_at: stamp });
   await resync(f.server, f.paseo, "remote-workspace");
+  await loadDiscussion(f, "main"); await loadDiscussion(f, "own-output");
   expect(f.providerEvents).toContainEqual(expect.objectContaining({ type: "session.opened", description: "由 系统 的评论触发" }));
   const generated = f.providerEvents.find(event => event.type === "session.opened" && event.sessionId.endsWith(":run:generated"));
   expect(generated).toMatchObject({ description: expect.stringMatching(/^任务级执行 · 11-24 /) });
@@ -731,6 +931,7 @@ it("shows a historical Run's terminal state when its execution messages cannot b
   f.failMessages(true);
   const parent = f.native.agents[1], provider = await f.connect();
   await provider.send({ type: "session.open", requestId: "offline-open", sessionId: parent.id, history: "skip", persistence: JSON.parse(parent.handle.slice(7)), config: { cwd: parent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
+  await loadDiscussion(f);
   await expect.poll(() => f.requests.some(request => request.url.includes("/tasks/offline/messages"))).toBe(true);
   expect(f.providerEvents.filter(event => event.type === "session.turn" && event.sessionId === `${parent.id}:run:offline`)).toMatchObject([{ state: "started" }, { state: "completed" }]);
 });
