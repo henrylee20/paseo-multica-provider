@@ -22,7 +22,7 @@ import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
 const persistenceSchema = z.object({ version: z.literal(1), data: z.object({
   connectionKey: z.string(), issueId: z.string(),
 }).and(z.discriminatedUnion("discussion", [z.object({ discussion: z.literal("main") }), z.object({ discussion: z.literal("thread"), rootId: z.string() })])) });
-const supported = ["prompt.message", "prompt.steer", "session.persistence", "session.subsession", "session.list", "timeline.plugin", "session.archive", "session.unarchive", "permission"];
+const supported = ["prompt.message", "prompt.image", "prompt.steer", "session.persistence", "session.subsession", "session.list", "timeline.plugin", "session.archive", "session.unarchive", "permission"];
 
 /** The host appends at first emission: hold attachments and children until their source position. */
 class DiscussionOrder {
@@ -136,6 +136,19 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
         session.hasComment = true;
         if (clientMessageId) session.inputComments.add(clientMessageId);
       };
+      const emitDeliveries = (sessionId: string, issue: IssueMapping) => {
+        const session = sessions.get(sessionId);
+        if (!session) return;
+        for (const [clientMessageId, saved] of Object.entries(issue.commentInputs)) {
+          if (saved.rootId !== session.address.rootId || (saved.rootId !== "main" && !saved.attachments?.length)) continue;
+          // Keep the original main-discussion ID, including pre-attachment {} rows.
+          const id = saved.rootId === "main" ? `multica:thread-created:${clientMessageId}` : `multica:comment-attachments:${clientMessageId}`;
+          if (session.emittedRows.has(id)) continue;
+          session.emittedRows.add(id);
+          emit({ type: "timeline.item", sessionId, item: { type: "plugin", id, pluginId: providerId, kind: "comment-delivery", version: 1,
+            data: saved.attachments?.length ? { threadCreated: saved.rootId === "main", attachments: saved.attachments } : {} } });
+        }
+      };
       const emitRow = (sessionId: string, row: StoredRow, includeOriginal = true) => {
         const session = sessions.get(sessionId);
         if (!session || session.emittedRows.has(row.id)) return;
@@ -213,7 +226,7 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
             order.update(issue);
             session.subscriptions.push(store.subscribe(state => {
               const latest = state.connections[address.connectionKey]?.issues[address.issueId];
-              if (latest) order.update(latest);
+              if (latest) { order.update(latest); emitDeliveries(input.sessionId, latest); }
             }), runDetails.subscribe(changed => {
               if (changed.connectionKey !== address.connectionKey || changed.issueId !== address.issueId || changed.rootId !== address.rootId) return;
               void store.read().then(state => {
@@ -289,6 +302,7 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
             const latest = (await store.read()).connections[address.connectionKey]?.issues[address.issueId];
             if (sessions.get(input.sessionId) !== session || !latest || lifecycle.unavailable(address)) return;
             if (input.history === "replay") for (const row of projectionHistory(latest, address.rootId).rows) emitRow(input.sessionId, row);
+            emitDeliveries(input.sessionId, latest);
             for (const deliver of deferredRows) if (sessions.get(input.sessionId) === session) deliver();
             deferredRows.length = 0;
             replaying = false;
@@ -382,22 +396,17 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
               const address = session?.address;
               if (!address) throw new Error("请在 Multica 设置启用任务工作区后打开已导入的讨论。");
               if (lifecycle.unavailable(address)) throw new Error("此隐藏讨论正在核对本地归档状态，请稍后重试。");
-              const body = input.prompt.input.type === "message" && input.prompt.input.content.every(part => part.type === "text" && !("mimeType" in part))
-                ? input.prompt.input.content.map(part => part.type === "text" ? part.text : "").join("") : undefined;
-              if (!body?.trim() || input.prompt.outputSchema !== undefined) throw new Error("仅支持非空文本评论，请移除附件或结构化输出。");
+              const { body, attachments } = await deliveries.prepare(input.prompt);
               const issue = (await store.read()).connections[address.connectionKey]?.issues[address.issueId];
               if (!issue || (address.rootId !== "main" && !issue.threads[address.rootId])) throw new Error("此任务或 Thread 尚未映射。");
+              if (sessions.get(input.sessionId) !== session || lifecycle.unavailable(address)) throw new Error("此讨论已关闭，请重新打开后发送。");
               if ("clearPendingPermissions" in input.prompt && input.prompt.clearPendingPermissions === true) await askusers.collapsePending(address);
               beforeComment(input.sessionId, `multica:divider:input:${input.prompt.clientMessageId}`, input.prompt.clientMessageId);
               emit({ type: "timeline.item", sessionId: input.sessionId, item: {
                 type: "user_message", id: `multica:input:${input.prompt.clientMessageId}`, messageId: `multica:input:${input.prompt.clientMessageId}`,
                 clientMessageId: input.prompt.clientMessageId, text: body,
               } });
-              void deliveries.send(address, input.prompt.clientMessageId, body).then(() => {
-                if (address.rootId === "main") emit({ type: "timeline.item", sessionId: input.sessionId, item: {
-                  type: "plugin", id: `multica:thread-created:${input.prompt.clientMessageId}`, pluginId: "multica", kind: "comment-delivery", version: 1, data: {},
-                } });
-              }).catch(error => emit({ type: "timeline.item", sessionId: input.sessionId, item: {
+              void deliveries.send(address, input.prompt.clientMessageId, body, {}, attachments).catch(error => emit({ type: "timeline.item", sessionId: input.sessionId, item: {
                 type: "error", id: `multica:send-error:${input.prompt.clientMessageId}`, message: error instanceof Error ? error.message : "评论发送失败，请重试。",
               } }));
               emit({ type: "session.prompt_result", sessionId: input.sessionId, clientMessageId: input.prompt.clientMessageId,

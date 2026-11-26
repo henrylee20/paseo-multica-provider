@@ -280,7 +280,9 @@ export class ThreadSynchronizer {
             const name = comment.author_type === "member" ? members.find(member => member.user_id === comment.author_id)?.name ?? `成员 ${comment.author_id}`
               : agents.find(agent => agent.id === comment.author_id)?.name ?? `Agent ${comment.author_id}`;
             append({ ...source, id: `multica:comment:${comment.id}`, role: own ? "user" : "assistant",
-              text: own ? text : `${name}: \n\n${text}`, ...(outgoing ? { clientMessageId: outgoing } : {}) });
+              text: own ? (outgoing ? issue.commentInputs[outgoing].body ?? text : text) : `${name}: \n\n${text}`, ...(outgoing ? { clientMessageId: outgoing } : {}) });
+            if (outgoing && issue.commentInputs[outgoing].body !== undefined && issue.commentInputs[outgoing].body !== comment.content)
+              append({ ...source, id: `multica:correction:${comment.id}:${comment.revision ?? hash([fingerprint, comment.updated_at])}`, role: "event", category: "correction", text });
           }
           thread.observed[comment.id] = { fingerprint, deleted, revision: comment.revision, updatedAt: comment.updated_at };
         }

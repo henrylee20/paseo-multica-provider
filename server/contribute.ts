@@ -130,7 +130,8 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     const runDetails = new RunDetails(store, connection);
     const stops = new StopCoordinator(store, connection, runs);
     server.handle(askuserSkip, input => askusers.skip(input, lifecycle));
-    const deliveries = new CommentDelivery(store, connection, () => synchronizer.reconcile(), lifecycle);
+    const deliveries = new CommentDelivery(store, connection, () => synchronizer.reconcile(), lifecycle,
+      join(owningHome || join(dependencies.homeDirectory ?? homedir(), ".paseo"), "uploads"));
     threads.coordinateDeliveries(() => deliveries.waitForPosts());
     server.handle(deliveryMentions, async input => deliveries.mentions(input));
     const descriptions = new TaskDescriptions(store);
@@ -152,7 +153,7 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     const synchronizer = new SidebarSynchronizer({ store, connection, lifecycle, metadata, currentProfile,
       invalidateConnection: () => resolve.invalidate(),
       drain: async () => {
-        await deliveries.waitForPosts();
+        await deliveries.reset();
         await stops.close();
         await runDetails.reset();
         await threads.reset();

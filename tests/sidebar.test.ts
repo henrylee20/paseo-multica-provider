@@ -209,7 +209,10 @@ async function fixture(syncIntervalMs: number | null = 15_000, homePrefix = "mul
 
 it("client bootstrap leaves the native sidebar empty until a workspace rule is explicitly enabled", async () => {
   const f = await fixture();
+  expect(f.connectHost).not.toHaveBeenCalled();
   expect(await f.server.syncRpc(bootstrap, {}, f.paseo)).toMatchObject({ status: "ready" });
+  expect(f.connectHost).toHaveBeenCalledTimes(1);
+  expect((await f.server.rpc(connectionStatus, {}, f.paseo)).sync).toMatchObject({ status: "ready", lastSuccessAt: expect.any(String) });
   expect(await f.server.rpc(workspaces, {}, f.paseo)).toEqual({ workspaces: [{ id: "remote-workspace", name: "产品开发", enabled: false }] });
   expect(f.requests.some(path => path.startsWith("/api/issues"))).toBe(false);
   expect(f.websocketRequests).toEqual([]);
@@ -1058,6 +1061,51 @@ it("the injected polling interval overrides settings, including subsequent chang
     await expect.poll(() => f.requests.length).toBeGreaterThan(before);
     await waitForSync(f.server, f.paseo);
   } finally { await f.dispose(); vi.useRealTimers(); }
+});
+
+it.each(["workspace", "connection"])("a persistent %s failure retries at the configured interval despite repeated client bootstraps", async failure => {
+  const f = await fixture(null);
+  // Isolate scheduled retries from the independent WebSocket auth_ack trigger.
+  f.remote.acknowledgeEvents = false;
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  if (failure === "workspace") await enableSecondWorkspace(f);
+  await f.dispose();
+  if (failure === "workspace") { f.remote.nextPageFails = true; f.remote.failingWorkspace = "product"; }
+  else f.remote.authStatus = 503;
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  const restarted = f.start({ profile: "", syncIntervalSeconds: 60 });
+  const hostChecks = vi.spyOn(f.host, "listHosts");
+  // Whole-pass connection failures stop before reading the workspace list.
+  const attempts = () => failure === "workspace" ? f.requests.filter(path => path === "/api/workspaces").length : hostChecks.mock.calls.length;
+  const before = attempts();
+  const startedAt = vi.getMockedSystemTime()!.getTime();
+  // expect.poll also advances fake time; keep client ticks on absolute deadlines.
+  const advanceTo = (elapsed: number) => vi.advanceTimersByTimeAsync(startedAt + elapsed - vi.getMockedSystemTime()!.getTime());
+  try {
+    expect(await restarted.server.syncRpc(bootstrap, {}, f.paseo)).toEqual({ status: "unavailable" });
+    const status = (await restarted.server.rpc(connectionStatus, {}, f.paseo)).sync;
+    expect(status).toMatchObject(failure === "workspace"
+      ? { status: "unavailable", completedWorkspaces: 1, enabledWorkspaces: 2, failedWorkspaces: [{ workspaceId: "remote-workspace" }] }
+      : { status: "unavailable", stage: "connection" });
+    expect(attempts()).toBe(before + 1);
+    for (let elapsed = 10_000; elapsed < 60_000; elapsed += 10_000) {
+      await advanceTo(elapsed);
+      await Promise.all([restarted.server.rpc(bootstrap, {}, f.paseo), restarted.server.rpc(bootstrap, {}, { ...f.paseo } as PaseoApi)]);
+      expect((await waitForSync(restarted.server, f.paseo)).status).toBe("unavailable");
+      expect(attempts()).toBe(before + 1);
+    }
+    await advanceTo(59_999);
+    expect(attempts()).toBe(before + 1);
+    await advanceTo(60_000);
+    expect((await waitForSync(restarted.server, f.paseo)).status).toBe("unavailable");
+    expect(attempts()).toBe(before + 2);
+    f.remote.nextPageFails = false;
+    f.remote.authStatus = 200;
+    await advanceTo(120_000);
+    expect((await waitForSync(restarted.server, f.paseo)).status).toBe("ready");
+  } finally {
+    await restarted.dispose(); hostChecks.mockRestore(); vi.useRealTimers();
+  }
 });
 
 async function enableSecondWorkspace(f: Awaited<ReturnType<typeof fixture>>) {

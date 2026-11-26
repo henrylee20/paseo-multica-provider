@@ -201,11 +201,11 @@ export function createConnectionResolver(dependencies: ConnectionDependencies) {
 }
 
 /** All remote reads share the same last-use CLI check; no cached token fallback. */
-export async function remoteFetch(connection: AuthenticatedConnection, path: string, init: RequestInit = {}) {
+export async function remoteFetch(connection: AuthenticatedConnection, path: string, init: RequestInit = {}, timeoutMs = 10_000) {
   await connection.assertCurrent?.();
   const headers = new Headers(init.headers);
   headers.set("Authorization", `Bearer ${connection.token}`);
-  const signals = [AbortSignal.timeout(10_000), ...(connection.signal ? [connection.signal] : []), ...(init.signal ? [init.signal] : [])];
+  const signals = [AbortSignal.timeout(timeoutMs), ...(connection.signal ? [connection.signal] : []), ...(init.signal ? [init.signal] : [])];
   const response = await fetch(`${connection.apiUrl}${path}`, { ...init, headers, redirect: "error", signal: AbortSignal.any(signals) });
   if ((response.status === 401 || response.status === 403) && connection.identity) connection.identity.expiresAt = 0;
   return response;
