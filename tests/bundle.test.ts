@@ -1503,17 +1503,82 @@ it.each(["offline", "missing_config"])("disables data rebuild with a reason whil
   } finally { h.dispose(); }
 });
 
-it("rebuild preflight lists blocking discussions and Runs without offering confirmation", async () => {
+it.each(["active", "failed"])("rebuild lists %s Runs and only offers a fresh preflight", async verification => {
+  let inspections = 0;
   const h = await settingsHarness(name => name === "connection.status" ? readyStatus : name === "workspace.list" ? { connectionKey: "current", workspaces: [] }
-    : name === "rebuild.status" ? { status: "idle" } : name === "rebuild.preflight" ? { projects: 1, workspaces: 2, discussions: 3, blockers: [{ issueId: "issue", rootId: "root", title: "Task", discussion: "Review", runs: [{ runId: "run-active", agentName: "Builder", status: "queued" }] }] } : undefined);
+    : name === "rebuild.status" ? { status: "idle" } : name === "rebuild.preflight" ? { projects: 1, workspaces: 2, discussions: 3, blockers: ++inspections === 1 ? [{ issueId: "issue", rootId: "root", title: "Task", discussion: "Review", runs: [{ runId: "run-active", agentName: "Builder", status: "queued", verification, reason: verification === "failed" ? "服务暂不可用（HTTP 503）" : undefined }] }] : [] } : undefined);
   try {
     await vi.waitFor(() => { h.render(); expect(h.action("重建数据").disabled).toBe(false); });
     h.action("重建数据").onPress();
     await vi.waitFor(() => expect(h.render()).toContain("run-active"));
     const page = h.render();
     expect(page).toContain("Task · Review"); expect(page).toContain("等待结束或先手动 Stop");
+    expect(page).toContain("排队中"); expect(page).not.toContain("queued");
+    expect(page).toContain(verification === "active" ? "远端仍活跃" : "服务暂不可用（HTTP 503）");
     expect(h.pressables.some(button => button.accessibilityLabel === "确认重建")).toBe(false);
+    expect(h.pressables.some(button => button.accessibilityLabel === "仍然重建")).toBe(false);
     expect(h.calls.some(call => call.name === "rebuild.start")).toBe(false);
+    h.press("重新复核");
+    await vi.waitFor(() => expect(h.render()).toContain("确认重建"));
+    expect(h.calls.filter(call => call.name === "rebuild.preflight")).toHaveLength(2);
+    expect(h.render()).not.toContain("run-active");
+  } finally { h.dispose(); }
+});
+
+it("only offers force rebuild when all Runs are unconfirmable and submits every acknowledged ID with counted confirmation", async () => {
+  let verification = "active";
+  const h = await settingsHarness(name => name === "connection.status" ? readyStatus : name === "workspace.list" ? { connectionKey: "current", workspaces: [] }
+    : name === "rebuild.status" ? { status: "idle" } : name === "rebuild.preflight" ? { projects: 1, workspaces: 2, discussions: 3, blockers: [
+      { issueId: "issue", rootId: "main", title: "Task", discussion: "主讨论", runs: [{ runId: "missing", agentName: "Builder", status: "running", verification: "unconfirmable", reason: "远端快照中没有此 Run。" }] },
+      { issueId: "other", rootId: "root", title: "Other", discussion: "Review", runs: [{ runId: "denied", agentName: "Reviewer", status: "waiting_local_directory", verification, reason: "无权访问 Multica 工作区（HTTP 403）。" }] },
+    ] } : name === "rebuild.start" ? { started: true, blockers: [], progress: { status: "running", stage: "deleting", step: "删除讨论", completed: 0, total: 0 } } : undefined);
+  try {
+    await vi.waitFor(() => { h.render(); expect(h.action("重建数据").disabled).toBe(false); });
+    h.action("重建数据").onPress();
+    await vi.waitFor(() => expect(h.render()).toContain("missing"));
+    for (const mixed of ["active", "failed"]) {
+      verification = mixed; h.press("重新复核");
+      await vi.waitFor(() => { h.render(); expect(h.pressables.find(button => button.accessibilityLabel === "重新复核")?.disabled).toBe(false); });
+      expect(h.pressables.some(button => button.accessibilityLabel === "仍然重建")).toBe(false);
+    }
+    verification = "unconfirmable"; h.press("重新复核");
+    await vi.waitFor(() => expect(h.render()).toContain("仍然重建"));
+    const page = h.render();
+    expect(page).toContain("均无法向远端确认状态"); expect(page).toContain("不会取消远端 Run");
+    expect(page).toContain("1 个 Paseo 项目"); expect(page).toContain("2 个 Paseo 工作区"); expect(page).toContain("3 个插件讨论");
+    expect(page).toContain("远端快照中没有此 Run"); expect(page).toContain("HTTP 403");
+    expect(page).toContain("运行中"); expect(page).toContain("等待本地目录"); expect(page).not.toContain("waiting_local_directory"); expect(page).not.toContain("running");
+    expect(h.calls.some(call => call.name === "rebuild.start")).toBe(false);
+    expect(h.pressables.find(button => button.accessibilityLabel === "仍然重建")?.style).toMatchObject({ backgroundColor: "danger" });
+    expect(h.pressables.map(button => button.accessibilityLabel).slice(-3)).toEqual(["返回", "重新复核", "仍然重建"]);
+    h.press("仍然重建");
+    await vi.waitFor(() => expect(h.render()).toContain("数据重建进度"));
+    expect(h.calls.filter(call => call.name === "rebuild.start")).toEqual([{ name: "rebuild.start", input: { connectionKey: "current", acknowledgedRunIds: ["missing", "denied"] } }]);
+  } finally { h.dispose(); }
+});
+
+it("shows failed progress and a recheck hint when the queued rebuild finds blockers before deletion", async () => {
+  let progress = { status: "idle", stage: "deleting", step: "", completed: 0, total: 0, message: "" };
+  const h = await settingsHarness(name => name === "connection.status" ? readyStatus : name === "workspace.list" ? { connectionKey: "current", workspaces: [] }
+    : name === "rebuild.status" ? progress : name === "rebuild.preflight" ? { projects: 1, workspaces: 2, discussions: 3, blockers: progress.status === "failed" ? [{ issueId: "new", rootId: "main", title: "New task", discussion: "主讨论", runs: [{ runId: "new-run", agentName: "Builder", status: "running", verification: "active" }] }] : [] }
+    : name === "rebuild.start" ? { started: true, blockers: [], progress: progress = { ...progress, status: "running", step: "等待后台同步" } } : undefined);
+  try {
+    await vi.waitFor(() => { h.render(); expect(h.action("重建数据").disabled).toBe(false); });
+    h.action("重建数据").onPress();
+    await vi.waitFor(() => expect(h.render()).toContain("确认重建"));
+    h.press("确认重建");
+    await vi.waitFor(() => expect(h.render()).toContain("等待后台同步"));
+    expect(h.render()).toContain("数据重建进度");
+    expect(h.render()).not.toContain("确认重建数据");
+    progress = { ...progress, status: "failed", message: "等待后台同步失败：Run 复核未通过：New task · 主讨论：new-run（远端仍活跃）。请重新打开重建以重新复核。" };
+    await vi.waitFor(() => expect(h.render()).toContain(progress.message), { timeout: 3000 });
+    expect(h.render()).toContain("已完成 0 / 共 0 个任务");
+    h.press("关闭");
+    h.action("重建数据").onPress();
+    await vi.waitFor(() => expect(h.render()).toContain("New task · 主讨论"));
+    expect(h.calls.filter(call => call.name === "rebuild.preflight")).toHaveLength(2);
+    expect(h.calls.filter(call => call.name === "rebuild.start")).toHaveLength(1);
+    expect(h.pressables.some(button => ["确认重建", "仍然重建"].includes(button.accessibilityLabel ?? ""))).toBe(false);
   } finally { h.dispose(); }
 });
 
@@ -1526,7 +1591,7 @@ it("requires a counted second confirmation and shows uncancelable daemon rebuild
     await vi.waitFor(() => { h.render(); expect(h.action("重建数据").disabled).toBe(false); });
     h.action("重建数据").onPress();
     await vi.waitFor(() => expect(h.render()).toContain("1 个 Paseo 项目"));
-    expect(h.render()).toContain("2 个插件工作区"); expect(h.render()).toContain("3 个插件讨论");
+    expect(h.render()).toContain("2 个 Paseo 工作区"); expect(h.render()).toContain("3 个插件讨论");
     expect(h.render()).toContain("保留筛选规则与启用状态，清除人工隐藏");
     expect(h.calls.some(call => call.name === "rebuild.start")).toBe(false);
     h.press("确认重建");

@@ -7,8 +7,9 @@ import type { AuthenticatedConnection } from "./connection.js";
 import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
 import type { NativeHost } from "./native-host.js";
 import type { RunDetails } from "./run-details.js";
+import type { RunSynchronizer } from "./runs.js";
 import { StateStore, connectionState } from "./state.js";
-import type { SidebarSynchronizer } from "./sync.js";
+import type { RemoteWorkspace, SidebarSynchronizer } from "./sync.js";
 
 async function directory<T>(page: (cursor?: string) => Promise<{ entries: T[]; pageInfo: { hasMore: boolean; nextCursor?: string | null } }>): Promise<T[]> {
   const entries: T[] = [], seen = new Set<string>();
@@ -28,7 +29,8 @@ export class DataRebuild {
   private readonly progress = new Map<string, RebuildProgress>();
   private operation?: Promise<void>;
   constructor(private readonly store: StateStore, private readonly connection: () => Promise<AuthenticatedConnection>,
-    private readonly sync: SidebarSynchronizer, private readonly lifecycle: DiscussionLifecycle, private readonly details: RunDetails) {}
+    private readonly sync: SidebarSynchronizer, private readonly lifecycle: DiscussionLifecycle, private readonly details: RunDetails,
+    private readonly runs: RunSynchronizer) {}
   status(connectionKey: string) { return { ...this.progress.get(connectionKey) ?? idle() }; }
   private async current(connectionKey: string) {
     await this.sync.assertNoPurge();
@@ -36,18 +38,44 @@ export class DataRebuild {
     if (connection.connectionKey !== connectionKey) throw new Error("连接已变化，请刷新设置页。");
     return connection;
   }
-  async blockers(connectionKey: string): Promise<RebuildBlocker[]> {
+  private async blockers(connection: AuthenticatedConnection): Promise<RebuildBlocker[]> {
+    const { connectionKey } = connection;
     const local = (await this.store.read()).connections[connectionKey];
-    return Object.entries(local?.issues ?? {}).flatMap(([issueId, issue]) => {
+    let workspaces: Promise<RemoteWorkspace[]> | undefined;
+    const blockers: RebuildBlocker[] = [];
+    for (const [issueId, issue] of Object.entries(local?.issues ?? {})) {
+      const candidates = Object.entries(issue.runs).filter(([, run]) => isActiveRun(run.status)).map(([runId]) => runId);
+      if (!candidates.length) continue;
+      let result: Awaited<ReturnType<RunSynchronizer["recheck"]>> | undefined;
+      let failure: Pick<RebuildBlocker["runs"][number], "verification" | "reason"> | undefined;
+      try {
+        const project = local.projects[issue.remoteWorkspaceId];
+        const workspace = project?.slug ? { id: issue.remoteWorkspaceId, name: project.name, slug: project.slug }
+          : (await (workspaces ??= this.sync.workspaces(connection))).find(workspace => workspace.id === issue.remoteWorkspaceId);
+        if (!workspace) failure = { verification: "unconfirmable", reason: "Multica 工作区不可访问或已不在工作区列表中。" };
+        else {
+          result = await this.runs.recheck(connection, workspace, issueId, candidates);
+          if (result.unavailable) failure = { verification: "unconfirmable", reason: result.unavailable === 404 ? "Multica 任务不存在或已不可访问（HTTP 404）。" : "无权访问 Multica 工作区（HTTP 403）。" };
+        }
+      } catch (error) {
+        // Identity revocation must fail the whole request, never become an acknowledgement.
+        await connection.assertCurrent?.();
+        failure = { verification: "failed", reason: `远端复核暂时失败：${error instanceof Error ? error.message : String(error)}` };
+      }
+      const latest = (await this.store.read()).connections[connectionKey]?.issues[issueId];
       const groups = new Map<string, RebuildBlocker>();
-      for (const [runId, run] of Object.entries(issue.runs)) {
-        if (!isActiveRun(run.status)) continue;
+      for (const runId of candidates) {
+        const run = latest?.runs[runId];
+        if (!run || !isActiveRun(run.status)) continue;
+        const remote = result?.runs?.find(run => run.id === runId);
+        const verification = failure ?? (remote ? { verification: "active" as const } : { verification: "unconfirmable" as const, reason: "远端快照中没有此 Run。" });
         const rootId = run.ownerRootId ?? "unresolved";
         const group = groups.get(rootId) ?? { issueId, title: issue.title, rootId, discussion: rootId === "main" ? "主讨论" : issue.threads[rootId]?.title ?? "归属待确定", runs: [] };
-        group.runs.push({ runId, agentName: run.agentName, status: run.status }); groups.set(rootId, group);
+        group.runs.push({ runId, agentName: run.agentName, status: remote?.status ?? run.status, ...verification }); groups.set(rootId, group);
       }
-      return [...groups.values()];
-    });
+      blockers.push(...groups.values());
+    }
+    return blockers;
   }
   private async discover(host: NativeHost, connectionKey: string) {
     const local = (await this.store.read()).connections[connectionKey];
@@ -64,28 +92,33 @@ export class DataRebuild {
     return { agents, workspaceIds, projects };
   }
   async preflight(connectionKey: string, paseo: PaseoApi) {
-    await this.current(connectionKey);
+    const connection = await this.current(connectionKey);
     let counts = { projects: 0, workspaces: 0, discussions: 0 };
     await this.sync.withNativeHost(paseo, async host => {
       const found = await this.discover(host, connectionKey);
       counts = { projects: found.projects.length, workspaces: found.workspaceIds.size, discussions: found.agents.length };
     });
-    return { ...counts, blockers: await this.blockers(connectionKey) };
+    return { ...counts, blockers: await this.blockers(connection) };
   }
-  async start(connectionKey: string, paseo: PaseoApi) {
-    await this.current(connectionKey);
+  async start(connectionKey: string, paseo: PaseoApi, acknowledgedRunIds: string[] = []) {
+    const connection = await this.current(connectionKey);
     if (this.operation) throw new Error("数据重建正在进行。");
-    const blockers = await this.blockers(connectionKey);
-    if (blockers.length) return { started: false, blockers, progress: this.status(connectionKey) };
+    const acknowledged = new Set(acknowledgedRunIds);
+    const blocked = (groups: RebuildBlocker[]) => groups.some(group => group.runs.some(run => run.verification !== "unconfirmable" || !acknowledged.has(run.runId)));
+    const blockers = await this.blockers(connection);
+    if (blocked(blockers)) return { started: false, blockers, progress: this.status(connectionKey) };
     if (this.operation) throw new Error("数据重建正在进行。");
     const progress: RebuildProgress = { ...idle(), status: "running", step: "等待后台同步" };
     this.progress.set(connectionKey, progress);
     this.operation = this.sync.exclusive(paseo, async host => {
       let release: (() => void) | undefined;
       try {
-        await this.current(connectionKey);
-        const blocking = await this.blockers(connectionKey);
-        if (blocking.length) throw new Error(`存在活跃 Run，请等待结束或先手动 Stop：${blocking.map(group => `${group.title} · ${group.discussion}: ${group.runs.map(run => run.runId).join(", ")}`).join("；")}`);
+        const remaining = await this.blockers(await this.current(connectionKey));
+        if (blocked(remaining)) {
+          const summary = remaining.map(group => `${group.title} · ${group.discussion}：${group.runs.map(run =>
+            `${run.runId}（${run.verification === "active" ? "远端仍活跃" : run.verification === "unconfirmable" ? "无法确认" : "复核失败"}）`).join("、")}`).join("；");
+          throw new Error(`Run 复核未通过：${summary}。请重新打开重建以重新复核。`);
+        }
         await this.details.pause();
         progress.step = "发现插件记录";
         const found = await this.discover(host, connectionKey);
