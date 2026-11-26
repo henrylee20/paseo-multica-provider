@@ -187,6 +187,11 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
               emit({ type: "request.failed", requestId: input.requestId, error: { code: "unmapped_issue", message: "请在 Multica 设置启用任务工作区后打开已导入的主讨论。" } });
               return;
             }
+            if (capabilities.includes("session.subsession")) await runDetails.openDiscussion(openingAddress);
+            if (lifecycle.unavailable(openingAddress)) {
+              emit({ type: "request.failed", requestId: input.requestId, error: { code: "discussion_unavailable", message: "此讨论正在清理本地状态，请稍后重试。" } });
+              return;
+            }
             const history = openingAddress.rootId === "main" ? issue.mainHistory : issue.threads[openingAddress.rootId];
             const hasComment = input.history !== "replay" && history.rows.some(row => row.role !== "event");
             const session: SessionContext = { address: openingAddress, emittedRows: new Set(), originalIdentities: new Set(), hasComment, inputComments: new Set(), subscriptions: [], interrupts: new Set(), permissions: new Map() };
@@ -194,7 +199,7 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
             const address = session.address;
             emit({ type: "session.opened", requestId: input.requestId, sessionId: input.sessionId, capabilities,
               restoration: "core", persistence: parsed.data, cwd: issue.cwd, title: issue.title, description: issue.description });
-            const projection = new RunProjection(input.sessionId, address.rootId, emit);
+            const projection = new RunProjection(input.sessionId, address.rootId, emit, runId => runDetails.get(address, runId));
             const order = new DiscussionOrder(issue, address.rootId, session.emittedRows, () => threads.refreshSequence(address), input.history === "replay", (latest, runIds) => {
               if (!capabilities.includes("session.subsession")) return;
               const markers = projection.project(latest, input.history === "replay", runIds);
@@ -209,6 +214,12 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
             session.subscriptions.push(store.subscribe(state => {
               const latest = state.connections[address.connectionKey]?.issues[address.issueId];
               if (latest) order.update(latest);
+            }), runDetails.subscribe(changed => {
+              if (changed.connectionKey !== address.connectionKey || changed.issueId !== address.issueId || changed.rootId !== address.rootId) return;
+              void store.read().then(state => {
+                const latest = state.connections[address.connectionKey]?.issues[address.issueId];
+                if (latest && sessions.get(input.sessionId) === session) order.update(latest);
+              }).catch(() => {});
             }), () => projection.close());
             let replaying = input.history === "replay";
             const deferredRows: Array<() => void> = [];
@@ -281,9 +292,6 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
             for (const deliver of deferredRows) if (sessions.get(input.sessionId) === session) deliver();
             deferredRows.length = 0;
             replaying = false;
-            if (capabilities.includes("session.subsession")) {
-              runDetails.openDiscussion(address);
-            }
             let currentRuns: typeof issue.runs = {};
             const projectRuns = (owned: typeof issue.runs, activity = true) => {
               currentRuns = owned;

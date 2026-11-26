@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { ProviderEvent, ProviderTimelineItem } from "@getpaseo/plugin/server/provider";
 import { isActiveRun, type RunMessage } from "../shared/runs.js";
 import type { IssueMapping } from "./state.js";
+import type { RunDetail } from "./run-details.js";
 import type { StoredRun } from "./run-state.js";
 import { textSlice } from "./chunked-text.js";
 
@@ -41,7 +42,8 @@ function messageItems(runId: string, message: RunMessage): ProviderTimelineItem[
 /** One projection per opened parent. Children are read-only and restored by their parent. */
 export class RunProjection {
   private readonly children = new Map<string, { sessionId: string; status: StoredRun["status"]; rows: Set<string>; messages: Set<number>; ended?: StoredRun["status"]; changes: number }>();
-  constructor(private readonly parentSessionId: string, private readonly rootId: string, private readonly emit: (event: ProviderEvent) => void) {}
+  constructor(private readonly parentSessionId: string, private readonly rootId: string, private readonly emit: (event: ProviderEvent) => void,
+    private readonly detail: (runId: string) => RunDetail | undefined = () => undefined) {}
   project(issue: IssueMapping, replayMarkers = true, runIds: Iterable<string> = Object.keys(issue.runs)) {
     const markers: string[] = [];
     for (const runId of runIds) {
@@ -71,7 +73,7 @@ export class RunProjection {
         this.emit({ type: "timeline.item", sessionId: child!.sessionId, item, ...(timestamp && Number.isFinite(Date.parse(timestamp)) ? { timestamp } : {}) });
       };
       if ((fresh || child.status !== run.status) && isActiveRun(run.status)) send({ type: "notification", id: `run-status:${runId}:${child.changes++}`, level: "info", message: statusLabels[run.status as keyof typeof statusLabels] });
-      const cache = issue.runDetails[runId];
+      const cache = this.detail(runId);
       const messages = cache?.messages ?? [];
       let expected = messages[0]?.seq === 0 ? 0 : 1;
       for (const message of messages) {

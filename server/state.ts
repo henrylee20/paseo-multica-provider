@@ -1,8 +1,9 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import { storedRunSchema } from "./run-state.js";
-import { runMessageSchema } from "../shared/runs.js";
 import { threadSchema } from "./thread-state.js";
 import { taskRuleSchema } from "../shared/contracts.js";
 import { askuserAttachmentSchema, storedAskuserCardSchema } from "./askuser-state.js";
@@ -10,14 +11,13 @@ import { askuserAttachmentSchema, storedAskuserCardSchema } from "./askuser-stat
 const projectSchema = z.object({ cwd: z.string(), name: z.string(), slug: z.string().optional(), projectId: z.string().optional(), removed: z.boolean().optional() });
 export const issueSchema = z.object({
   remoteWorkspaceId: z.string(), workspaceId: z.string(), cwd: z.string(), title: z.string(),
-  projectId: z.string().optional(),
+  projectId: z.string().optional(), appliedTitle: z.string().optional(),
   description: z.string(), updatedAt: z.string().optional(), workspaceCreated: z.boolean().default(false), mainAgentId: z.string().optional(),
   // "inaccessible" is accepted only so states written before OPT-08 remain readable.
   archiveReason: z.enum(["rule_disabled", "filter_exit", "inaccessible"]).optional(), ruleArchivedAgentIds: z.array(z.string()).default([]),
   manualHidden: z.object({ workspace: z.boolean(), discussions: z.array(z.string()) }).default({ workspace: false, discussions: [] }),
   threads: z.record(z.string(), threadSchema).default({}),
   runs: z.record(z.string(), storedRunSchema).default({}),
-  runDetails: z.record(z.string(), z.object({ messages: z.array(runMessageSchema), finalized: z.boolean().optional() })).default({}),
   askuserAttachments: z.record(z.string(), askuserAttachmentSchema).optional(),
   askuserCards: z.record(z.string(), storedAskuserCardSchema).optional(),
   commentInputs: z.record(z.string(), z.object({ commentId: z.string(), rootId: z.string() })).default({}),
@@ -47,6 +47,12 @@ export class StateStore {
   private cached?: Promise<LocalState>;
   private profile?: string;
   constructor(readonly directory: string) {}
+  runDetailsDirectory(connectionKey: string) {
+    return join(this.directory, "run-details", createHash("sha256").update(connectionKey).digest("hex"));
+  }
+  async removeRunDetails(connectionKey: string) {
+    await rm(this.runDetailsDirectory(connectionKey), { recursive: true, force: true });
+  }
   /** Legacy data acquires an owner on first observation, without creating an empty file. */
   async observeProfile(profile: string | undefined) {
     this.profile = profile;
@@ -70,10 +76,12 @@ export class StateStore {
   update(change: (state: LocalState) => void): Promise<void> {
     const profile = this.profile;
     const operation = this.pending.then(async () => {
-      const state = structuredClone(await (this.cached ??= this.load()));
+      const previous = await (this.cached ??= this.load());
+      const state = structuredClone(previous);
       change(state);
       if (profile !== undefined) state.owner ??= { profile };
       const validated = stateSchema.parse(state);
+      if (isDeepStrictEqual(previous, validated)) return;
       await mkdir(this.directory, { recursive: true, mode: 0o700 });
       const temporary = join(this.directory, "state.json.next");
       await writeFile(temporary, JSON.stringify(validated), { mode: 0o600 });

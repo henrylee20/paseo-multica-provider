@@ -173,7 +173,9 @@ export class ThreadSynchronizer {
     for (const root of [...comments.values()].filter(comment => !comment.parent_id && comment.type === "comment" && comment.author_type !== "system")) {
       await this.store.update(state => {
         const threads = state.connections[connection.connectionKey].issues[issueId].threads;
-        threads[root.id] ??= { title: root.deleted_at ? "已删除的 Thread" : root.content.slice(0, 100) || "Thread", historyLoaded: false, rows: [], observed: {} };
+        const title = root.deleted_at ? "已删除的 Thread" : root.content.slice(0, 100) || "Thread";
+        threads[root.id] ??= { title, historyLoaded: false, rows: [], observed: {} };
+        threads[root.id].title = title;
       });
       const issue = (await this.store.read()).connections[connection.connectionKey].issues[issueId];
       const mapping = issue.threads[root.id];
@@ -185,9 +187,16 @@ export class ThreadSynchronizer {
         agentId ??= (await host.importAgent({ providerId: "multica", providerHandleId: `plugin:${JSON.stringify(threadPersistence(connection.connectionKey, issueId, root.id))}`,
           cwd: issue.cwd, workspaceId: issue.workspaceId, labels })).id;
         await this.metadata.write(agentId, connection.connectionKey, issueId);
-        await this.store.update(state => { state.connections[connection.connectionKey].issues[issueId].threads[root.id].agentId = agentId; });
+        await this.store.update(state => {
+          const saved = state.connections[connection.connectionKey].issues[issueId].threads[root.id];
+          saved.agentId = agentId;
+          delete saved.appliedTitle;
+        });
       }
-      await host.updateAgent(agentId, { name: mapping.title });
+      if (agentId !== mapping.agentId || mapping.appliedTitle !== mapping.title) {
+        await host.updateAgent(agentId, { name: mapping.title });
+        await this.store.update(state => { state.connections[connection.connectionKey].issues[issueId].threads[root.id].appliedTitle = mapping.title; });
+      }
       const address = { connectionKey: connection.connectionKey, issueId, rootId: root.id };
       if (mapping.historyLoaded && this.opened.has(key(address))) await this.refresh(connection, workspace, address, false);
     }

@@ -104,6 +104,7 @@ export class DataRebuild {
           if (!active.some(workspace => workspace.projectId === project.projectId)) await host.removeProject(project.projectId);
         }
         progress.step = "清空本地状态";
+        await this.store.removeRunDetails(connectionKey);
         await this.store.update(state => {
           const local = connectionState(state, connectionKey);
           state.connections[connectionKey] = { rules: local.rules, rebuildGeneration: (local.rebuildGeneration ?? 0) + 1, projects: {}, issues: {} };

@@ -223,7 +223,9 @@ it("workspace preview counts all matched tasks against unarchived mappings witho
   expect(await reader.server.rpc(workspacePreview, { workspaceId: "remote-workspace", connectionKey, rule }, f.paseo)).toEqual({
     total: 3, imported: 2, entering: 2, leaving: [{ id: "left-task", title: "保留的本地标题" }],
   });
-  expect(f.requests.slice(requests).filter(path => path.startsWith("/api/issues?"))).toHaveLength(3);
+  const previewReads = f.requests.slice(requests).filter(path => path.startsWith("/api/issues?"));
+  expect(previewReads.filter(path => new URL(path, "http://fixture").searchParams.has("ids"))).toHaveLength(1);
+  expect(previewReads.filter(path => !new URL(path, "http://fixture").searchParams.has("ids"))).toHaveLength(3);
   expect(f.scopes.filter(item => item.path.startsWith("/api/issues?")).every(item => item.slug === "product")).toBe(true);
   expect(await reader.server.rpc(workspacePreview, { workspaceId: "remote-workspace", connectionKey, rule: { ...rule, labelIds: ["blue"] } }, f.paseo)).toEqual({
     total: 2, imported: 2, entering: 2, leaving: [{ id: "issue-one", title: "PRD-1 实现登录" }, { id: "left-task", title: "保留的本地标题" }],
@@ -1205,6 +1207,10 @@ it("rebuild deletes discussions including archived orphans before workspaces and
     local.issues["issue-one"].commentRoots.old = "main";
     state.connections.other = structuredClone(local);
   });
+  for (const key of [connectionKey, "other"]) {
+    await mkdir(store.runDetailsDirectory(key), { recursive: true });
+    await writeFile(join(store.runDetailsDirectory(key), "cached.json"), "cached");
+  }
   const otherBefore = structuredClone((await store.read()).connections.other);
   const rulesBefore = structuredClone((await store.read()).connections[connectionKey].rules);
   const oldIds = f.native.agents.map(agent => agent.id), oldCreations = [...f.creations];
@@ -1222,6 +1228,8 @@ it("rebuild deletes discussions including archived orphans before workspaces and
   expect(saved.owner).toEqual({ profile: "" });
   expect(saved.connections[connectionKey].rebuildGeneration).toBe(1);
   expect(saved.connections.other).toEqual(otherBefore);
+  await expect(stat(store.runDetailsDirectory(connectionKey))).rejects.toMatchObject({ code: "ENOENT" });
+  expect(await readFile(join(store.runDetailsDirectory("other"), "cached.json"), "utf8")).toBe("cached");
   expect(saved.connections[connectionKey].rules).toEqual(rulesBefore);
   expect(saved.connections[connectionKey].issues["issue-one"].manualHidden).toEqual({ workspace: false, discussions: [] });
   expect(saved.connections[connectionKey].issues["issue-one"].commentRoots).not.toHaveProperty("old");
@@ -1391,4 +1399,34 @@ it("excludes known archived workspace mappings even when their archived discussi
   expect(await finishRebuild(f.server, f.paseo, connectionKey)).toMatchObject({ status: "completed" });
   expect(f.effects.filter(effect => effect.startsWith("archiveWorkspace:"))).toEqual([`archiveWorkspace:${f.native.workspaces[0].id}`]);
   expect(f.effects).not.toContain(`archiveWorkspace:${archived.id}`);
+});
+
+it("skips unchanged state writes and native renames across polls and restart, retries changed titles and reapplies on restore", async () => {
+  const f = await fixture();
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const title = vi.spyOn(f.host, "setWorkspaceTitle"), name = vi.spyOn(f.host, "updateAgent"), projectName = vi.spyOn(f.host, "renameProject");
+  const file = join(f.home, "multica-provider", "state.json");
+  const before = await stat(file);
+  f.native.workspaces[0].title = "My workspace";
+  f.native.agents[0].name = "My discussion";
+  await resync(f.server, f.paseo, "remote-workspace");
+  expect((await stat(file)).ino).toBe(before.ino);
+  expect(title).not.toHaveBeenCalled(); expect(name).not.toHaveBeenCalled(); expect(projectName).not.toHaveBeenCalled();
+  await f.dispose();
+  const restarted = f.start();
+  await resync(restarted.server, f.paseo, "remote-workspace");
+  expect(title).not.toHaveBeenCalled(); expect(name).not.toHaveBeenCalled();
+  expect(f.native.workspaces[0].title).toBe("My workspace");
+  expect(f.native.agents[0].name).toBe("My discussion");
+  f.issues[0].title = "New remote title";
+  title.mockRejectedValueOnce(new Error("host unavailable"));
+  expect(await resync(restarted.server, f.paseo, "remote-workspace")).toMatchObject({ status: "unavailable" });
+  await resync(restarted.server, f.paseo, "remote-workspace");
+  expect(title).toHaveBeenCalledTimes(2);
+  expect(f.native.workspaces[0].title).toBe("PRD-1 New remote title");
+  expect(name).not.toHaveBeenCalled();
+  await restarted.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: false }, f.paseo);
+  await restarted.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  expect(name).toHaveBeenCalledTimes(2);
+  expect(f.native.agents[0].name).toBe("主讨论");
 });
