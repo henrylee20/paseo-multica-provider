@@ -5,6 +5,7 @@ import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import { storedRunSchema } from "./run-state.js";
 import { threadSchema } from "./thread-state.js";
+import { deliveredAttachment } from "../shared/delivery.js";
 import { taskRuleSchema } from "../shared/contracts.js";
 import { askuserAttachmentSchema, storedAskuserCardSchema } from "./askuser-state.js";
 
@@ -20,7 +21,9 @@ export const issueSchema = z.object({
   runs: z.record(z.string(), storedRunSchema).default({}),
   askuserAttachments: z.record(z.string(), askuserAttachmentSchema).optional(),
   askuserCards: z.record(z.string(), storedAskuserCardSchema).optional(),
-  commentInputs: z.record(z.string(), z.object({ commentId: z.string(), rootId: z.string() })).default({}),
+  commentInputs: z.record(z.string(), z.object({ commentId: z.string(), rootId: z.string(),
+    body: z.string().optional(), attachments: z.array(deliveredAttachment).optional(), fingerprint: z.string().optional(),
+  })).default({}),
   commentSourceTaskIds: z.record(z.string(), z.string()).default({}),
   commentAuthors: z.record(z.string(), z.object({ id: z.string(), type: z.enum(["member", "agent", "system"]) })).default({}),
   commentCreatedAt: z.record(z.string(), z.string()).default({}),

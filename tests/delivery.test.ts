@@ -1,8 +1,8 @@
 import { createServer } from "node:http";
-import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, rm, symlink, truncate } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import type { PaseoApi } from "@getpaseo/client";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { ProviderConnection, ProviderEvent, ProviderPrompt } from "@getpaseo/plugin/server/provider";
@@ -15,7 +15,8 @@ import { FakeServer, resync } from "./support/fake-server.js";
 const cleanup: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const dispose of cleanup.splice(0).reverse()) await dispose(); });
 const stamp = "2026-11-24T10:00:00Z";
-const comment = (id: string, parent_id: string | null, content: string) => ({ id, parent_id, content, author_id: "me", author_type: "member", issue_id: "issue", type: "comment", created_at: stamp, updated_at: stamp, attachments: [] });
+type RemoteAttachment = { id: string; filename: string; content_type: string; size_bytes: number; url: string };
+const comment = (id: string, parent_id: string | null, content: string, attachments: RemoteAttachment[] = []) => ({ id, parent_id, content, author_id: "me", author_type: "member", issue_id: "issue", type: "comment", created_at: stamp, updated_at: stamp, attachments });
 async function fixture(active = false, idempotent = false) {
   const home = await mkdtemp(join(tmpdir(), "multica-delivery-"));
   cleanup.push(() => rm(home, { recursive: true, force: true }));
@@ -23,6 +24,9 @@ async function fixture(active = false, idempotent = false) {
   const runs = active ? [{ id: "run", issue_id: "issue", agent_id: "agent", status: "running", trigger_comment_id: "root" }] : [];
   const requests: string[] = [];
   const posts: Array<{ path: string; body: unknown; key?: string; slug?: string }> = [];
+  const uploads: Array<{ name: string; mimeType: string; bytes: Buffer; issueId: FormDataEntryValue | null; slug?: string }> = [];
+  const files = new Map<string, RemoteAttachment>();
+  let upload: (file: RemoteAttachment) => Promise<{ status?: number; body?: unknown; disconnect?: boolean }> = async file => ({ body: file });
   const receipts = new Map<string, ReturnType<typeof comment>>();
   const lookups: string[] = [];
   const deletedReceipts = new Set<string>();
@@ -31,14 +35,26 @@ async function fixture(active = false, idempotent = false) {
   let beforeLookup: ((key: string) => Promise<void>) | undefined;
   let identity = "me";
   let beforeMe: (() => Promise<void>) | undefined;
-  let post: (body: { content: string; parent_id?: string }) => Promise<{ status?: number; body?: unknown; disconnect?: boolean }> = async body => {
-    const saved = comment(`saved-${posts.length}`, body.parent_id ?? null, body.content); comments.push(saved); return { body: saved };
+  let post: (body: { content: string; parent_id?: string; attachment_ids?: string[] }) => Promise<{ status?: number; body?: unknown; disconnect?: boolean }> = async body => {
+    const saved = comment(`saved-${posts.length}`, body.parent_id ?? null, body.content, body.attachment_ids?.map(id => files.get(id)!) ?? []); comments.push(saved); return { body: saved };
   };
   const http = createServer(async (request, response) => {
     response.setHeader("Content-Type", "application/json");
     const url = new URL(request.url!, "http://localhost");
     requests.push(url.pathname);
     let body: unknown;
+    if (url.pathname === "/api/upload-file") {
+      const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(Buffer.from(chunk));
+      const form = await new Response(Buffer.concat(chunks), { headers: { "Content-Type": request.headers["content-type"]! } }).formData() as unknown as { get(name: string): FormDataEntryValue | null };
+      const file = form.get("file") as File;
+      uploads.push({ name: file.name, mimeType: file.type, bytes: Buffer.from(await file.arrayBuffer()), issueId: form.get("issue_id"), slug: request.headers["x-workspace-slug"] as string });
+      const id = `00000000-0000-4000-8000-${String(uploads.length).padStart(12, "0")}`;
+      const attachment = { id, filename: file.name, content_type: file.type, size_bytes: file.size, url: `/api/attachments/${id}/download` };
+      files.set(id, attachment);
+      const result = await upload(attachment);
+      if (result.disconnect) { response.destroy(); return; }
+      response.statusCode = result.status ?? 200; response.end(JSON.stringify(result.body ?? {})); return;
+    }
     if (request.method === "POST") {
       let text = ""; for await (const chunk of request) text += chunk;
       const input = text ? JSON.parse(text) : {};
@@ -82,7 +98,7 @@ async function fixture(active = false, idempotent = false) {
   let provider: ProviderConnection | undefined;
   async function connect() {
     if (provider) return provider;
-    provider = await server.providers.get("multica")!.connect({ versions: [1], capabilities: ["session.persistence", "prompt.message", "prompt.steer", "timeline.plugin"] });
+    provider = await server.providers.get("multica")!.connect({ versions: [1], capabilities: ["session.persistence", "prompt.message", "prompt.image", "prompt.steer", "timeline.plugin"] });
     provider.onEvent(event => {
       events.push(event);
       if (event.type !== "timeline.item") return;
@@ -119,11 +135,16 @@ async function fixture(active = false, idempotent = false) {
   };
   const started = start(); cleanup.push(async () => { await provider?.close(); });
   await server!.syncRpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, paseo);
-  const send = async (rootId: string, text: string, clientMessageId: string, delivery: "auto" | "steer" = "auto") => {
+  const send = async (rootId: string, text: string, clientMessageId: string, delivery: "auto" | "steer" = "auto", attachments: Array<Extract<ProviderPrompt["input"], { type: "message" }>["content"][number]> = []) => {
     const agent = agents.find(agent => agent.labels["multica.discussion"] === rootId)!;
-    await (await connect()).send({ type: "session.prompt", sessionId: agent.id, prompt: { clientMessageId, delivery, input: { type: "message", content: [{ type: "text", text }] } } });
+    await (await connect()).send({ type: "session.prompt", sessionId: agent.id, prompt: { clientMessageId, delivery, input: { type: "message", content: [{ type: "text", text }, ...attachments] } } });
   };
-  return { ...started, home, paseo, agents, events, canonical, nativeHistory, comments, runs, posts, requests, lookups, receipts, deletedReceipts, connect, send, start, lookupFailure: (status?: number) => {
+  const file = async (name = "notes.txt", content = "file bytes", mimeType = "text/plain") => {
+    const directory = join(home, "uploads", "file"); await mkdir(directory, { recursive: true });
+    const path = join(directory, name); await writeFile(path, content);
+    return { type: "uploaded_file" as const, id: "file", path, fileName: name, mimeType, size: Buffer.byteLength(content) };
+  };
+  return { ...started, home, paseo, agents, events, canonical, nativeHistory, comments, runs, posts, uploads, files, file, upload: (handler: typeof upload) => { upload = handler; }, requests, lookups, receipts, deletedReceipts, connect, send, start, lookupFailure: (status?: number) => {
     lookupFailure = status;
   }, advance: (milliseconds: number) => {
     clock = new Date(clock.getTime() + milliseconds);
@@ -146,6 +167,213 @@ it("main input creates an ordinary Thread and shows only its brief success hint"
   expect(f.posts).toEqual([{ path: "/api/issues/issue/comments", body: { content: "Hello", type: "comment" }, key: expect.any(String), slug: "product" }]);
   expect(f.events).toContainEqual(expect.objectContaining({ type: "timeline.item", sessionId: f.agents[0].id, item: expect.objectContaining({ kind: "comment-delivery" }) }));
   expect(f.events.some(event => event.type === "session.turn")).toBe(false);
+});
+
+const image = { type: "image" as const, data: Buffer.from("image bytes").toString("base64"), mimeType: "image/png" };
+const sendErrors = (f: Awaited<ReturnType<typeof fixture>>) => f.events.filter(event => event.type === "timeline.item" && event.item.type === "error");
+
+it.each(["main", "root"])("sends images and files with unchanged text from %s and restores one attachment row without replaying native input", async root => {
+  const f = await fixture();
+  const file = await f.file("方案.pdf", "PDF data", "application/pdf");
+  if (root === "root") await f.server.rpc(threadOpen, JSON.parse(f.agents.find(agent => agent.labels["multica.discussion"] === root)!.handle.slice(7)).data, f.paseo);
+  expect((await f.connect()).capabilities).toContain("prompt.image");
+  const timeouts = vi.spyOn(AbortSignal, "timeout");
+  try {
+    await f.send(root, "  Original body\n", "with-files", "auto", [image, file]);
+    await expect.poll(() => f.posts.length).toBe(1);
+    await resync(f.server, f.paseo, "workspace");
+    await f.dispose();
+    expect(timeouts.mock.calls.some(([ms]) => ms === 120_000)).toBe(true);
+    expect(timeouts.mock.calls.some(([ms]) => ms === 10_000)).toBe(true);
+  } finally { timeouts.mockRestore(); }
+  expect(f.uploads.map(({ name, mimeType, issueId, slug }) => ({ name, mimeType, issueId, slug }))).toEqual([
+    { name: "image-1.png", mimeType: "image/png", issueId: "issue", slug: "product" },
+    { name: "方案.pdf", mimeType: "application/pdf", issueId: "issue", slug: "product" },
+  ]);
+  expect(f.uploads.map(file => file.bytes.toString())).toEqual(["image bytes", "PDF data"]);
+  expect(f.posts[0]).toMatchObject({ body: { content: "  Original body\n", attachment_ids: [...f.files.keys()], ...(root === "root" ? { parent_id: root } : {}) } });
+  const agent = f.agents.find(agent => agent.labels["multica.discussion"] === root)!;
+  const id = root === "main" ? "multica:thread-created:with-files" : "multica:comment-attachments:with-files";
+  const attachments = f.canonical.get(agent.id)!.filter(row => row.item.id === id);
+  expect(attachments).toHaveLength(1);
+  expect(attachments[0].item).toMatchObject({ kind: "comment-delivery", version: 1, data: { threadCreated: root === "main", attachments: [
+    { name: "image-1.png", mimeType: "image/png", size: 11 }, { name: "方案.pdf", mimeType: "application/pdf", size: 8 },
+  ] } });
+  // Recover a plugin row lost after the receipt was persisted, including offline.
+  f.canonical.set(agent.id, f.canonical.get(agent.id)!.filter(row => row.item.id !== id));
+  const restarted = f.start();
+  await (await f.connect()).send({ type: "session.open", requestId: "restore-files", sessionId: agent.id, history: "skip", persistence: JSON.parse(agent.handle.slice(7)), config: { cwd: agent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
+  await resync(restarted.server, f.paseo, "workspace");
+  expect(f.canonical.get(agent.id)!.filter(row => row.item.id === id)).toHaveLength(1);
+  expect(f.canonical.get(agent.id)!.filter(row => row.item.clientMessageId === "with-files")).toMatchObject([{ item: { text: "  Original body\n" } }]);
+  expect(sendErrors(f)).toEqual([]);
+  expect(f.uploads).toHaveLength(2); expect(f.posts).toHaveLength(1);
+});
+
+it.each(["empty-body", "count", "base64", "mime", "outside", "symlink", "oversize", "missing"])("rejects %s before admission and before uploading any attachment", async kind => {
+  const f = await fixture();
+  const file = await f.file();
+  let attachments = [image, file] as Array<Extract<ProviderPrompt["input"], { type: "message" }>["content"][number]>;
+  if (kind === "count") attachments = Array.from({ length: 11 }, () => image);
+  if (kind === "base64") attachments = [{ ...image, data: "not base64!" }];
+  if (kind === "mime") attachments = [{ ...image, mimeType: " " }];
+  if (kind === "outside") attachments = [{ ...file, path: join(f.home, ".multica/config.json") }];
+  if (kind === "symlink") { const path = join(f.home, "uploads", "escape"); await symlink(join(f.home, ".multica/config.json"), path); attachments = [{ ...file, path }]; }
+  if (kind === "oversize") await truncate(file.path, 50 * 1024 * 1024 + 1);
+  if (kind === "missing") await rm(file.path);
+  await f.send("root", kind === "empty-body" ? " " : "text", "invalid-file", "auto", attachments);
+  expect(f.events).toContainEqual(expect.objectContaining({ type: "session.prompt_result", clientMessageId: "invalid-file", result: expect.objectContaining({ type: "failed" }) }));
+  expect(f.uploads).toEqual([]); expect(f.posts).toEqual([]);
+  if (kind === "empty-body") expect(JSON.stringify(f.events)).toContain("请输入评论正文后再发送附件。");
+});
+
+it.each(["403", "503", "network", "empty-id", "invalid-id"])("a partial %s upload failure never posts a comment or automatically uploads again", async kind => {
+  const f = await fixture();
+  f.upload(async file => f.uploads.length === 1 ? { body: file } : kind === "network" ? { disconnect: true }
+    : kind === "empty-id" || kind === "invalid-id" ? { body: { ...file, id: kind === "empty-id" ? "" : "invalid" } } : { status: Number(kind) });
+  await f.send("root", "with files", "failed-upload", "auto", [image, image]);
+  await expect.poll(() => sendErrors(f).length).toBe(1);
+  await f.send("root", "with files", "failed-upload", "auto", [image, image]);
+  await expect.poll(() => sendErrors(f).length).toBe(2);
+  expect(f.uploads).toHaveLength(2); expect(f.posts).toEqual([]);
+  const reason = kind === "403" ? "HTTP 403（无权限）" : kind === "503" ? "HTTP 503" : kind === "network" ? "网络错误或上传超时" : kind === "empty-id" ? "响应附件 ID 为空" : "上传响应无效";
+  expect(sendErrors(f)).toMatchObject([{ item: { message: `附件「image-2.png」上传失败：${reason}。评论未发送。已上传的 1 个附件未关联评论，可能成为孤立附件，请在 Multica 核对。` } }, expect.anything()]);
+  expect(await readFile(join(f.home, "multica-provider/state.json"), "utf8")).not.toContain("failed-upload");
+});
+
+it("reports the first failed attachment and HTTP reason without claiming previously uploaded orphan attachments", async () => {
+  const f = await fixture();
+  f.upload(async () => ({ status: 413, body: { error: "synthetic-private-response" } }));
+  await f.send("root", "with files", "first-upload-failure", "auto", [image, image]);
+  await expect.poll(() => sendErrors(f).length).toBe(1);
+  expect(sendErrors(f)).toMatchObject([{ item: { message: "附件「image-1.png」上传失败：HTTP 413（超出服务端大小限制）。评论未发送，可重新发送。" } }]);
+  expect(JSON.stringify(sendErrors(f))).not.toContain("孤立附件");
+  expect(JSON.stringify(sendErrors(f))).not.toContain("synthetic-private-response");
+  expect(f.uploads).toHaveLength(1); expect(f.posts).toEqual([]);
+});
+
+it.each(["network", "503", "409", "receipt"])("attachment comment %s keeps a fixed payload and never reuploads", async kind => {
+  const f = await fixture(false, true);
+  f.post(async body => {
+    const saved = comment("attached-receipt", "root", body.content, kind === "receipt" ? [] : [...f.files.values()]);
+    if (kind === "network") { f.comments.push(saved); return { body: saved, disconnect: true }; }
+    if (kind === "503" && f.posts.length === 1) return { status: 503 };
+    if (kind === "409") return { status: 409, body: { error: "attachment is no longer available" } };
+    return { body: saved };
+  });
+  await f.send("root", "attachments", "retry-attached", "auto", [image]);
+  await expect.poll(() => kind === "409" || kind === "receipt" ? sendErrors(f).length : f.posts.length).toBe(kind === "409" || kind === "receipt" ? 1 : 2);
+  await f.dispose();
+  expect(f.uploads).toHaveLength(1);
+  if (kind === "network" || kind === "503") expect(f.posts[1]).toEqual(f.posts[0]);
+  else expect(f.events.some(event => event.type === "timeline.item" && event.item.type === "plugin" && event.item.kind === "comment-delivery")).toBe(false);
+});
+
+it("an identity switch between uploads stops the old delivery without a comment or Run interruption", async () => {
+  const f = await fixture(true);
+  f.upload(async file => { await f.identity("another-user"); return { body: file }; });
+  await f.send("root", "still running", "switch-during-upload", "steer", [image, image]);
+  await expect.poll(() => sendErrors(f).length).toBe(1);
+  expect(f.uploads).toHaveLength(1); expect(f.posts).toEqual([]);
+  expect(f.runs[0].status).toBe("running");
+  expect(sendErrors(f)).toMatchObject([{ item: { message: "CLI 登录上下文已变化；请重新核对此输入所属的连接。" } }]);
+  expect(f.events).toContainEqual(expect.objectContaining({ type: "session.prompt_result", clientMessageId: "switch-during-upload", result: expect.objectContaining({ type: "steer" }) }));
+});
+
+it("unknown image MIME types use a generic extension and reject changed duplicate input", async () => {
+  const f = await fixture();
+  const arbitrary = { ...image, mimeType: "image/new-format" };
+  await f.send("root", "original", "same-attachment-input", "auto", [arbitrary]);
+  await expect.poll(() => f.posts.length).toBe(1);
+  await f.send("root", "changed", "same-attachment-input", "auto", [arbitrary]);
+  await expect.poll(() => sendErrors(f).length).toBe(1);
+  expect(f.uploads[0].name).toBe("image-1.bin"); expect(f.uploads).toHaveLength(1); expect(f.posts).toHaveLength(1);
+});
+
+it.each([["image/jpeg", "jpg"], ["image/gif", "gif"], ["image/webp", "webp"]])("names %s images with the %s extension", async (mimeType, extension) => {
+  const f = await fixture();
+  await f.send("root", "image", "image-type", "auto", [{ ...image, mimeType }]);
+  await expect.poll(() => f.posts.length).toBe(1);
+  expect(f.uploads[0].name).toBe(`image-1.${extension}`);
+});
+
+it("uses actual file size and reads each file only at its upload turn, rejecting a later path replacement", async () => {
+  const f = await fixture();
+  const file = await f.file();
+  const admission: number[] = [];
+  (await f.connect()).onEvent(event => { if (event.type === "session.prompt_result" && event.clientMessageId === "sequential") admission.push(f.uploads.length); });
+  f.upload(async uploaded => {
+    await rm(file.path); await symlink(join(f.home, ".multica/config.json"), file.path);
+    return { body: uploaded };
+  });
+  await f.send("root", "files", "sequential", "auto", [image, { ...file, size: 100 * 1024 * 1024 }]);
+  await expect.poll(() => sendErrors(f).length).toBe(1);
+  expect(admission).toEqual([0]);
+  expect(f.uploads).toHaveLength(1); expect(f.posts).toEqual([]);
+});
+
+it.each(["missing", "duplicate", "extra", "different"])("rejects a %s attachment set in a successful comment receipt", async kind => {
+  const f = await fixture();
+  f.post(async body => {
+    const files = [...f.files.values()];
+    const other = { ...files[0], id: "00000000-0000-4000-8000-999999999999" };
+    const received = kind === "missing" ? files.slice(0, 1) : kind === "duplicate" ? [files[0], files[0]] : kind === "extra" ? [...files, other] : [files[0], other];
+    return { body: comment("mismatch", "root", body.content, received) };
+  });
+  await f.send("root", "files", "mismatched-set", "auto", [image, image]);
+  await expect.poll(() => sendErrors(f).length).toBe(1);
+  expect(f.posts).toHaveLength(1);
+  expect(await readFile(join(f.home, "multica-provider/state.json"), "utf8")).not.toContain("mismatched-set");
+  expect(JSON.stringify(sendErrors(f))).toContain("评论可能已保存");
+});
+
+it("attachment recovery still rejects a native original with conflicting text", async () => {
+  const f = await fixture();
+  const agent = f.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
+  await f.server.rpc(threadOpen, JSON.parse(agent.handle.slice(7)).data, f.paseo);
+  await f.send("root", "original text", "strict-attachment", "auto", [image]);
+  await expect.poll(() => f.posts.length).toBe(1);
+  await resync(f.server, f.paseo, "workspace");
+  f.canonical.get(agent.id)!.find(row => row.item.clientMessageId === "strict-attachment")!.item.text = "conflicting native text";
+  await f.dispose(); const restarted = f.start();
+  const boundary = f.events.length;
+  await (await f.connect()).send({ type: "session.open", requestId: "strict-restore", sessionId: agent.id, history: "skip", persistence: JSON.parse(agent.handle.slice(7)), config: { cwd: agent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
+  expect(await resync(restarted.server, f.paseo, "workspace")).toMatchObject({ status: "unavailable" });
+  expect(f.events.slice(boundary).some(event => event.type === "timeline.item" && event.item.type === "user_message")).toBe(false);
+});
+
+it("persists durable attachment links rather than expiring download capabilities", async () => {
+  const f = await fixture();
+  f.post(async body => ({ body: comment("durable", "root", body.content, [...f.files.values()].map(file => ({ ...file,
+    markdown_url: "https://multica.example/api/attachments/durable/download", download_url: "https://storage.example/file?expires=60&signature=temporary",
+  }))) }));
+  await f.send("root", "file", "durable-link", "auto", [image]);
+  await expect.poll(() => f.posts.length).toBe(1);
+  await f.dispose();
+  const persisted = await readFile(join(f.home, "multica-provider/state.json"), "utf8");
+  expect(persisted).toContain("https://multica.example/api/attachments/durable/download");
+  expect(persisted).not.toContain("signature=temporary");
+});
+
+it("replays a legacy main-discussion delivery hint under its original ID without duplicating the persisted row", async () => {
+  const f = await fixture();
+  await f.send("main", "legacy text", "legacy-main");
+  await expect.poll(() => f.posts.length).toBe(1);
+  await f.dispose();
+  f.start();
+  const agent = f.agents.find(agent => agent.labels["multica.discussion"] === "main")!;
+  await (await f.connect()).send({ type: "session.open", requestId: "legacy-restore", sessionId: agent.id, history: "skip", persistence: JSON.parse(agent.handle.slice(7)), config: { cwd: agent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
+  const rows = f.canonical.get(agent.id)!.filter(row => row.item.kind === "comment-delivery");
+  expect(rows).toMatchObject([{ item: { id: "multica:thread-created:legacy-main", version: 1, data: {} } }]);
+  expect(rows).toHaveLength(1);
+});
+
+it("rejects unexpected attachments in a text-only comment receipt", async () => {
+  const f = await fixture();
+  f.post(async body => ({ body: comment("unexpected", "root", body.content, [{ id: "00000000-0000-4000-8000-000000000001", filename: "unexpected", content_type: "text/plain", size_bytes: 1, url: "/file" }]) }));
+  await f.send("root", "text only", "unexpected-attachments");
+  await expect.poll(() => sendErrors(f).length).toBe(1);
+  expect(await readFile(join(f.home, "multica-provider/state.json"), "utf8")).not.toContain("unexpected-attachments");
 });
 
 it("matches a saved reply to its native input through sync, duplicate dispatch and restart", async () => {

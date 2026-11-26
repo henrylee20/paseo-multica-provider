@@ -382,6 +382,40 @@ it("the main-discussion success renderer shows only a brief Thread hint", async 
   } finally { dispose(); }
 });
 
+it("attachment delivery rows preserve version 1, use host links and theme colors, and keep replies compact", async () => {
+  const renderers: Array<{ kind: string; version: number; schema: zod.ZodType; Component: (props: any) => any }> = [];
+  let error = false;
+  const ExternalLink = "HostExternalLink";
+  const setup = await bundledContribution("../index.client.tsx", {
+    "@getpaseo/plugin/client": {}, "@getpaseo/plugin/client/ui": { ExternalLink },
+    "react-native": { Text: "Text", View: "View" },
+    react: { useState: () => [error, (value: boolean) => { error = value; }], useEffect: () => {} },
+  });
+  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: any) => { renderers.push(renderer); return () => {}; } });
+  try {
+    const renderer = renderers.find(renderer => renderer.kind === "comment-delivery")!;
+    expect(renderer.version).toBe(1); expect(renderer.schema.parse({})).toEqual({});
+    const theme = { colors: { foreground: "theme-fg", foregroundMuted: "theme-muted", statusDanger: "theme-danger" } };
+    const item = { data: renderer.schema.parse({ threadCreated: false, attachments: [
+      { id: "file", name: "规格.pdf", mimeType: "application/pdf", size: 2048, url: "https://multica.example/file" },
+      { id: "missing", name: "data", mimeType: "application/octet-stream" },
+    ] }) };
+    const tree = renderer.Component({ item, theme });
+    expect(tree.props.style).toEqual({ gap: 4 });
+    const text = renderedText(tree);
+    expect(text).toContain("规格.pdf · application/pdf · 2.0 KiB");
+    expect(text).toContain("大小未知"); expect(text).not.toContain("新 Thread");
+    const link = tree.props.children[1][0];
+    expect(link.type).toBe(ExternalLink); expect(link.props.href).toBe("https://multica.example/file");
+    expect(link.props.children.props.style.color).toBe("theme-fg");
+    link.props.onError(new Error("cannot open"));
+    const failed = renderer.Component({ item, theme });
+    expect(failed.props.children.at(-1).props.style.color).toBe("theme-danger");
+    expect(renderedText(failed)).toContain("无法打开附件链接");
+    expect(() => renderer.schema.parse({ attachments: [{ id: "bad", name: "bad", mimeType: "text/plain", url: "javascript:alert(1)" }] })).toThrow();
+  } finally { dispose(); }
+});
+
 /**
  * Hooks for calling bundled components directly. Like React, state and effects belong to a component's
  * place in the tree, so a child that mounts later does not shift the state of the components after it.
