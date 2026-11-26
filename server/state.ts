@@ -8,7 +8,7 @@ import { threadSchema } from "./thread-state.js";
 import { taskRuleSchema } from "../shared/contracts.js";
 import { askuserAttachmentSchema, storedAskuserCardSchema } from "./askuser-state.js";
 
-const projectSchema = z.object({ cwd: z.string(), name: z.string(), slug: z.string().optional(), projectId: z.string().optional(), removed: z.boolean().optional() });
+const projectSchema = z.object({ cwd: z.string(), name: z.string(), appliedName: z.string().optional(), slug: z.string().optional(), projectId: z.string().optional(), removed: z.boolean().optional() });
 export const issueSchema = z.object({
   remoteWorkspaceId: z.string(), workspaceId: z.string(), cwd: z.string(), title: z.string(),
   projectId: z.string().optional(), appliedTitle: z.string().optional(),

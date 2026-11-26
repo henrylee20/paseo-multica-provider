@@ -535,7 +535,9 @@ it("restart preserves existing placeholder directories and the imported history 
   // Seed the persisted/native boundary as an installation using the older
   // full-length directory format, with already imported agent history.
   persisted.connections[connectionKey].projects["remote-workspace"].cwd = legacyProject;
+  delete persisted.connections[connectionKey].projects["remote-workspace"].appliedName;
   f.native.projects[0].cwd = legacyProject;
+  f.native.projects[0].name = "产品开发";
   for (const [index, issue] of f.issues.entries()) {
     const cwd = join(legacyProject, (index === 0 ? "c" : "d").repeat(64));
     persisted.connections[connectionKey].issues[issue.id].cwd = cwd;
@@ -545,6 +547,7 @@ it("restart preserves existing placeholder directories and the imported history 
   }
   await writeFile(statePath, JSON.stringify(persisted));
   const projects = structuredClone(f.native.projects);
+  projects[0].name = "Multica · 产品开发";
   const workspaces = structuredClone(f.native.workspaces);
   const agents = structuredClone(f.native.agents);
   const restarted = f.start();
@@ -640,7 +643,7 @@ it("the daemon worker continues updating native task names without further clien
 it("enabling the default rule pages custom-category issues into a native project, separate workspaces and main discussion tabs", async () => {
   const f = await fixture();
   expect(await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo)).toMatchObject({ status: "ready" });
-  expect(f.native.projects).toMatchObject([{ name: "产品开发" }]);
+  expect(f.native.projects).toMatchObject([{ name: "Multica · 产品开发" }]);
   expect(f.native.workspaces.map(item => ({ projectId: item.projectId, title: item.title }))).toEqual([
     { projectId: "native-project", title: "PRD-1 实现登录" }, { projectId: "native-project", title: "PRD-2 修复同步" },
   ]);
@@ -1416,14 +1419,18 @@ it("skips unchanged state writes and native renames across polls and restart, re
   const restarted = f.start();
   await resync(restarted.server, f.paseo, "remote-workspace");
   expect(title).not.toHaveBeenCalled(); expect(name).not.toHaveBeenCalled();
+  expect(projectName).not.toHaveBeenCalled();
   expect(f.native.workspaces[0].title).toBe("My workspace");
   expect(f.native.agents[0].name).toBe("My discussion");
+  f.workspaces[0].name = "研发协作";
   f.issues[0].title = "New remote title";
   title.mockRejectedValueOnce(new Error("host unavailable"));
   expect(await resync(restarted.server, f.paseo, "remote-workspace")).toMatchObject({ status: "unavailable" });
   await resync(restarted.server, f.paseo, "remote-workspace");
   expect(title).toHaveBeenCalledTimes(2);
   expect(f.native.workspaces[0].title).toBe("PRD-1 New remote title");
+  expect(f.native.projects[0].name).toBe("Multica · 研发协作");
+  expect(projectName).toHaveBeenCalledTimes(1);
   expect(name).not.toHaveBeenCalled();
   await restarted.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: false }, f.paseo);
   await restarted.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);

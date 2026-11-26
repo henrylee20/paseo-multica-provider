@@ -570,10 +570,11 @@ export class SidebarSynchronizer {
       const added = await this.host.addProject(projectDirectory);
       if (added.error || !added.project || added.project.projectKind === "git") throw new Error("Could not register non-Git native project");
       const projectId = added.project.projectId;
-      if (local?.projects[workspaceId]?.name !== workspace.name || local.projects[workspaceId].projectId !== projectId)
-        await this.host.renameProject(projectId, workspace.name);
+      const projectName = `Multica · ${workspace.name}`;
+      if (local?.projects[workspaceId]?.appliedName !== projectName || local.projects[workspaceId].projectId !== projectId)
+        await this.host.renameProject(projectId, projectName);
       await this.options.store.update(state => {
-        connectionState(state, connection.connectionKey).projects[workspaceId] = { cwd: projectDirectory, projectId, name: workspace.name, slug: workspace.slug };
+        connectionState(state, connection.connectionKey).projects[workspaceId] = { cwd: projectDirectory, projectId, name: workspace.name, appliedName: projectName, slug: workspace.slug };
       });
       for (const issue of issues) {
         if (version !== this.ruleVersion) return;
