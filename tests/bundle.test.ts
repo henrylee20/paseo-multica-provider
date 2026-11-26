@@ -603,8 +603,8 @@ it.each([true, false])("partial sync failures show names even when the failed Mu
 
 it("the profile dropdown lists logged-in choices and retains logged-out or missing selections", async () => {
   const h = await settingsHarness((name, input) => name === "profile.list" ? { profiles: [
-    { name: "", loggedIn: true, apiHost: "default.example.test" },
-    { name: "office", loggedIn: true, apiHost: "office.example.test:8443" },
+    { name: "", loggedIn: true, apiHost: "default.example.test", user: "Lin" },
+    { name: "office", loggedIn: true, apiHost: "office.example.test:8443", user: "kai@example.test" },
     { name: "logout", loggedIn: false, apiHost: "logout.example.test" },
     { name: "other-logout", loggedIn: false },
   ], overridden: false, isolated: false } : name === "connection.status" ? readyStatus : empty(name, input));
@@ -612,15 +612,15 @@ it("the profile dropdown lists logged-in choices and retains logged-out or missi
     h.setProfile("logout");
     await vi.waitFor(() => { h.render(); expect(h.selects[0].disabled).toBe(false); });
     expect(h.selects[0]).toMatchObject({ value: "logout", hint: "仅列出已在 daemon 主机登录的 profile。", options: [
-      { value: "", label: "默认 · default.example.test" },
-      { value: "office", label: "office · office.example.test:8443" },
-      { value: "logout", label: "logout · logout.example.test（未登录）" },
+      { value: "", label: "Lin · default.example.test" },
+      { value: "office", label: "kai@example.test · office.example.test:8443" },
+      { value: "logout", label: "未登录 · logout.example.test" },
     ] });
     h.setProfile("missing"); h.render();
     expect(h.selects[0].options).toEqual([
-      { value: "", label: "默认 · default.example.test" },
-      { value: "office", label: "office · office.example.test:8443" },
-      { value: "missing", label: "missing（未登录）" },
+      { value: "", label: "Lin · default.example.test" },
+      { value: "office", label: "kai@example.test · office.example.test:8443" },
+      { value: "missing", label: "未登录" },
     ]);
     h.selects[0].onValueChange("missing");
     expect(h.settingsSave).not.toHaveBeenCalled();
@@ -641,15 +641,46 @@ it("the profile dropdown lists logged-in choices and retains logged-out or missi
   } finally { h.dispose(); }
 });
 
+it("profile labels distinguish only identical user and host pairs, including unverified logins", async () => {
+  const h = await settingsHarness((name, input) => name === "profile.list" ? { profiles: [
+    { name: "", loggedIn: true, apiHost: "same.example.test", user: "Lin" },
+    { name: "office", loggedIn: true, apiHost: "same.example.test", user: "Lin" },
+    { name: "other-user", loggedIn: true, apiHost: "same.example.test", user: "Kai" },
+    { name: "other-host", loggedIn: true, apiHost: "other.example.test", user: "Lin" },
+    { name: "offline", loggedIn: true, apiHost: "offline.example.test" },
+    { name: "offline-copy", loggedIn: true, apiHost: "offline.example.test" },
+    { name: "unverified", loggedIn: true, apiHost: "unverified.example.test" },
+    { name: "logout", loggedIn: false, apiHost: "same.example.test", user: "Lin" },
+  ], overridden: false, isolated: false } : name === "connection.status" ? readyStatus : empty(name, input));
+  try {
+    await vi.waitFor(() => { h.render(); expect(h.selects[0].disabled).toBe(false); });
+    expect(h.selects[0].options).toEqual([
+      { value: "", label: "Lin · same.example.test（默认）" },
+      { value: "office", label: "Lin · same.example.test（office）" },
+      { value: "other-user", label: "Kai · same.example.test" },
+      { value: "other-host", label: "Lin · other.example.test" },
+      { value: "offline", label: "无法验证 · offline.example.test（offline）" },
+      { value: "offline-copy", label: "无法验证 · offline.example.test（offline-copy）" },
+      { value: "unverified", label: "无法验证 · unverified.example.test" },
+    ]);
+    h.selects[0].onValueChange("office");
+    expect(h.render()).toContain("切换到 profile：Lin · same.example.test（office）");
+    h.press("取消"); h.render();
+    h.selects[0].onValueChange("unverified");
+    expect(h.render()).toContain("切换到 profile：无法验证 · unverified.example.test");
+    expect(h.settingsSave).not.toHaveBeenCalled();
+  } finally { h.dispose(); }
+});
+
 it("profile confirmation shows local counts and remote safety, and cancel never saves", async () => {
   const h = await settingsHarness((name, input) => name === "profile.list"
-    ? { profiles: [{ name: "office", loggedIn: true }], overridden: false, isolated: false }
+    ? { profiles: [{ name: "office", loggedIn: true, apiHost: "office.example.test", user: "Lin" }], overridden: false, isolated: false }
     : name === "connection.status" ? { ...readyStatus, localData: { projects: 2, issues: 7, discussions: 19 } } : empty(name, input));
   try {
     await vi.waitFor(() => { h.render(); expect(h.selects[0].disabled).toBe(false); });
     h.selects[0].onValueChange("office");
     const modal = h.render();
-    for (const text of ["确认切换 CLI profile", "office", "Project 2", "任务 7", "讨论 19", "本地规则、映射、缓存、讨论", "不影响 Multica 远端数据（不会取消远端 Run 或删除评论）"]) expect(modal).toContain(text);
+    for (const text of ["确认切换 CLI profile", "切换到 profile：Lin · office.example.test", "Project 2", "任务 7", "讨论 19", "本地规则、映射、缓存、讨论", "不影响 Multica 远端数据（不会取消远端 Run 或删除评论）"]) expect(modal).toContain(text);
     h.press("取消"); h.render();
     expect(h.modals).toHaveLength(0);
     expect(h.settingsSave).not.toHaveBeenCalled();
@@ -680,7 +711,7 @@ it("loads profiles on mount, header refresh and host changes, discarding late re
     : name === "connection.status" ? readyStatus : empty(name, input));
   try {
     h.render();
-    expect(h.selects[0]).toMatchObject({ disabled: true, value: "", options: [{ value: "", label: "默认（未登录）" }] });
+    expect(h.selects[0]).toMatchObject({ disabled: true, value: "", options: [{ value: "", label: "未登录" }] });
     expect(pending).toHaveLength(1);
     pending[0](result("office"));
     await vi.waitFor(() => { h.render(); expect(h.selects[0].disabled).toBe(false); });
@@ -690,7 +721,7 @@ it("loads profiles on mount, header refresh and host changes, discarding late re
     expect(pending).toHaveLength(2);
     const nextHost = { host: { id: "another-host", label: "Another host" } };
     h.render("settings", nextHost);
-    expect(h.selects[0]).toMatchObject({ disabled: true, options: [{ value: "", label: "默认（未登录）" }] });
+    expect(h.selects[0]).toMatchObject({ disabled: true, options: [{ value: "", label: "未登录" }] });
     expect(pending).toHaveLength(3);
     pending[2](result("new-host"));
     await vi.waitFor(() => { h.render("settings", nextHost); expect(h.selects[0].disabled).toBe(false); });
@@ -712,7 +743,7 @@ it("a failed profile list shows a row error and only the configured profile, and
   try {
     h.setProfile("missing");
     await vi.waitFor(() => expect(h.render()).toContain("无法读取此主机的 CLI profile"));
-    expect(h.selects[0]).toMatchObject({ value: "missing", options: [{ value: "missing", label: "missing（未登录）" }] });
+    expect(h.selects[0]).toMatchObject({ value: "missing", options: [{ value: "missing", label: "未登录" }] });
     failed = false; h.press("刷新");
     await vi.waitFor(() => { h.render(); expect(h.selects[0].options).toHaveLength(2); });
     expect(h.selects[0].error).toBeUndefined();

@@ -137,8 +137,10 @@ export function ConnectionScreen({ host, theme }: PluginSurfaceProps) {
   const current = workspacesRead ? workspaces.filter(workspace => workspace.connectionKey === status?.connectionKey) : [];
   const availableProfiles = profiles?.value?.profiles.filter(profile => profile.loggedIn || profile.name === configuredProfile) ?? [];
   if (configuredProfile !== undefined && !availableProfiles.some(profile => profile.name === configuredProfile)) availableProfiles.push({ name: configuredProfile, loggedIn: false });
-  const profileOptions = availableProfiles.map(profile => ({ value: profile.name,
-    label: `${profile.name || "默认"}${profile.apiHost ? ` · ${profile.apiHost}` : ""}${profile.loggedIn ? "" : "（未登录）"}` }));
+  const profileLabels = availableProfiles.map(profile => profile.loggedIn
+    ? `${profile.user ?? "无法验证"} · ${profile.apiHost}` : `未登录${profile.apiHost ? ` · ${profile.apiHost}` : ""}`);
+  const profileOptions = availableProfiles.map((profile, index) => ({ value: profile.name,
+    label: profileLabels[index] + (profileLabels.filter(label => label === profileLabels[index]).length > 1 ? `（${profile.name || "默认"}）` : "") }));
   const profileHint = [profiles?.value?.isolated ? "任务上下文不能使用拥有者的 profile。" : "",
     profiles?.value?.overridden ? "环境变量覆盖 CLI 凭据，切换 profile 不会改变账号。" : ""].filter(Boolean).join(" ") || "仅列出已在 daemon 主机登录的 profile。";
 
@@ -194,7 +196,7 @@ export function ConnectionScreen({ host, theme }: PluginSurfaceProps) {
     </SettingsSection> : null}
     {pendingProfile !== null ? <Modal title="确认切换 CLI profile" open onOpenChange={open => { if (!open && !confirming && !settings.saving) setPendingProfile(null); }}>
       <Modal.Content>
-        <Text style={text}>切换到 profile：{pendingProfile || "默认"}</Text>
+        <Text style={text}>切换到 profile：{profileOptions.find(option => option.value === pendingProfile)?.label}</Text>
         <Text style={text}>当前本地数据：Project {status?.localData?.projects ?? 0} · 任务 {status?.localData?.issues ?? 0} · 讨论 {status?.localData?.discussions ?? 0}</Text>
         <Text style={text}>将清理上一 profile 的全部本地规则、映射、缓存、讨论、插件 Project 和占位目录。含用户自建工作区的 Project 将保留。</Text>
         <Text style={text}>不影响 Multica 远端数据（不会取消远端 Run 或删除评论）</Text>

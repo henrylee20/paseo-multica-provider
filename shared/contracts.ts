@@ -12,7 +12,7 @@ export const multicaSettings = defineSettings({
 });
 
 export const profileList = defineRpc({ name: "profile.list", input: z.object({}), output: z.object({
-  profiles: z.array(z.object({ name: z.string(), loggedIn: z.boolean(), apiHost: z.string().optional() })),
+  profiles: z.array(z.object({ name: z.string(), loggedIn: z.boolean(), apiHost: z.string().optional(), user: z.string().optional() })),
   overridden: z.boolean(), isolated: z.boolean(),
 }) });
 export type ProfileList = z.output<typeof profileList.output>;

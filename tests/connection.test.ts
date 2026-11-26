@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { mkdtemp, mkdir, writeFile, rm, rename, readFile, symlink } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, rm, rename, readFile, symlink, stat, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
@@ -44,8 +44,9 @@ async function fixture(profile = "", environment: NodeJS.ProcessEnv = {}) {
     list: () => server.rpc(profileList, {}, {} as PaseoApi) };
 }
 
-it("lists CLI files safely without exposing credentials or making network requests", async () => {
+it("lists CLI files safely and verifies each configured login using only its own credentials and service", async () => {
   const f = await fixture();
+  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify({ id: "user", name: "Lin" })));
   const root = join(f.home, ".multica", "profiles");
   const configs = {
     office: JSON.stringify({ server_url: " wss://office.example.test:8443/ws?secret=url-secret#fragment ", token: " office-secret " }),
@@ -70,17 +71,20 @@ it("lists CLI files safely without exposing credentials or making network reques
   await symlink(join(root, "office"), join(root, "symlink-entry"));
   const result = await f.list();
   expect(result).toEqual({ profiles: [
-    { name: "", loggedIn: true, apiHost: new URL(f.apiUrl).host },
+    { name: "", loggedIn: true, apiHost: new URL(f.apiUrl).host, user: "Lin" },
     { name: "blank", loggedIn: false, apiHost: new URL(f.apiUrl).host },
     { name: "blank-server", loggedIn: false },
     { name: "corrupt", loggedIn: false },
     { name: "invalid", loggedIn: false },
     { name: "invalid-url", loggedIn: false },
     { name: "logout", loggedIn: false, apiHost: "logout.example.test" },
-    { name: "office", loggedIn: true, apiHost: "office.example.test:8443" },
+    { name: "office", loggedIn: true, apiHost: "office.example.test:8443", user: "Lin" },
     { name: "unreadable", loggedIn: false },
   ], overridden: false, isolated: false });
   expect(f.requests).toEqual([]);
+  expect(fetch).toHaveBeenCalledTimes(2);
+  expect(fetch).toHaveBeenCalledWith(`${f.apiUrl}/api/me`, expect.objectContaining({ headers: { Authorization: "Bearer opaque-existing-credential" }, redirect: "error" }));
+  expect(fetch).toHaveBeenCalledWith("https://office.example.test:8443/api/me", expect.objectContaining({ headers: { Authorization: "Bearer office-secret" }, redirect: "error" }));
   const serialized = JSON.stringify(result);
   expect(serialized).not.toContain("opaque-existing-credential");
   expect(serialized).not.toContain("secret");
@@ -95,9 +99,131 @@ it("listing other profiles leaves the active connection's identity verification 
   expect(original.status).toBe("ready");
   expect(f.requests).toHaveLength(1);
   expect((await f.list()).profiles).toHaveLength(2);
-  expect(f.requests).toHaveLength(1);
+  expect(f.requests).toHaveLength(3);
+  expect(f.requests.slice(1).map(request => request.authorization).sort()).toEqual(["Bearer opaque-existing-credential", "Bearer other-secret"].sort());
   expect(await f.read()).toEqual(original);
+  expect(f.requests).toHaveLength(3);
+});
+
+it("profile labels ignore environment overrides and send unselected credentials only to their configured service", async () => {
+  const f = await fixture("", { MULTICA_TOKEN: "environment-secret", MULTICA_SERVER_URL: "https://override.example.test" });
+  const other = await fixture("office");
+  await mkdir(join(f.home, ".multica", "profiles", "office"), { recursive: true });
+  await writeFile(join(f.home, ".multica", "profiles", "office", "config.json"), JSON.stringify({ server_url: `${other.apiUrl}/ws`, token: "office-secret" }));
+  other.remote.body = { id: "other", name: "Kai" };
+  const result = await f.list();
+  expect(result).toEqual({ profiles: [
+    { name: "", loggedIn: true, apiHost: new URL(f.apiUrl).host, user: "Lin" },
+    { name: "office", loggedIn: true, apiHost: new URL(other.apiUrl).host, user: "Kai" },
+  ], overridden: true, isolated: false });
+  expect(f.requests).toEqual([{ path: "/api/me", authorization: "Bearer opaque-existing-credential" }]);
+  expect(other.requests).toEqual([{ path: "/api/me", authorization: "Bearer office-secret" }]);
+  for (const secret of ["environment-secret", "office-secret", "opaque-existing-credential", '"token"']) expect(JSON.stringify(result)).not.toContain(secret);
+});
+
+it.each(["", null, " \n "])("profile display names fall back to email when name is %j", async name => {
+  const f = await fixture();
+  f.remote.body = { id: "user", name, email: "lin@example.test" };
+  expect((await f.list()).profiles[0]).toMatchObject({ loggedIn: true, user: "lin@example.test" });
+});
+
+it.each([401, 403])("HTTP %s marks a profile logged out and caches that decision briefly", async status => {
+  const f = await fixture();
+  f.remote.status = status;
+  expect((await f.list()).profiles[0]).toEqual({ name: "", loggedIn: false, apiHost: new URL(f.apiUrl).host });
+  await f.list();
   expect(f.requests).toHaveLength(1);
+});
+
+it.each([
+  { label: "HTTP 503", status: 503, body: '{"error":"unavailable"}', cacheable: false },
+  { label: "an invalid identity", status: 200, body: '{"name":"missing ID"}', cacheable: false },
+  { label: "invalid JSON", status: 200, body: "{broken", cacheable: false },
+  { label: "empty names and emails", status: 200, body: '{"id":"user","name":"  ","email":""}', cacheable: true },
+])("profile verification keeps a configured login without a user on $label", async ({ status, body, cacheable }) => {
+  const f = await fixture();
+  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(body, { status }));
+  expect((await f.list()).profiles[0]).toEqual({ name: "", loggedIn: true, apiHost: new URL(f.apiUrl).host });
+  await f.list();
+  expect(fetch).toHaveBeenCalledTimes(cacheable ? 1 : 2);
+});
+
+it("a profile listing immediately retries after a temporary HTTP failure and returns the recovered user", async () => {
+  const f = await fixture();
+  f.remote.status = 503;
+  expect((await f.list()).profiles[0]).toEqual({ name: "", loggedIn: true, apiHost: new URL(f.apiUrl).host });
+  f.remote.status = 200;
+  expect((await f.list()).profiles[0]).toMatchObject({ loggedIn: true, user: "Lin" });
+  expect(f.requests).toHaveLength(2);
+});
+
+it("network failures keep a configured profile selectable without a display name", async () => {
+  const f = await fixture();
+  vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("network unavailable"));
+  expect((await f.list()).profiles[0]).toEqual({ name: "", loggedIn: true, apiHost: new URL(f.apiUrl).host });
+});
+
+it("profile verification uses a five-second timeout and starts profiles in parallel", async () => {
+  const f = await fixture();
+  await mkdir(join(f.home, ".multica", "profiles", "office"), { recursive: true });
+  await writeFile(join(f.home, ".multica", "profiles", "office", "config.json"), JSON.stringify({ server_url: f.apiUrl, token: "office-secret" }));
+  const controllers: AbortController[] = [];
+  const timeout = vi.spyOn(AbortSignal, "timeout").mockImplementation(() => {
+    const controller = new AbortController(); controllers.push(controller); return controller.signal;
+  });
+  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation((_url, init) => new Promise((_resolve, reject) => {
+    init!.signal!.addEventListener("abort", () => reject(init!.signal!.reason), { once: true });
+  }));
+  const listing = f.list();
+  try {
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+    expect(timeout.mock.calls).toEqual([[5_000], [5_000]]);
+  } finally { for (const controller of controllers) controller.abort(new DOMException("Timed out", "TimeoutError")); }
+  expect((await listing).profiles.map(profile => ({ loggedIn: profile.loggedIn, user: profile.user }))).toEqual([
+    { loggedIn: true, user: undefined }, { loggedIn: true, user: undefined },
+  ]);
+});
+
+it("profile label caches expire at 60 seconds and recheck both file mtime and size", async () => {
+  const f = await fixture();
+  let now = Date.now();
+  vi.spyOn(Date, "now").mockImplementation(() => now);
+  const original = await f.list();
+  f.remote.body = { id: "user", name: "Kai" };
+  now += 59_999;
+  expect(await f.list()).toEqual(original);
+  expect(f.requests).toHaveLength(1);
+  now += 1;
+  expect((await f.list()).profiles[0].user).toBe("Kai");
+  expect(f.requests).toHaveLength(2);
+
+  // A timestamp-only change and a size-only change each invalidate the label.
+  const before = await stat(f.path);
+  await utimes(f.path, before.atime, new Date(before.mtimeMs + 2_000));
+  f.remote.status = 403;
+  expect((await f.list()).profiles[0].loggedIn).toBe(false);
+  expect(f.requests).toHaveLength(3);
+  const changed = await stat(f.path);
+  await writeFile(f.path, `${await readFile(f.path, "utf8")}\n`);
+  await utimes(f.path, changed.atime, changed.mtime);
+  f.remote.status = 200;
+  expect((await f.list()).profiles[0]).toMatchObject({ loggedIn: true, user: "Kai" });
+  expect(f.requests).toHaveLength(4);
+
+  await writeFile(f.path, JSON.stringify({ server_url: f.apiUrl }));
+  expect((await f.list()).profiles[0]).toEqual({ name: "", loggedIn: false, apiHost: new URL(f.apiUrl).host });
+  expect(f.requests).toHaveLength(4);
+});
+
+it("profile display caches belong to each contribution lifecycle", async () => {
+  const f = await fixture();
+  await f.list();
+  f.remote.body = { id: "user", name: "Kai" };
+  const server = new FakeServer();
+  cleanup.push(createServerContribution({ homeDirectory: f.home, workingDirectory: f.home, environment: {} })(server.context));
+  expect((await server.rpc(profileList, {}, {} as PaseoApi)).profiles[0].user).toBe("Kai");
+  expect((await f.list()).profiles[0].user).toBe("Lin");
+  expect(f.requests).toHaveLength(2);
 });
 
 it("missing default config and profiles directory are ordinary logged-out listings", async () => {
@@ -110,14 +236,16 @@ it("missing default config and profiles directory are ordinary logged-out listin
 it("lists only the absolute MULTICA_TASK_CONFIG_ROOT when configured", async () => {
   const environment: NodeJS.ProcessEnv = {};
   const f = await fixture("owner", environment);
+  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify({ id: "user", name: "Lin" })));
   const root = join(f.home, "task-private");
   environment.MULTICA_TASK_CONFIG_ROOT = ` ${root} `;
   await mkdir(join(root, "profiles", "task"), { recursive: true });
   await writeFile(join(root, "config.json"), JSON.stringify({ server_url: "ws://private.example.test:8080/ws", token: "private-root-secret" }));
   await writeFile(join(root, "profiles", "task", "config.json"), JSON.stringify({ server_url: "https://task.example.test", token: "private-task-secret" }));
   expect(await f.list()).toEqual({ profiles: [
-    { name: "", loggedIn: true, apiHost: "private.example.test:8080" }, { name: "task", loggedIn: true, apiHost: "task.example.test" },
+    { name: "", loggedIn: true, apiHost: "private.example.test:8080", user: "Lin" }, { name: "task", loggedIn: true, apiHost: "task.example.test", user: "Lin" },
   ], overridden: false, isolated: false });
+  expect(fetch).toHaveBeenCalledTimes(2);
   environment.MULTICA_TASK_CONFIG_ROOT = "relative/path";
   await expect(f.list()).rejects.toThrow("MULTICA_TASK_CONFIG_ROOT 必须是绝对路径");
   expect(f.requests).toEqual([]);
@@ -131,7 +259,7 @@ it.each(["MULTICA_TOKEN", "MULTICA_SERVER_URL"])("reports a nonempty %s override
   const result = await f.list();
   expect(result.overridden).toBe(true);
   expect(JSON.stringify(result)).not.toContain("environment-secret");
-  expect(f.requests).toEqual([]);
+  expect(f.requests).toEqual([{ path: "/api/me", authorization: "Bearer opaque-existing-credential" }]);
 });
 
 it.each(["MULTICA_AGENT_ID", "MULTICA_TASK_ID", "MULTICA_DAEMON_PORT"])("isolation from %s hides owner profiles and hosts without authenticating", async key => {
@@ -156,10 +284,11 @@ it("shares task marker detection with connection resolution, including ancestor 
     await writeFile(marker, contents);
     expect((await server.rpc(profileList, {}, {} as PaseoApi)).isolated).toBe(false);
   }
+  expect(f.requests).toHaveLength(1);
   await writeFile(marker, JSON.stringify({ managed_by: "multica-daemon-task" }));
   expect(await server.rpc(profileList, {}, {} as PaseoApi)).toEqual({ profiles: [], overridden: false, isolated: true });
   expect(await server.rpc(connectionStatus, {}, {} as PaseoApi)).toMatchObject({ status: "isolated_context" });
-  expect(f.requests).toEqual([]);
+  expect(f.requests).toHaveLength(1);
 });
 
 it("the public contribution verifies the default CLI connection without exposing its credential", async () => {
