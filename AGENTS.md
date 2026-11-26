@@ -34,7 +34,7 @@ Paseo 源码插件（插件 ID：`multica`），将 Multica 工作区、Issue、
 ## 核心不变量与宿主红线
 
 - **不修改宿主核心与内部文件**：所有项目、工作区、agent 生命周期仅通过公开插件 SDK 与经 `serverId` 校验的 `DaemonClient` 接口驱动。
-- **凭据只读且严格隔离**：绝不将 CLI Token 写入 `StateStore`、RPC 响应或日志；枚举未选中 profile 时不调用 `/api/me`；每次远端读写前执行 `assertCurrent` 核对当前 profile 与身份；检测到任务隔离上下文且缺少显式注入时拒绝读取拥有者 `~/.multica`。
+- **凭据只读且严格隔离**：绝不将 CLI Token 写入 `StateStore`、RPC 响应或日志；枚举 profile 时仅以各 profile 自身凭据只读调用其自身服务的 `/api/me` 读取显示名，显示名与登录判定仅在内存缓存；每次远端读写前执行 `assertCurrent` 核对当前 profile 与身份；检测到任务隔离上下文且缺少显式注入时拒绝读取拥有者 `~/.multica`。
 - **本地生命周期绝不误杀远端 Run**：单纯 `session.close`、筛选退出/停用归档、切换 profile 清理（`deleteAgent`）及数据重建（`deleteAgent` → `archiveWorkspace` → `removeProject`）仅释放或清理本地记录，不发送 `session.interrupt`、不调用会对活跃会话发中断的 `archiveAgent`。只有显式 `session.interrupt`（原生 Stop 或关闭运行中 tab）才取消当时归属该讨论的活跃 Run 快照。
 - **严防 Paseo 宿主的隐式副作用**：
   - 恢复 Paseo 工作区前必须对未选定解除隐藏的讨论持有 `DiscussionLifecycle.hold()`，在恢复后安全重归档（Paseo `0.17.4` 恢复工作区存在 60 秒时间戳回退，会唤醒同工作区隐藏讨论）。

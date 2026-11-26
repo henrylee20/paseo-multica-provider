@@ -24,7 +24,11 @@
 
 默认复用 daemon 主机同一运行用户的 Multica CLI 登录，支持云服务与自部署地址。插件只读读取配置，不生成独立 PAT、不改写 CLI 配置文件、不共享其他设备客户端或其他系统用户的登录态。API `server_url` 与前端 `app_url` 分别解析使用，不硬编码云服务兜底地址。
 
-设置页提供 **CLI profile** 下拉框，只读枚举 `<配置根>/config.json`（默认配置，空字符串）与 `<配置根>/profiles/*/config.json`（跳过不符合设置 schema 的目录名；`token` 非空且 `server_url` 有效视为已登录，当前已选 profile 即使未登录仍保留显示）。插件不猜测全局 active profile，不向 RPC 返回凭据，也不使用未选中 profile 的凭据请求 `/api/me`。遵循 `MULTICA_SERVER_URL`、`MULTICA_TOKEN`、`MULTICA_APP_URL` / `FRONTEND_ORIGIN` 及 `MULTICA_TASK_CONFIG_ROOT` 覆盖规则：环境变量覆盖凭据时提示切换 profile 不改变账号；检测到任务隔离上下文时禁用下拉框，且不读取拥有者配置目录。
+设置页提供 **CLI profile** 下拉框，只读枚举 `<配置根>/config.json`（默认配置，空字符串）与 `<配置根>/profiles/*/config.json`（跳过不符合设置 schema 的目录名）。对 `token` 非空且 `server_url` 有效的各 profile，插件仅用该配置文件自身的凭据，并行只读请求其自身服务地址的 `/api/me`（拒绝重定向，5 秒超时），读取非空 `name`，为空则回退 `email`。`401`/`403` 视为未登录；超时、网络、其他 HTTP 错误、解析失败或姓名与邮箱均为空时，保留已配置的登录但标为无法验证。显示名与登录判定仅在单次 contribution 生命周期内按配置文件路径、`mtime` 与大小缓存，最多 60 秒，配置变化或过期即重新核验；仅缓存成功解析的 `200`（含姓名与邮箱均为空）以及 `401`/`403`，暂时失败不缓存，下次枚举（包括设置页刷新）重新请求。缓存不保存 Token，不持久化身份信息，也不向 RPC 返回凭据。
+
+下拉框仅列出已登录的 profile，统一显示「用户名 · 服务地址」（服务地址取 API host，含非默认端口）；无法验证时显示「无法验证 · 服务地址」，不显示 profile 名或默认前缀。文案完全相同的选项追加「（profile 名）」区分，默认配置追加「（默认）」。当前已选 profile 即使未登录仍保留，显示「未登录 · 服务地址」，缺少地址则只显示「未登录」。切换确认弹窗使用同一选项文案。
+
+插件不猜测全局 active profile。当前连接仍遵循 `MULTICA_SERVER_URL`、`MULTICA_TOKEN`、`MULTICA_APP_URL` / `FRONTEND_ORIGIN` 及 `MULTICA_TASK_CONFIG_ROOT` 覆盖规则，profile 显示名核验不借用环境变量覆盖的服务地址或凭据；环境变量覆盖凭据时提示切换 profile 不改变账号。检测到任务隔离上下文时禁用下拉框，枚举直接返回空列表且不发请求、不读取拥有者配置目录。
 
 规范化 API 服务地址与 `/api/me` 返回的真实用户 ID 共同组成 `connectionKey`：
 

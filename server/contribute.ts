@@ -6,7 +6,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { PluginServerContribution } from "@getpaseo/plugin/server";
 import { multicaSettings, profileList, connectionStatus, syncBootstrap, workspaceList, workspaceEnable, workspaceRule, workspacePreview, workspaceCatalog, taskRuleSchema } from "../shared/contracts.js";
-import { createConnectionResolver, listProfiles, type AuthenticatedConnection, type ConnectionDependencies } from "./connection.js";
+import { createConnectionResolver, listProfiles, type AuthenticatedConnection, type ConnectionDependencies, type ProfileListCache } from "./connection.js";
 import { StateStore } from "./state.js";
 import { SidebarSynchronizer, importedIssues } from "./sync.js";
 import { connectNativeHost, type NativeHost } from "./native-host.js";
@@ -42,7 +42,8 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       workingDirectory: dependencies.workingDirectory ?? process.cwd(), environment: dependencies.environment ?? process.env,
       currentProfile: async () => { const state = await settings.read(); return state.status === "ready" ? state.values.profile : undefined; } };
     const resolve = createConnectionResolver(connectionDependencies);
-    server.handle(profileList, () => listProfiles(connectionDependencies));
+    const profileCache: ProfileListCache = new Map();
+    server.handle(profileList, () => listProfiles(connectionDependencies, profileCache));
     server.handle(connectionStatus, async () => {
       const state = await settings.read();
       await store.observeProfile(state.status === "ready" ? state.values.profile : undefined);

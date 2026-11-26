@@ -6,4 +6,4 @@
 
 ## 影响与边界
 
-- **按目录布局只读枚举 CLI profile**：Multica CLI `0.6.3` 没有列出 profile 的公开命令，也不保存全局 active profile。按 [ADR 0010](./0010-clear-local-data-on-profile-switch.md)，插件通过只读扫描 `<配置根>/config.json` 与 `<配置根>/profiles/*/config.json` 供设置页下拉框选择（仅检查 `token` 非空且 `server_url` 有效，名称须通过设置 schema；任务隔离上下文直接返回空列表），不使用未选中 profile 的凭据调用 `/api/me`。该枚举依赖 CLI `0.6.3` 的目录结构，若未来 CLI 调整存储布局需同步适配。
+- **按目录布局只读枚举 CLI profile**：Multica CLI `0.6.3` 没有列出 profile 的公开命令，也不保存全局 active profile。按 [ADR 0010](./0010-clear-local-data-on-profile-switch.md)，插件通过只读扫描 `<配置根>/config.json` 与 `<配置根>/profiles/*/config.json` 供设置页下拉框选择（`token` 非空且 `server_url` 有效，名称须通过设置 schema；任务隔离上下文直接返回空列表且不发请求），仅以各 profile 自身凭据只读调用其自身服务的 `/api/me` 读取显示名，显示名与登录判定仅在内存缓存。该枚举依赖 CLI `0.6.3` 的目录结构，若未来 CLI 调整存储布局需同步适配。

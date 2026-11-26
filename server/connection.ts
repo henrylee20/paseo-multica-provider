@@ -27,8 +27,11 @@ const cliConfig = z.object({ server_url: z.string().nullish(), app_url: z.string
 const remoteUser = z.object({ id: z.string().min(1), name: z.string().nullish(), email: z.string().nullish() });
 const identityTtlMs = 60_000;
 
+/** Only public labels and file metadata are retained, never profile credentials. */
+export type ProfileListCache = Map<string, { mtime: number; size: number; expiresAt: number; profile: ProfileList["profiles"][number] }>;
+
 /** Read CLI profiles without touching the active connection's config or identity cache. */
-export async function listProfiles(dependencies: ConnectionDependencies): Promise<ProfileList> {
+export async function listProfiles(dependencies: ConnectionDependencies, cache: ProfileListCache = new Map()): Promise<ProfileList> {
   const env = dependencies.environment;
   const overridden = !!(env.MULTICA_TOKEN?.trim() || env.MULTICA_SERVER_URL?.trim());
   const isolated = await isTaskContext(env, () => hasTaskMarker(dependencies.workingDirectory));
@@ -44,18 +47,42 @@ export async function listProfiles(dependencies: ConnectionDependencies): Promis
       return entry.isDirectory() && parsed.success && parsed.data === entry.name;
     }).map(entry => entry.name).sort());
   } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-  const profiles: ProfileList["profiles"] = [];
-  for (const name of names) {
+  const profiles = (await Promise.all(names.map(async name => {
     const profile: ProfileList["profiles"][number] = { name, loggedIn: false };
+    const path = join(root, ...(name ? ["profiles", name] : []), "config.json");
     try {
-      const config = cliConfig.parse(JSON.parse(await readFile(join(root, ...(name ? ["profiles", name] : []), "config.json"), "utf8")));
+      const file = await stat(path);
+      const cached = cache.get(path);
+      if (cached?.mtime === file.mtimeMs && cached.size === file.size && cached.expiresAt > Date.now()) return [cached.profile];
+      cache.delete(path);
+      const config = cliConfig.parse(JSON.parse(await readFile(path, "utf8")));
+      let apiUrl: string | undefined;
       if (config.server_url) {
-        try { profile.apiHost = new URL(normalizeApiUrl(config.server_url)).host; } catch { /* Invalid URLs have no host label. */ }
+        try { apiUrl = normalizeApiUrl(config.server_url); profile.apiHost = new URL(apiUrl).host; } catch { /* Invalid URLs have no host label. */ }
       }
-      profile.loggedIn = !!(config.token?.trim() && profile.apiHost);
-    } catch (error) { if (name && (error as NodeJS.ErrnoException).code === "ENOENT") continue; }
-    profiles.push(profile);
-  }
+      const token = config.token?.trim();
+      profile.loggedIn = !!(token && apiUrl);
+      let cacheable = false;
+      if (profile.loggedIn) {
+        try {
+          const response = await fetch(`${apiUrl}/api/me`, {
+            headers: { Authorization: `Bearer ${token}` }, redirect: "error", signal: AbortSignal.timeout(5_000),
+          });
+          if (response.status === 401 || response.status === 403) { profile.loggedIn = false; cacheable = true; }
+          if (response.status === 200) {
+            const user = remoteUser.parse(await response.json());
+            profile.user = user.name?.trim() || user.email?.trim() || undefined;
+            cacheable = true;
+          } else await response.body?.cancel();
+        } catch { /* Unavailable verification keeps a configured login selectable. */ }
+      }
+      if (cacheable) cache.set(path, { mtime: file.mtimeMs, size: file.size, expiresAt: Date.now() + identityTtlMs, profile });
+    } catch (error) {
+      cache.delete(path);
+      if (name && (error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    }
+    return [profile];
+  }))).flat();
   return { profiles, overridden, isolated };
 }
 
