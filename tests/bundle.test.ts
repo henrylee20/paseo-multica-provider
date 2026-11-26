@@ -32,19 +32,31 @@ it("the host-compiled server entry registers CLI connection settings", async () 
   await dispose();
 }, 15_000);
 
-it("the host-compiled client entry offers only the Multica settings screen", async () => {
-  const setup = await bundledContribution("../index.client.tsx", { "@getpaseo/plugin/client": {}, "@getpaseo/plugin/client/ui": {}, "react-native": {} });
-  const entries: Array<{ kind: string; id: string; Component?: unknown }> = [];
-  const add = (kind: string) => (entry: { id: string; Component?: unknown }) => {
+it("the host-compiled client opens the existing Multica settings from the sidebar header", async () => {
+  const SidebarRow = () => null;
+  const openSettings = vi.fn();
+  const setup = await bundledContribution("../index.client.tsx", { "@getpaseo/plugin/client": {}, "@getpaseo/plugin/client/ui": { SidebarRow }, "react-native": {} });
+  const entries: Array<{ kind: string; id: string; title: string; Component: FunctionComponent }> = [];
+  const add = (kind: string) => (entry: { id: string; title: string; Component: FunctionComponent }) => {
     entries.push({ kind, ...entry });
     return () => { entries.splice(entries.findIndex(value => value.kind === kind && value.id === entry.id), 1); };
   };
-  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: add("settings"), addScreen: add("screen"), addSidebarHeaderItem: add("sidebar"), addTimelineRenderer: () => () => {} });
-  expect(entries.map(({ kind, id }) => ({ kind, id }))).toEqual([
-    { kind: "settings", id: "multica" },
-  ]);
-  expect(entries.every(entry => typeof entry.Component === "function")).toBe(true);
-  dispose();
+  const dispose = setup({ rpc: async () => ({ status: "ready" }), openSettings,
+    addSettingsScreen: add("settings"), addScreen: add("screen"), addSidebarHeaderItem: add("sidebar"), addTimelineRenderer: () => () => {} });
+  try {
+    expect(entries.map(({ kind, id, title }) => ({ kind, id, title }))).toEqual([
+      { kind: "settings", id: "multica", title: "Multica" },
+      { kind: "sidebar", id: "multica", title: "Multica" },
+    ]);
+    expect(entries.every(entry => typeof entry.Component === "function")).toBe(true);
+    const item = entries.find(entry => entry.kind === "sidebar")!.Component({});
+    expect(isValidElement(item)).toBe(true);
+    if (!isValidElement<{ onPress(): void }>(item)) throw new Error("Missing sidebar row");
+    expect(item.type).toBe(SidebarRow);
+    expect(openSettings).not.toHaveBeenCalled();
+    item.props.onPress();
+    expect(openSettings).toHaveBeenCalledExactlyOnceWith("multica");
+  } finally { dispose(); }
   expect(entries).toEqual([]);
 });
 
@@ -1550,6 +1562,7 @@ it("registers and disposes a minimal themed comment-divider renderer", async () 
   const removed: string[] = [];
   const setup = await bundledContribution("../index.client.tsx", { "@getpaseo/plugin/client": {}, "@getpaseo/plugin/client/ui": {}, "react-native": { View: "View" } });
   const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {},
+    addSidebarHeaderItem: () => () => {},
     addTimelineRenderer: (renderer: typeof renderers[number]) => { renderers.push(renderer); return () => { removed.push(renderer.kind); }; } });
   try {
     const renderer = renderers.find(renderer => renderer.kind === "comment-divider")!;

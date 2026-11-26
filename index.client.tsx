@@ -1,6 +1,7 @@
 import { AskuserCard } from "./client/askuser-card.js";
 import { askuserCardSchema } from "./shared/askuser.js";
 import type { PluginClientContext } from "@getpaseo/plugin/client";
+import { SidebarRow } from "@getpaseo/plugin/client/ui";
 import { ConnectionScreen } from "./client/connection-screen.js";
 import { syncBootstrap } from "./shared/contracts.js";
 import { TaskDescription } from "./client/task-description.js";
@@ -27,6 +28,8 @@ export default function contribute(client: PluginClientContext) {
   const composerItem = composerItemRegistrar(client);
   const removeMention = composerItem ? composerItem({ id: "multica-mention", Component: MentionPicker }) : () => {};
   const removeSettings = client.addSettingsScreen({ id: "multica", title: "Multica", icon: "MessagesSquare", Component: ConnectionScreen });
+  const removeSidebar = client.addSidebarHeaderItem({ id: "multica", title: "Multica",
+    Component: () => <SidebarRow icon="SlidersHorizontal" onPress={() => client.openSettings("multica")} /> });
   const removeDescription = client.addTimelineRenderer({ kind: taskDescriptionKind, version: taskDescriptionVersion,
     schema: taskDescriptionSchema, Component: TaskDescription });
   const removeThread = client.addTimelineRenderer({ kind: "thread", version: 1, schema: threadSummarySchema, Component: ThreadSummary });
@@ -44,6 +47,7 @@ export default function contribute(client: PluginClientContext) {
     removeThread();
     removeDescription();
     removeMention();
+    removeSidebar();
     removeSettings();
   };
 }
