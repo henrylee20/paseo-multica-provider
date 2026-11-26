@@ -1586,6 +1586,20 @@ it.each(["rule", "enable", "disable"])("keeps the saved %s visible when backgrou
   } finally { h.dispose(); }
 });
 
+it.each(["ready", "syncing", "unavailable"])("shows the last completed sync time in settings when %s while preserving failure hints", async status => {
+  const h = await settingsHarness(name => name === "connection.status" ? { ...readyStatus, sync: {
+    status, stage: status === "syncing" ? "issues" : "idle", completedWorkspaces: 1, enabledWorkspaces: 2,
+    lastSuccessAt: new Date(2026, 10, 24, 10, 30).toISOString(), ...(status === "unavailable" ? { message: "同步失败，后台将重试" } : {}),
+  } } : empty(name, {}));
+  try {
+    await vi.waitFor(() => {
+      const page = h.render();
+      if (status === "unavailable") { expect(page).toContain("同步失败，后台将重试"); expect(page).not.toContain("最近完成"); }
+      else expect(page).toContain(status === "ready" ? "最近完成 2026-11-24 10:30" : "任务与筛选核对 · Multica 工作区 1/2 · 最近完成 2026-11-24 10:30");
+    });
+  } finally { h.dispose(); }
+});
+
 it("polls settings every two seconds during sync and returns to ten seconds when ready", async () => {
   let syncing = true;
   const h = await settingsHarness(name => name === "connection.status"

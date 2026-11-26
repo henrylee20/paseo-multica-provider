@@ -66,29 +66,28 @@ export class SidebarSynchronizer {
   private closed = false;
   private paused = false;
   private eventTimer?: ReturnType<typeof setTimeout>;
-  private eventSyncPending = false;
-  private eventDirty = false;
+  private readonly dirtyWorkspaces = new Set<string>();
+  private eventFullSync = false;
   private readonly events = new WorkspaceEvents(event => {
     this.options.onRemoteEvent?.(event);
-    this.eventDirty = true;
+    if (this.syncState.connectionKey && event.connectionKey === this.syncState.connectionKey) this.dirtyWorkspaces.add(event.workspaceId);
+    else this.eventFullSync = true;
     this.scheduleInvalidation();
   });
   private scheduleInvalidation() {
-    if (this.closed || this.eventTimer || this.eventSyncPending) return;
+    if (this.closed || this.paused || this.eventTimer || this.syncPending || (!this.eventFullSync && !this.dirtyWorkspaces.size)) return;
     this.eventTimer = setTimeout(() => {
       this.eventTimer = undefined;
-      this.eventDirty = false;
-      this.eventSyncPending = true;
-      void this.requestSync().catch(() => {}).finally(() => {
-        this.eventSyncPending = false;
-        if (this.eventDirty) this.scheduleInvalidation();
-      });
-    }, 20);
+      const workspaces = this.eventFullSync ? undefined : new Set(this.dirtyWorkspaces);
+      this.eventFullSync = false;
+      this.dirtyWorkspaces.clear();
+      void this.triggerSync(workspaces).catch(() => {});
+    }, this.options.eventDebounceMs ?? 500);
     this.eventTimer.unref?.();
   }
   constructor(private readonly options: {
     store: StateStore; connection: (notifyIdentity?: boolean) => Promise<AuthenticatedConnection>; lifecycle: DiscussionLifecycle; metadata: DiscussionMetadata;
-    connectHost: () => Promise<NativeHost>; intervalMs: number; onRemoteEvent?: (event: WorkspaceEvent) => void;
+    connectHost: () => Promise<NativeHost>; intervalMs: number; eventDebounceMs?: number; onRemoteEvent?: (event: WorkspaceEvent) => void;
     currentProfile: () => Promise<string | undefined>; invalidateConnection: () => void; drain: () => Promise<void>;
     onCached?: (host: NativeHost) => Promise<void>;
     onIssue?: (connection: AuthenticatedConnection, workspace: RemoteWorkspace, issueId: string, host: NativeHost) => Promise<void>;
@@ -220,8 +219,14 @@ export class SidebarSynchronizer {
   }
   async assertNoPurge() { if (await this.purgePending()) throw new Error("正在清理旧 profile 本地数据，请稍后重试。"); }
   private requestSync(): Promise<void> { return this.syncPending ?? this.triggerSync(); }
-  private triggerSync(): Promise<void> {
+  private triggerSync(workspaces?: Set<string>): Promise<void> {
     if (this.closed || this.paused) return Promise.resolve();
+    if (!workspaces) {
+      if (this.eventTimer) clearTimeout(this.eventTimer);
+      this.eventTimer = undefined;
+      this.eventFullSync = false;
+      this.dirtyWorkspaces.clear();
+    }
     this.syncDirty = true;
     this.syncState = { ...this.syncState, status: "syncing", message: undefined };
     if (!this.syncPending) {
@@ -233,18 +238,18 @@ export class SidebarSynchronizer {
             const version = this.ruleVersion;
             this.syncState = { ...this.syncState, stage: "connection", completedWorkspaces: 0, completedArchives: 0, pendingArchives: 0 };
             let failed = false;
-            try { await this.sync(version); }
+            try { await this.sync(version, undefined, workspaces); }
             catch { failed = true; }
             // Check and finish in the same turn: a mutation must never get lost
             // between the last pass and clearing syncPending.
-            if (this.syncDirty || this.ruleVersion !== version) { this.syncDirty = true; continue; }
+            if (this.syncDirty || this.ruleVersion !== version) { workspaces = undefined; this.syncDirty = true; continue; }
             this.syncState = failed
               ? { ...this.syncState, status: "unavailable", message: this.syncState.stage === "purging" ? "清理旧 profile 本地数据失败；同步和规则写入已暂停，请重新引导以重试。" : "同步失败；已保存的规则与开关不受影响，daemon 将继续重试。" }
               : this.syncState.failedWorkspaces?.length
               ? { ...this.syncState, status: "unavailable", stage: "idle", message: `${this.syncState.failedWorkspaces.length} 个 Multica 工作区同步失败：${this.syncState.failedWorkspaces.map(failure => failure.name).join("、")}` }
               : { ...this.syncState, status: "ready", stage: "idle", pendingArchives: 0, lastSuccessAt: new Date().toISOString() };
           }
-        } finally { this.syncPending = undefined; }
+        } finally { this.syncPending = undefined; this.scheduleInvalidation(); }
       });
     }
     return this.syncPending;
@@ -510,8 +515,8 @@ export class SidebarSynchronizer {
       throw error;
     } finally { for (const release of releases.reverse()) release(); }
   }
-  private async sync(version: number, rebuild?: { connectionKey: string; progress: (completed: number, total: number) => void }) {
-    this.syncState.failedWorkspaces = undefined;
+  private async sync(version: number, rebuild?: { connectionKey: string; progress: (completed: number, total: number) => void }, dirtyWorkspaces?: Set<string>) {
+    if (!dirtyWorkspaces) this.syncState.failedWorkspaces = undefined;
     if (rebuild) await this.assertNoPurge();
     else await this.purge();
     if (!this.host) this.host = await this.options.connectHost();
@@ -522,20 +527,25 @@ export class SidebarSynchronizer {
     this.syncState.stage = "connection";
     const connection = await this.options.connection();
     if (rebuild && rebuild.connectionKey !== connection.connectionKey) throw new Error("Connection identity changed");
+    if (this.syncState.connectionKey !== connection.connectionKey) dirtyWorkspaces = undefined;
     this.syncState.connectionKey = connection.connectionKey;
     const state = await this.options.store.read();
     const local = state.connections[connection.connectionKey];
     if (version !== this.ruleVersion) return;
-    const enabled = Object.entries(local?.rules ?? {}).filter(([, rule]) => rule.enabled);
-    this.syncState.enabledWorkspaces = enabled.length;
+    const allEnabled = Object.entries(local?.rules ?? {}).filter(([, rule]) => rule.enabled);
     this.syncState.stage = "workspaces";
     const disabledIssues = Object.entries(local?.issues ?? {}).filter(([, issue]) =>
       local?.rules[issue.remoteWorkspaceId]?.enabled === false);
     const disabledProjects = Object.entries(local?.projects ?? {}).filter(([id, project]) => local?.rules[id]?.enabled === false && project.projectId && !project.removed);
     const pendingIssues = disabledIssues.filter(([, issue]) => !issue.archiveReason && issue.workspaceCreated && !issue.manualHidden.workspace);
+    if (pendingIssues.length || disabledProjects.length) dirtyWorkspaces = undefined;
+    const enabled = dirtyWorkspaces ? allEnabled.filter(([id]) => dirtyWorkspaces.has(id)) : allEnabled;
+    const checked = new Set(enabled.map(([id]) => id));
+    this.syncState.failedWorkspaces = dirtyWorkspaces ? this.syncState.failedWorkspaces?.filter(failure => !checked.has(failure.workspaceId)) : undefined;
+    this.syncState.enabledWorkspaces = enabled.length;
     this.syncState.pendingArchives = pendingIssues.length;
-    if (!enabled.length && !disabledIssues.length && !disabledProjects.length) { this.events.reconcile(connection, []); rebuild?.progress(0, 0); return; }
-    const workspaces = enabled.length ? await this.workspaces(connection) : [];
+    if (!allEnabled.length && !disabledIssues.length && !disabledProjects.length) { this.events.reconcile(connection, []); rebuild?.progress(0, 0); return; }
+    const workspaces = allEnabled.length ? await this.workspaces(connection) : [];
     const prepared = new Map<string, z.infer<typeof remoteIssueSchema>[]>();
     let completed = 0, total = 0;
     if (rebuild) {
@@ -551,7 +561,7 @@ export class SidebarSynchronizer {
     this.events.reconcile(connection, workspaces.filter(workspace => local?.rules[workspace.id]?.enabled));
     await this.assertOwningDaemon();
     if (pendingIssues.length) this.syncState.stage = "archiving";
-    for (const [issueId, issue] of disabledIssues) {
+    for (const [issueId, issue] of dirtyWorkspaces ? [] : disabledIssues) {
       if (version !== this.ruleVersion) return;
       await this.archive(connection.connectionKey, issueId, "rule_disabled");
       if (!issue.archiveReason && issue.workspaceCreated && !issue.manualHidden.workspace) {
@@ -560,7 +570,7 @@ export class SidebarSynchronizer {
       }
     }
     if (version !== this.ruleVersion) return;
-    await this.removeDisabledProjects(connection.connectionKey, version);
+    if (!dirtyWorkspaces) await this.removeDisabledProjects(connection.connectionKey, version);
     let activeWorkspaceIds: Promise<Set<string>> | undefined;
     for (const [workspaceId, rule] of enabled) {
       if (version !== this.ruleVersion) return;

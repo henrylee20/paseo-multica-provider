@@ -32,6 +32,7 @@ export interface ServerDependencies extends ConnectionDependencies {
   stateDirectory: string;
   connectHost: (paseoHome: string) => Promise<NativeHost>;
   syncIntervalMs: number;
+  eventDebounceMs?: number;
   now: () => Date;
 }
 
@@ -169,7 +170,7 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
         await runDetails.refreshOpened();
         await wakeups.discover(connection, issueId, host);
       },
-      connectHost: () => (dependencies.connectHost ?? connectNativeHost)(owningHome), intervalMs: dependencies.syncIntervalMs ?? 15_000 });
+      connectHost: () => (dependencies.connectHost ?? connectNativeHost)(owningHome), intervalMs: dependencies.syncIntervalMs ?? 15_000, eventDebounceMs: dependencies.eventDebounceMs });
     let observedProfile: string | undefined;
     let settingsObserved = false;
     const observeSettings: Parameters<typeof settings.subscribe>[0] = async state => {

@@ -38,7 +38,7 @@ const catalogRpc = defineRpc({ name: "workspace.catalog", input: z.object({ work
 const cleanup: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const dispose of cleanup.splice(0).reverse()) await dispose(); });
 
-async function fixture(syncIntervalMs: number | null = 15_000, homePrefix = "multica-sidebar-") {
+async function fixture(syncIntervalMs: number | null = 15_000, homePrefix = "multica-sidebar-", eventDebounceMs: number | null = 20) {
   const home = await mkdtemp(join(tmpdir(), homePrefix));
   cleanup.push(() => rm(home, { recursive: true, force: true }));
   const requests: string[] = [];
@@ -107,8 +107,10 @@ async function fixture(syncIntervalMs: number | null = 15_000, homePrefix = "mul
     clients: Set<Socket>; close(): void;
   } };
   const websocket = new WebSocketServer({ server: http });
+  const socketSlugs = new WeakMap<Socket, string | null>();
   const websocketRequests: Array<{ url: string; auth?: unknown }> = [];
   websocket.on("connection", (socket, request) => {
+    socketSlugs.set(socket, new URL(request.url!, "http://localhost").searchParams.get("workspace_slug"));
     const entry = { url: request.url! } as { url: string; auth?: unknown };
     websocketRequests.push(entry);
     socket.on("message", data => {
@@ -117,7 +119,7 @@ async function fixture(syncIntervalMs: number | null = 15_000, homePrefix = "mul
     });
   });
   cleanup.push(() => { for (const socket of websocket.clients) socket.close(); websocket.close(); });
-  const signal = (type: string, payload = {}) => { for (const socket of websocket.clients) socket.send(JSON.stringify({ type, payload })); };
+  const signal = (type: string, payload = {}, slug?: string) => { for (const socket of websocket.clients) if (!slug || socketSlugs.get(socket) === slug) socket.send(JSON.stringify({ type, payload })); };
   const address = http.address() as { port: number };
   await mkdir(join(home, ".multica"));
   await writeFile(join(home, ".multica", "config.json"), JSON.stringify({ server_url: `http://127.0.0.1:${address.port}`, token: "private-token" }));
@@ -200,7 +202,7 @@ async function fixture(syncIntervalMs: number | null = 15_000, homePrefix = "mul
   function start(values?: unknown) {
     const server = new FakeServer();
     if (values) server.setSettings(multicaSettings.id, values);
-    const dispose = createServerContribution({ homeDirectory: home, workingDirectory: home, environment: { PASEO_HOME: home }, connectHost, syncIntervalMs: syncIntervalMs ?? undefined })(server.context);
+    const dispose = createServerContribution({ homeDirectory: home, workingDirectory: home, environment: { PASEO_HOME: home }, connectHost, syncIntervalMs: syncIntervalMs ?? undefined, eventDebounceMs: eventDebounceMs ?? undefined })(server.context);
     cleanup.push(dispose);
     return { server, dispose };
   }
@@ -924,6 +926,77 @@ it("workspace events discover new matching issues and restore every automaticall
   await expect.poll(() => f.websocket.clients.size, { timeout: 2_000 }).toBe(0);
 });
 
+it("ignores streaming task telemetry while auth_ack and task lifecycle events still trigger sidebar snapshots", async () => {
+  const f = await fixture(60_000, undefined, null); f.remote.acknowledgeEvents = false;
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await expect.poll(() => f.websocketRequests[0]?.auth).toBeDefined();
+  const reads = () => f.requests.filter(path => path.startsWith("/api/issues?")).length;
+  const beforeAuth = reads(); f.signal("auth_ack");
+  await expect.poll(reads).toBe(beforeAuth + 2); await waitForSync(f.server, f.paseo);
+  const before = reads();
+  for (let i = 0; i < 10; i++) for (const type of ["task:message", "task:usage", "task:progress"]) f.signal(type);
+  await new Promise(resolve => setTimeout(resolve, 600));
+  expect(reads()).toBe(before);
+  expect((await f.server.rpc(connectionStatus, {}, f.paseo)).sync.status).toBe("ready");
+  f.issues[0].title = "执行已完成"; f.signal("task:completed");
+  await expect.poll(() => f.native.workspaces[0].title).toBe("PRD-1 执行已完成");
+  expect((await waitForSync(f.server, f.paseo)).status).toBe("ready");
+  expect(reads()).toBe(before + 2);
+});
+
+it("coalesces event bursts and settles ready before waiting a new window for events received during a snapshot", async () => {
+  const f = await fixture(60_000, undefined, null); f.remote.acknowledgeEvents = false;
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await expect.poll(() => f.websocketRequests[0]?.auth).toBeDefined();
+  const reads = () => f.requests.filter(path => path.startsWith("/api/issues?")).length;
+  let before = reads(); f.signal("auth_ack");
+  await expect.poll(reads).toBe(before + 2); await waitForSync(f.server, f.paseo);
+  before = reads(); f.remote.holdIssueReads = true;
+  try {
+    for (let i = 0; i < 20; i++) f.signal("task:started");
+    await expect.poll(() => f.heldIssueReads.length).toBe(1);
+    for (let i = 0; i < 20; i++) f.signal("task:failed");
+    await new Promise(resolve => setTimeout(resolve, 600));
+    expect(reads()).toBe(before + 1);
+  } finally { f.remote.holdIssueReads = false; for (const reply of f.heldIssueReads.splice(0)) reply(); }
+  const ready = await waitForSync(f.server, f.paseo);
+  expect(ready).toMatchObject({ status: "ready", lastSuccessAt: expect.any(String) });
+  expect(reads()).toBe(before + 2);
+  await expect.poll(reads).toBe(before + 4);
+  expect((await waitForSync(f.server, f.paseo)).status).toBe("ready");
+  expect(reads()).toBe(before + 4);
+});
+
+it("scopes workspace events without disconnecting other sockets and preserves unexamined workspace failures until their own recovery", async () => {
+  const f = await fixture(60_000); f.remote.acknowledgeEvents = false;
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await enableSecondWorkspace(f);
+  await expect.poll(() => f.websocketRequests.filter(request => request.auth).length).toBe(2);
+  f.signal("auth_ack");
+  await new Promise(resolve => setTimeout(resolve, 50)); await waitForSync(f.server, f.paseo);
+  f.remote.nextPageFails = true; f.remote.failingWorkspace = "second";
+  expect(await resync(f.server, f.paseo, "remote-workspace")).toEqual({ status: "unavailable" });
+  const reads = () => f.scopes.filter(request => request.path.startsWith("/api/issues?"));
+  const eventPass = async (slug: string) => {
+    const before = reads().length;
+    f.signal("task:cancelled", {}, slug);
+    await expect.poll(() => reads().length).toBe(before + 2);
+    const status = await waitForSync(f.server, f.paseo);
+    expect(reads().slice(before).map(request => request.slug)).toEqual([slug, slug]);
+    expect(f.websocket.clients.size).toBe(2); expect(f.websocketRequests).toHaveLength(2);
+    return status;
+  };
+  expect(await eventPass("product")).toMatchObject({ status: "unavailable", enabledWorkspaces: 1, completedWorkspaces: 1, failedWorkspaces: [{ workspaceId: "second-workspace" }] });
+  f.remote.failingWorkspace = "product";
+  expect(await eventPass("product")).toMatchObject({ status: "unavailable", enabledWorkspaces: 1, completedWorkspaces: 0,
+    failedWorkspaces: [{ workspaceId: "second-workspace" }, { workspaceId: "remote-workspace" }] });
+  f.remote.nextPageFails = false;
+  expect(await eventPass("product")).toMatchObject({ status: "unavailable", enabledWorkspaces: 1, completedWorkspaces: 1, failedWorkspaces: [{ workspaceId: "second-workspace" }] });
+  const recovered = await eventPass("second");
+  expect(recovered).toMatchObject({ status: "ready", enabledWorkspaces: 1, completedWorkspaces: 1 });
+  expect(recovered.failedWorkspaces ?? []).toEqual([]);
+});
+
 
 it("failed or incomplete snapshots retain cached native workspaces and only an authoritative empty result archives them", async () => {
   const f = await fixture(60_000);
@@ -1221,6 +1294,7 @@ async function enableSecondWorkspace(f: Awaited<ReturnType<typeof fixture>>) {
 
 it.each(["pagination", "missing"])("isolates a %s failure to one Multica workspace, retains its cache and clears partial status after recovery", async failure => {
   const f = await fixture(60_000);
+  f.remote.acknowledgeEvents = false; // Observe the explicit full pass without a reconnect's later scoped auth_ack pass.
   await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   const second = await enableSecondWorkspace(f);
   const before = (await f.server.rpc(connectionStatus, {}, f.paseo)).sync;

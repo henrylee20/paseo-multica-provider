@@ -52,6 +52,7 @@ export class WorkspaceEvents {
             // There is no replay cursor: every authenticated connection requires a snapshot.
             notify("auth_ack");
           } else if (authenticated && typeof event.type === "string" &&
+            !["task:message", "task:usage", "task:progress"].includes(event.type) &&
             /^(issue:|issue_[a-z_]+:|comment:|member:|agent:|squad:|project:|label:|workspace:|task:)/.test(event.type)) {
             notify(event.type, event.payload);
           }
