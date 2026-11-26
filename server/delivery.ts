@@ -161,7 +161,7 @@ export class CommentDelivery {
           const received = comment.attachments ?? [];
           if (comment.issue_id !== address.issueId ||
             (comment.parent_id ?? null) !== (target.parent_id ?? (address.rootId === "main" ? null : address.rootId)) ||
-            (comment.askuser_answer_to ?? null) !== (target.askuser_answer_to ?? null) ||
+            (comment.askuser_answer_to && comment.askuser_answer_to !== (target.askuser_answer_to ?? null)) ||
             comment.content !== body || comment.author_id !== connection.userId ||
             received.length !== attachmentIds.length || new Set(received.map(file => file.id)).size !== attachmentIds.length || received.some(file => !attachmentIds.includes(file.id)))
             throw new Error("评论回执与原输入或附件不匹配；评论可能已保存，请在 Multica 核对后再发送。");
