@@ -59,6 +59,8 @@ CLI 配置文件原子替换、重新登录和登出会触发重读；每次远�
 
 人工隐藏在同一 daemon 的所有客户端间共享。设置页分别提供 **恢复 Paseo 工作区**（不解除其中讨论的隐藏）与 **恢复讨论**（仅解除所选讨论隐藏）。由于宿主恢复工作区可能按时间戳回退唤醒同工作区隐藏讨论，自动与手动恢复均先对未选中解除隐藏的讨论持有 `DiscussionLifecycle.hold()`，关闭本地活动投影、等待已接收的 Stop 完成并拒绝竞争打开，恢复后再安全重新归档这些隐藏记录，全程不取消远端 Run（[ADR 0002](./adr/0002-use-existing-paseo-with-placeholder-directories.md)）。
 
+对仍匹配筛选、已创建且未自动归档或重建的任务，同步会核对原生 Paseo 恢复后的活跃工作区与讨论并清除相应人工隐藏标记；仅解除身份匹配且未持有 `hold` 的活跃讨论，仍归档的 tab 保持隐藏，`session.unarchive` 在保护窗口外触发即时对账。
+
 ## 评论、发送与回声
 
 发送接受普通 `text`、`image {data, mimeType}` 与 `uploaded_file`，声明 `prompt.image`；forge/github/text/review 特殊附件、命令、`outputSchema` 或缺失任务/Thread 映射均在 `prompt_result` 前拒绝。每条评论最多 10 个附件，单件实际大小不超过 50 MiB，不设合计大小与 MIME 白名单，`mimeType` 须非空。只有附件或正文全为空白时，在上传前提示「请输入评论正文后再发送附件。」。轻量预检验证 base64、数量、文件 `realpath` 严格位于 `PASEO_HOME/uploads/` 内且 `stat` 为普通文件，并用实际大小取代客户端自报大小；发送前不整体读取文件。校验通过后在 `prompt_result` 前发出携带 `clientMessageId` 与原正文的原生 `user_message`，文件逐个读取、顺序上传；读取时再次核对路径与大小并限制读取长度。图片在轮到上传时解码，以 MIME 对应的 png/jpg/gif/webp 扩展名命名，未知类型使用 bin。后续读取、上传、远端权限或关联校验失败保留原生用户输入并追加错误，运行中 `steer` 仍保留捕获的 turn，不额外中断 Run。

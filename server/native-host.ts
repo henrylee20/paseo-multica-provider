@@ -45,6 +45,20 @@ export async function findActiveWorkspace(host: NativeHost, workspaceId: string)
   }
 }
 
+export async function fetchActiveWorkspaceIds(host: NativeHost): Promise<Set<string>> {
+  const ids = new Set<string>();
+  let cursor: string | undefined;
+  const cursors = new Set<string>();
+  for (;;) {
+    const page = await host.fetchWorkspaces({ page: { limit: 100, cursor } });
+    for (const workspace of page.entries) ids.add(workspace.id);
+    if (!page.pageInfo.hasMore) return ids;
+    const next = page.pageInfo.nextCursor;
+    if (!next || cursors.has(next)) throw new Error("Incomplete native workspace pagination");
+    cursors.add(next); cursor = next;
+  }
+}
+
 export async function ensureWorkspaceActive(host: NativeHost, workspaceId: string) {
   if (!await findActiveWorkspace(host, workspaceId)) await host.restoreWorkspace(workspaceId);
 }

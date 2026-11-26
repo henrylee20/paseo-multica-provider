@@ -99,7 +99,7 @@ async function fixture(loadHistory = true) {
     const config = JSON.parse(await readFile(configPath, "utf8"));
     await writeFile(configPath, JSON.stringify({ ...config, token: `synthetic-${++credentialVersion}` }));
   };
-  const agents: Array<{ id: string; workspaceId: string; cwd: string; labels: Record<string, string>; handle: string }> = [];
+  const agents: Array<{ id: string; workspaceId: string; cwd: string; labels: Record<string, string>; handle: string; archivedAt?: string | null }> = [];
   const workspaces: Array<{ id: string }> = [];
   const rows = new Map<string, ProviderTimelineItem[]>();
   const events: ProviderEvent[] = [];
@@ -135,6 +135,7 @@ async function fixture(loadHistory = true) {
       return agent;
     }, updateAgent: async () => {}, close: async () => {},
     fetchAgent: async (id: string) => ({ agent: { provider: "multica", ...agents.find(agent => agent.id === id)! } }), restoreWorkspace: async () => {},
+    refreshAgent: async (id: string) => { agents.find(agent => agent.id === id)!.archivedAt = null; },
     listCommands: async (id: string) => ({ agentId: id, commands: [], error: null, requestId: "commands" }),
     fetchAgentTimeline: async (agentId: string) => ({ agentId, epoch: "epoch", entries: (rows.get(agentId) ?? []).map((item, index) => ({ seqStart: index + 1, seqEnd: index + 1, item, timestamp: stamp })), hasOlder: false, hasNewer: false }),
   } as unknown as DaemonClient;
@@ -481,7 +482,8 @@ it("keeps an unusually long designated-user warning inside the timeline row budg
 });
 
 it("defers new attachment downloads until a manually hidden discussion is restored", async () => {
-  const f = await fixture(); await f.server.hook("agent.archive.after", { agent: { ...f.agents[1], provider: "multica" } } as never, f.paseo);
+  const f = await fixture(); f.agents[1].archivedAt = stamp;
+  await f.server.hook("agent.archive.after", { agent: { ...f.agents[1], provider: "multica" } } as never, f.paseo);
   f.comments[0].attachments = [attachment("hidden")]; f.documents.set("hidden", card); await f.sync();
   expect(f.requests.some(request => request.path.startsWith("/api/attachments/"))).toBe(false);
   expect(f.cards()).toEqual([]);

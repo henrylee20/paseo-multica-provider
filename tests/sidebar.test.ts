@@ -42,6 +42,7 @@ async function fixture(syncIntervalMs: number | null = 15_000, homePrefix = "mul
   const home = await mkdtemp(join(tmpdir(), homePrefix));
   cleanup.push(() => rm(home, { recursive: true, force: true }));
   const requests: string[] = [];
+  const comments: Array<{ id: string; issue_id: string; content: string }> = [];
   const runs: Array<{ id: string; issue_id: string; agent_id: string; status: string; completed_at?: string; error?: string | null; failure_reason?: string | null; work_dir?: string | null }> = [];
   const runResponses = new Map<string, { status: number; body?: unknown }>();
   const effects: string[] = [];
@@ -88,7 +89,8 @@ async function fixture(syncIntervalMs: number | null = 15_000, homePrefix = "mul
     if (url.pathname === "/api/workspaces") response.statusCode = remote.workspacesStatus;
     if (url.pathname === "/api/me") response.statusCode = remote.authStatus;
     response.end(JSON.stringify(url.pathname === "/api/me" ? { id: "user-42", name: "Lin" }
-      : url.pathname.endsWith("/comments") ? []
+      : url.pathname.endsWith("/comments") ? comments.filter(comment => comment.issue_id === decodeURIComponent(url.pathname.split("/")[3]))
+        .map(comment => ({ parent_id: null, type: "comment", author_id: "user-42", author_type: "member", created_at: "2026-11-24T12:00:00Z", ...comment }))
       : url.pathname.endsWith("/members") ? [{ id: "membership-row", user_id: "user-42", name: "Lin", email: "lin@example.test" }]
       : url.pathname === "/api/agents" ? [{ id: "agent-owned", name: "Builder", owner_id: "user-42" }]
       : url.pathname === "/api/squads" ? [{ id: "squad-owned", name: "Team", leader_id: "agent-owned" }]
@@ -204,7 +206,7 @@ async function fixture(syncIntervalMs: number | null = 15_000, homePrefix = "mul
   }
   const { server, dispose } = start();
   const paseo = { hosts: { list: async () => ({ self: { serverId: "owning-daemon" } }) } } as unknown as PaseoApi;
-  return { server, requests, paseo, native, home, issues, start, dispose, host, connectHost, remote, heldIssueReads, heldRunReads, runResponses, websocket, websocketRequests, signal, scopes, workspaces, workspaceIssues, runs, effects, creations };
+  return { server, requests, paseo, native, home, issues, comments, start, dispose, host, connectHost, remote, heldIssueReads, heldRunReads, runResponses, websocket, websocketRequests, signal, scopes, workspaces, workspaceIssues, runs, effects, creations };
 }
 
 it("client bootstrap leaves the native sidebar empty until a workspace rule is explicitly enabled", async () => {
@@ -415,6 +417,107 @@ it("rebuilt Projects retain manual hiding and restore the original discussion on
   expect(main.archivedAt).toBeNull();
   expect(f.native.agents).toHaveLength(2);
   expect(f.native.workspaces.find(workspace => workspace.id === main.workspaceId)?.projectId).toBe(f.native.projects[0].projectId);
+});
+
+it("reconciles native workspace restoration once across all pages and imports new Threads while retaining separately archived tabs", async () => {
+  const f = await fixture(60_000); f.remote.acknowledgeEvents = false;
+  f.comments.push({ id: "existing-thread", issue_id: "issue-one", content: "已有讨论" });
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const fetch = vi.spyOn(f.host, "fetchWorkspaces");
+  await resync(f.server, f.paseo, "remote-workspace");
+  expect(fetch).not.toHaveBeenCalled();
+  const thread = f.native.agents.find(agent => agent.labels["multica.discussion"] === "existing-thread")!;
+  thread.archivedAt = "separately-hidden";
+  await f.server.hook("agent.archive.after", { agent: { ...thread, provider: "multica", title: thread.name!, parentAgentId: null }, archivedAt: thread.archivedAt }, f.paseo);
+  for (const workspace of f.native.workspaces) {
+    await f.host.archiveWorkspace(workspace.id);
+    for (const agent of f.native.agents.filter(agent => agent.workspaceId === workspace.id)) {
+      await f.server.hook("agent.archive.after", { agent: { ...agent, provider: "multica", title: agent.name!, parentAgentId: null }, archivedAt: agent.archivedAt! }, f.paseo);
+    }
+    await f.server.hook("workspace.archive.after", { workspace: { id: workspace.id, projectId: workspace.projectId, cwd: workspace.cwd, name: workspace.title, archivedAt: "manually-hidden" } }, f.paseo);
+    await f.host.restoreWorkspace(workspace.id);
+    f.native.agents.find(agent => agent.workspaceId === workspace.id && agent.labels["multica.discussion"] === "main")!.archivedAt = null;
+  }
+  f.native.workspacePageSize = 1;
+  f.comments.push({ id: "new-thread", issue_id: "issue-one", content: "恢复后的新讨论" });
+  f.issues[0].title = "恢复后的任务标题";
+  expect(await resync(f.server, f.paseo, "remote-workspace")).toEqual({ status: "ready" });
+  expect(fetch.mock.calls).toEqual([[{ page: { limit: 100, cursor: undefined } }], [{ page: { limit: 100, cursor: "1" } }]]);
+  const state = JSON.parse(await readFile(join(f.home, "multica-provider/state.json"), "utf8")) as LocalState;
+  const local = Object.values(state.connections)[0];
+  expect(local.issues["issue-one"].manualHidden).toEqual({ workspace: false, discussions: ["existing-thread"] });
+  expect(local.issues["issue-two"].manualHidden).toEqual({ workspace: false, discussions: [] });
+  expect(f.native.workspaces[0].title).toBe("PRD-1 恢复后的任务标题");
+  expect(thread.archivedAt).toBeTruthy();
+  expect(f.native.agents.find(agent => agent.labels["multica.discussion"] === "new-thread")).toMatchObject({ workspaceId: thread.workspaceId, name: "恢复后的新讨论" });
+  fetch.mockClear();
+  await resync(f.server, f.paseo, "remote-workspace");
+  expect(fetch).not.toHaveBeenCalled();
+});
+
+it("reconciles a native Thread unarchive immediately while ignoring unarchive notifications inside the hidden-discussion hold", async () => {
+  const f = await fixture(60_000); f.remote.acknowledgeEvents = false;
+  f.comments.push({ id: "restored-thread", issue_id: "issue-one", content: "恢复的讨论" }, { id: "protected-thread", issue_id: "issue-one", content: "仍隐藏的讨论" });
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const thread = f.native.agents.find(agent => agent.labels["multica.discussion"] === "restored-thread")!;
+  const protectedThread = f.native.agents.find(agent => agent.labels["multica.discussion"] === "protected-thread")!;
+  for (const agent of [thread, protectedThread]) {
+    agent.archivedAt = "manually-hidden";
+    await f.server.hook("agent.archive.after", { agent: { ...agent, provider: "multica", title: agent.name!, parentAgentId: null }, archivedAt: agent.archivedAt }, f.paseo);
+  }
+  const provider = await f.server.providers.get("multica")!.connect({ versions: [1], capabilities: ["session.unarchive"] });
+  cleanup.push(() => provider.close());
+  const events: ProviderEvent[] = []; provider.onEvent(event => events.push(event));
+  let entered!: () => void, release!: () => void;
+  const arrived = new Promise<void>(resolve => { entered = resolve; }), blocked = new Promise<void>(resolve => { release = resolve; });
+  const fetch = f.host.fetchAgent.bind(f.host);
+  vi.spyOn(f.host, "fetchAgent").mockImplementation(async id => { if (id === protectedThread.id) { entered(); await blocked; } return fetch(id); });
+  const restoring = f.server.rpc(hiddenRestore, { connectionKey: thread.labels["multica.connection"], issueId: "issue-one", rootId: "main" }, f.paseo);
+  await arrived;
+  try {
+    await provider.send({ type: "session.unarchive", requestId: "held-unarchive", persistence: JSON.parse(protectedThread.handle.slice(7)) });
+    expect(events).toContainEqual({ type: "request.completed", requestId: "held-unarchive" });
+    expect((await f.server.rpc(connectionStatus, {}, f.paseo)).sync.status).toBe("ready");
+    expect((await hiddenObjects(f.server, f.paseo)).map(item => item.rootId)).toEqual(["restored-thread", "protected-thread"]);
+  } finally { release(); await restoring; }
+  thread.archivedAt = null;
+  const workspaces = vi.spyOn(f.host, "fetchWorkspaces");
+  await provider.send({ type: "session.unarchive", requestId: "native-unarchive", persistence: JSON.parse(thread.handle.slice(7)) });
+  expect(events).toContainEqual({ type: "request.completed", requestId: "native-unarchive" });
+  await expect.poll(async () => (await hiddenObjects(f.server, f.paseo)).map(item => item.rootId)).toEqual(["protected-thread"]);
+  expect((await waitForSync(f.server, f.paseo)).status).toBe("ready");
+  expect(workspaces).not.toHaveBeenCalled();
+  expect(thread.archivedAt).toBeNull(); expect(protectedThread.archivedAt).toBeTruthy();
+  const state = JSON.parse(await readFile(join(f.home, "multica-provider/state.json"), "utf8")) as LocalState;
+  expect(Object.values(state.connections)[0].issues["issue-one"].manualHidden).toEqual({ workspace: false, discussions: ["protected-thread"] });
+});
+
+it.each(["missing", "workspaceId", "cwd", "provider"])("retains discussion hiding when the native agent is %s or does not match", async field => {
+  const f = await fixture(60_000); f.remote.acknowledgeEvents = false;
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const main = f.native.agents[0];
+  main.archivedAt = "manually-hidden";
+  await f.server.hook("agent.archive.after", { agent: { ...main, provider: "multica", title: "主讨论", parentAgentId: null }, archivedAt: main.archivedAt }, f.paseo);
+  main.archivedAt = null;
+  const fetch = f.host.fetchAgent.bind(f.host);
+  vi.spyOn(f.host, "fetchAgent").mockImplementation(async id => {
+    const result = await fetch(id);
+    return id !== main.id ? result : field === "missing" ? null : { ...result!, agent: { ...result!.agent, [field]: "other" } };
+  });
+  expect(await resync(f.server, f.paseo, "remote-workspace")).toEqual({ status: "ready" });
+  expect(await hiddenObjects(f.server, f.paseo)).toMatchObject([{ kind: "main", agentId: main.id, rootId: "main" }]);
+});
+
+it.each(["missing", "repeated"])("retains workspace hiding when the native directory has a %s cursor", async kind => {
+  const f = await fixture(60_000); f.remote.acknowledgeEvents = false;
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const workspace = f.native.workspaces[0];
+  await f.server.hook("workspace.archive.after", { workspace: { id: workspace.id, projectId: workspace.projectId, cwd: workspace.cwd, name: workspace.title, archivedAt: "manually-hidden" } }, f.paseo);
+  const page = await f.host.fetchWorkspaces();
+  const fetch = vi.spyOn(f.host, "fetchWorkspaces").mockResolvedValue({ ...page, pageInfo: { ...page.pageInfo, hasMore: true, nextCursor: kind === "missing" ? null : "loop" } });
+  expect(await resync(f.server, f.paseo, "remote-workspace")).toEqual({ status: "unavailable" });
+  expect(fetch).toHaveBeenCalledTimes(kind === "missing" ? 1 : 2);
+  expect(await hiddenObjects(f.server, f.paseo)).toMatchObject([{ kind: "workspace", workspaceId: workspace.id }]);
 });
 
 it("rebuilding a disabled Project leaves manually hidden tasks archived until explicitly restored", async () => {

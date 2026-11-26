@@ -135,7 +135,8 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     threads.coordinateDeliveries(() => deliveries.waitForPosts());
     server.handle(deliveryMentions, async input => deliveries.mentions(input));
     const descriptions = new TaskDescriptions(store);
-    server.registerProvider(createMulticaProvider(store, threads, runs, stops, deliveries, descriptions, lifecycle, askusers, runDetails));
+    server.registerProvider(createMulticaProvider(store, threads, runs, stops, deliveries, descriptions, lifecycle, askusers, runDetails,
+      () => { void synchronizer.reconcile().catch(() => {}); }));
     server.handle(readTaskDescription, async input => {
       // The host authenticates this RPC. Cached history belongs to its persisted
       // connection, even while the CLI is offline, logged out, or using another account.

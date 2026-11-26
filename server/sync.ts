@@ -7,9 +7,9 @@ import { taskRuleSchema, type TaskRule, type SyncStatus } from "../shared/contra
 import { issueQuery } from "./filters.js";
 import { WorkspaceEvents, type WorkspaceEvent } from "./workspace-events.js";
 import { remoteFetch, type AuthenticatedConnection } from "./connection.js";
-import { archiveClosedDiscussion, ensureWorkspaceActive, findActiveWorkspace, findNativeDiscussion, projectHasActiveWorkspaces, restoreMappedDiscussion, type NativeHost } from "./native-host.js";
+import { archiveClosedDiscussion, ensureWorkspaceActive, fetchActiveWorkspaceIds, findActiveWorkspace, findNativeDiscussion, projectHasActiveWorkspaces, restoreMappedDiscussion, type NativeHost } from "./native-host.js";
 import { StateStore, connectionState, issueSchema, type ConnectionState } from "./state.js";
-import { hiddenAgent, restoreWorkspacePreservingHidden } from "./hiding.js";
+import { discussionAgent, hiddenAgent, restoreWorkspacePreservingHidden } from "./hiding.js";
 import { discussionKeys } from "../shared/discussion.js";
 import type { DiscussionMetadata } from "./discussion-metadata.js";
 import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
@@ -561,6 +561,7 @@ export class SidebarSynchronizer {
     }
     if (version !== this.ruleVersion) return;
     await this.removeDisabledProjects(connection.connectionKey, version);
+    let activeWorkspaceIds: Promise<Set<string>> | undefined;
     for (const [workspaceId, rule] of enabled) {
       if (version !== this.ruleVersion) return;
       const workspace = workspaces.find(item => item.id === workspaceId);
@@ -612,7 +613,7 @@ export class SidebarSynchronizer {
               appliedTitle: rebuildWorkspace ? undefined : local.issues[issue.id]?.appliedTitle,
               cwd, title, description: issue.description ?? "", updatedAt: issue.updated_at });
           });
-          const mapping = (await this.options.store.read()).connections[connection.connectionKey].issues[issue.id];
+          let mapping = (await this.options.store.read()).connections[connection.connectionKey].issues[issue.id];
           if (!mapping.workspaceCreated) {
             if (!await findActiveWorkspace(this.host, mapping.workspaceId)) {
               const result = await this.host.createWorkspace({ source: { kind: "directory", path: cwd, projectId }, title,
@@ -625,6 +626,30 @@ export class SidebarSynchronizer {
               if (result.error) throw new Error("Native workspace archive failed");
             }
             await this.options.store.update(state => { state.connections[connection.connectionKey].issues[issue.id].workspaceCreated = true; });
+          }
+          if (previous?.workspaceCreated && !rebuildWorkspace && !mapping.archiveReason) {
+            const workspaceRestored = mapping.manualHidden.workspace &&
+              (await (activeWorkspaceIds ??= fetchActiveWorkspaceIds(this.host))).has(mapping.workspaceId);
+            if (!mapping.manualHidden.workspace || workspaceRestored) {
+              const restoredRoots = new Set<string>();
+              for (const rootId of mapping.manualHidden.discussions) {
+                if (this.options.lifecycle.unavailable({ connectionKey: connection.connectionKey, issueId: issue.id, rootId })) continue;
+                const agentId = discussionAgent(mapping, rootId);
+                if (!agentId) continue;
+                const agent = (await this.host.fetchAgent(agentId))?.agent;
+                if (agent?.workspaceId === mapping.workspaceId && agent.cwd === mapping.cwd && agent.provider === providerId && !agent.archivedAt)
+                  restoredRoots.add(rootId);
+              }
+              if (version !== this.ruleVersion) return;
+              if (workspaceRestored || restoredRoots.size) {
+                await this.options.store.update(state => {
+                  const saved = state.connections[connection.connectionKey].issues[issue.id];
+                  if (workspaceRestored) saved.manualHidden.workspace = false;
+                  saved.manualHidden.discussions = saved.manualHidden.discussions.filter(rootId => !restoredRoots.has(rootId));
+                });
+                mapping = (await this.options.store.read()).connections[connection.connectionKey].issues[issue.id];
+              }
+            }
           }
           if (mapping.manualHidden.workspace) continue;
           if (mapping.archiveReason) {

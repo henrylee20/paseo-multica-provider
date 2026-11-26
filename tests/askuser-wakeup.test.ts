@@ -283,7 +283,10 @@ it.each(["tab hidden", "workspace hidden", "rule disabled", "filter exit", "atta
     await f.server.hook("agent.archive.after", { agent: { id: thread.id, provider: "multica", workspaceId: thread.workspaceId, cwd: thread.cwd, parentAgentId: null, title: "Thread" }, archivedAt: stamp }, f.paseo);
     thread.archivedAt = stamp;
   }
-  if (state === "workspace hidden") await f.server.hook("workspace.archive.after", { workspace: { id: thread.workspaceId, cwd: thread.cwd, projectId: "project", name: "Task", archivedAt: stamp } }, f.paseo);
+  if (state === "workspace hidden") {
+    f.workspaces[0].archivedAt = stamp;
+    await f.server.hook("workspace.archive.after", { workspace: { id: thread.workspaceId, cwd: thread.cwd, projectId: "project", name: "Task", archivedAt: stamp } }, f.paseo);
+  }
   if (state === "rule disabled") await f.server.syncRpc(workspaceEnable, { workspaceId: "workspace", enabled: false }, f.paseo);
   if (state === "filter exit") { f.issues.length = 0; await f.server.syncRpc(workspaceRule, { workspaceId: "workspace", rule: { statusCategories: ["started"] } }, f.paseo); }
   if (state === "attachment forbidden") f.remote.issueStatus = 403;
