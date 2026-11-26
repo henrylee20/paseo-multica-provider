@@ -75,14 +75,16 @@ export function projectRow(address: Address, row: StoredRow): ProviderTimelineIt
 }
 
 export class ThreadSynchronizer {
-  private readonly listeners = new Map<string, Set<{ deliver(row: StoredRow, includeOriginal?: boolean): void; recovery: boolean }>>();
+  private readonly listeners = new Map<string, Set<{ deliver(row: StoredRow, includeOriginal?: boolean): void; recovery: boolean; refreshed?(sequence: number): void }>>();
   private readonly opened = new Set<string>();
   private readonly pending = new Map<string, Promise<void>>();
+  private readonly refreshes = new Map<string, number>();
   private waitForDeliveries: () => Promise<void> = async () => {};
   constructor(private readonly store: StateStore, private readonly connection: () => Promise<AuthenticatedConnection>, private readonly metadata: DiscussionMetadata, private readonly askusers: AskUsers) {}
   coordinateDeliveries(wait: () => Promise<void>) { this.waitForDeliveries = wait; }
-  subscribe(address: Address, deliver: (row: StoredRow, includeOriginal?: boolean) => void, recovery = false) {
-    const listener = { deliver, recovery };
+  refreshSequence(address: Address) { return this.refreshes.get(key(address)) ?? 0; }
+  subscribe(address: Address, deliver: (row: StoredRow, includeOriginal?: boolean) => void, recovery = false, refreshed?: (sequence: number) => void) {
+    const listener = { deliver, recovery, refreshed };
     const id = key(address);
     const listeners = this.listeners.get(id) ?? new Set();
     listeners.add(listener); this.listeners.set(id, listeners);
@@ -209,6 +211,8 @@ export class ThreadSynchronizer {
   }
   private refresh(connection: AuthenticatedConnection, workspace: RemoteWorkspace, address: Address, discoverCards = true) {
     const id = key(address);
+    const sequence = this.refreshSequence(address) + 1;
+    this.refreshes.set(id, sequence);
     const operation = (this.pending.get(id) ?? Promise.resolve()).catch(() => {}).then(async () => {
       const issue = (await this.store.read()).connections[address.connectionKey].issues[address.issueId];
         const rootIds = address.rootId === "main" ? issue.systemRootIds : [address.rootId];
@@ -278,12 +282,16 @@ export class ThreadSynchronizer {
         }
         thread.historyLoaded = true;
       });
-      for (const row of newRows) for (const listener of this.listeners.get(id) ?? []) listener.deliver(row);
-      if (discoverCards) await this.askusers.discover(connection, workspace, address.issueId, [...comments.values()], roots, address.rootId);
+      try {
+        if (discoverCards) await this.askusers.discover(connection, workspace, address.issueId, [...comments.values()], roots, address.rootId);
+      } finally {
+        for (const row of newRows) for (const listener of this.listeners.get(id) ?? []) listener.deliver(row);
+        for (const listener of this.listeners.get(id) ?? []) listener.refreshed?.(sequence);
+      }
     });
     this.pending.set(id, operation);
     return operation.finally(() => { if (this.pending.get(id) === operation) this.pending.delete(id); });
   }
   async reset() { await Promise.allSettled(this.pending.values()); this.opened.clear(); }
-  async close() { this.opened.clear(); this.listeners.clear(); await Promise.allSettled(this.pending.values()); }
+  async close() { this.opened.clear(); this.listeners.clear(); await Promise.allSettled(this.pending.values()); this.refreshes.clear(); }
 }

@@ -34,9 +34,9 @@ Paseo 0.17.4 恢复工作区可能以 60 秒时间戳回退唤醒其他隐藏讨
 
 每轮同步按 Multica 工作区复用 agents／members promise；Thread 显式打开时使用该次请求的目录，不另设 TTL。metadata 存量扫描在进程内成功一次后停止，失败由后续 bootstrap 重试；导入和恢复单独补写。
 
-Thread renderer 挂载仍调用 thread.open，正常不显示说明卡；主讨论也保留不可见的加载条目。仅本进程实际打开的 Thread 继续补读评论正文；描述由 provider 订阅推送。父 provider 协商 session.subsession，讨论打开（含导入、history:skip）立即重新发出全部归属 Run 子会话与缓存；RunDetails 只为本进程实际打开过的讨论补读远端执行消息，每两秒刷新活跃 Run；成功补齐终态后保存 finalized 并停止；补齐前不越过序号缺口。子会话立即按已知 Run 终态结束，不等待明细读取，离线、登出或读取失败不影响终态，后续明细仍可追加。profile 清理复用 reset 排空旧读取并清空打开集合，计时器供新 profile 继续使用。
+Thread renderer 挂载仍调用 thread.open，正常不显示说明卡；主讨论也保留不可见的加载条目。仅本进程实际打开的 Thread 继续补读评论正文；描述由 provider 订阅推送。父 provider 协商 session.subsession，讨论打开（含导入、history:skip）时按来源行与创建时间交错发出 Run 标记，再打开对应子会话并补推缓存；skip 中已有标记的子会话立即恢复。RunDetails 只为本进程实际打开过的讨论补读远端执行消息，每两秒刷新活跃 Run；成功补齐终态后保存 finalized 并停止；补齐前不越过序号缺口。子会话释放时立即按已知 Run 终态结束，不等待明细读取，离线、登出或读取失败不影响终态，后续明细仍可追加。profile 清理复用 reset 排空旧读取并清空打开集合，计时器供新 profile 继续使用。
 
-RunProjection 将执行文本、工具输入／结果、错误及远端目录推送到只读子时间线；原始消息缓存去重并保持序号，活跃期及终态补读完成前，序号缺口后的消息等待补齐；finalized 后按可得源顺序呈现。空字符串与 null 元数据不生成条目。父讨论仅发出一次固定 completed 的 sub_agent 位置标记，子会话 toolCallId 指向它；markerProjected 持久标记已发出的位置标记，history:skip 只补发关闭期间新发现等尚未发出的标记。父关闭只清理本地投影，由宿主取消运行中的子代理，不发送会将其误标 completed 的子会话 session.closed。Run 细分活动状态变化追加说明，completed／failed／cancelled 对应子会话 completed／failed／canceled；聚合父 turn 和原生 Stop 边界保持。旧 multica:run:<runId> 行、renderer 及 run.open／run.read／run.observe RPC 均移除。描述保留 revision／offset 切片，评论事件仍单次读取。缓存重放不依赖 CLI 登录，远端补读仍核对原连接与 Run 归属。
+RunProjection 将执行文本、工具输入／结果、错误及远端目录推送到只读子时间线；原始消息缓存去重并保持序号，活跃期及终态补读完成前，序号缺口后的消息等待补齐；finalized 后按可得源顺序呈现。空字符串与 null 元数据不生成条目。父讨论仅发出一次固定 completed 的 sub_agent 位置标记，子会话 toolCallId 指向它；markerProjected 仅在实际发出后持久保存，history:skip 只补发关闭期间新发现等尚未发出的标记。无输入锚点的 Run 等完整快照可用后按纳秒时间参与逐行排序；来源无任何行时，必须等开始等待后才发起的讨论刷新投递完成，不能仅凭旧 historyLoaded 认定缺失。父关闭只清理本地投影，由宿主取消运行中的子代理，不发送会将其误标 completed 的子会话 session.closed。Run 细分活动状态变化追加说明，completed／failed／cancelled 对应子会话 completed／failed／canceled；聚合父 turn 和原生 Stop 边界保持。旧 multica:run:<runId> 行、renderer 及 run.open／run.read／run.observe RPC 均移除。描述保留 revision／offset 切片，评论事件仍单次读取。缓存重放不依赖 CLI 登录，远端补读仍核对原连接与 Run 归属。宿主按到达顺序追加，插件无法移动已错位的旧时间线；需用户自行“重建数据”（会清除人工隐藏）。
 
 恢复 history:skip 会话仍完整分页读回原生时间线，再按来源 messageId／自身 clientMessageId、角色及全文确认缺失原文。Paseo 0.17.4 的普通消息 item ID 去重仅在 provider 会话内存中，不能跨重启信任；失败、gap 或 epoch 改变时不盲目重放，见 ADR 0005。
 
@@ -60,7 +60,7 @@ SidebarSynchronizer.exclusive 使在途同步在规则版本边界让出，串�
 
 ## AskUser（#20–#27）
 
-保留 main 的 askuser.json version "1" 安全下载与持久卡片缓存、完整 timeline 终态校验、原生问题映射、精确中文回答、本地收起／重展、两步跳过和受保护的主动加载。父评论与 askuser_answer_to 均指向卡片评论，rootId 仍为原 Thread／Run／Stop 归属；指定 answer_user_id、require_answer、卡片终态、隐藏、归档和 hold 检查保留。新卡片仍可出现在独立 Thread，不迁移已固定的 Run owner。
+保留 main 的 askuser.json version "1" 安全下载与持久卡片缓存、完整 timeline 终态校验、原生问题映射、精确中文回答、本地收起／重展、两步跳过和受保护的主动加载。卡片首次输出紧跟来源评论，之后状态更新原位合并；Thread 刷新先发现卡片再投递评论，发现失败仍投递已读评论。父评论与 askuser_answer_to 均指向卡片评论，rootId 仍为原 Thread／Run／Stop 归属；指定 answer_user_id、require_answer、卡片终态、隐藏、归档和 hold 检查保留。新卡片仍可出现在独立 Thread，不迁移已固定的 Run owner。
 
 原生权限 ID 仍为 multica:askuser:<cardCommentId>:<attachmentId>，按 provider session、连接与 Issue 隔离。权限、订阅随 SessionContext 释放；DiscussionLifecycle.loaded 与 NativeHost.listCommands 继续用于无中断加载。StateStore 的成功更新在缓存替换后通知订阅，失败更新不通知；CLI 撤销与身份刷新继续清理原连接权限，同账号轮换不丢收起状态。
 

@@ -154,7 +154,7 @@ export function ConnectionScreen({ host, theme }: PluginSurfaceProps) {
     </SettingsCard>
   </SettingsSection>;
 
-  const rules = <WorkspaceList key={scopeKey} workspaces={current} read={workspacesRead} failure={workspaceFailure} status={status} syncStatus={syncStatus} theme={theme}
+  const rules = <WorkspaceList key={`rules:${scopeKey}`} workspaces={current} read={workspacesRead} failure={workspaceFailure} status={status} syncStatus={syncStatus} theme={theme}
     onSync={sync => { if (sync) setSyncStatus(sync); setAttempt(value => value + 1); }}
     onRuleSaved={(workspace, rule) => {
       setWorkspaces(list => list.map(item => item.connectionKey === workspace.connectionKey && item.id === workspace.id ? { ...item, rule } : item));
@@ -184,7 +184,7 @@ export function ConnectionScreen({ host, theme }: PluginSurfaceProps) {
       </Modal.Content>
     </Modal> : null}
     {rules}
-    <DataRebuild key={scopeKey} connectionKey={status?.connectionKey} ready={status?.status === "ready" && syncStatus?.stage !== "purging"} disabledReason={syncStatus?.stage === "purging" ? "请等待旧 profile 本地数据清理完成后重建。" : undefined} theme={theme} onRefresh={refresh} />
+    <DataRebuild key={`rebuild:${scopeKey}`} connectionKey={status?.connectionKey} ready={status?.status === "ready" && syncStatus?.stage !== "purging"} disabledReason={syncStatus?.stage === "purging" ? "请等待旧 profile 本地数据清理完成后重建。" : undefined} theme={theme} onRefresh={refresh} />
     <HiddenObjects theme={theme} objects={hidden} onRefresh={refresh} />
   </View>;
 }

@@ -5,14 +5,14 @@ import type { AskuserCardData } from "../shared/askuser.js";
 import type { AskUsers } from "./askuser.js";
 import { randomUUID } from "node:crypto";
 import { isActiveRun } from "../shared/runs.js";
-import type { RunSynchronizer } from "./runs.js";
+import { sourceTime, type RunSynchronizer } from "./runs.js";
 import { z } from "zod";
-import type { ProviderEvent, ProviderRegistration } from "@getpaseo/plugin/server/provider";
-import { StateStore } from "./state.js";
+import type { ProviderEvent, ProviderRegistration, ProviderTimelineItem } from "@getpaseo/plugin/server/provider";
+import { StateStore, type IssueMapping } from "./state.js";
 import { mainPersistence, providerId } from "./sync.js";
 import { taskDescriptionKind, taskDescriptionVersion } from "../shared/description.js";
 import { taskDescriptionData, type TaskDescriptions } from "./task-description.js";
-import { projectRow, threadPersistence, type ThreadSynchronizer } from "./threads.js";
+import { projectRow, projectionHistory, threadPersistence, type ThreadSynchronizer } from "./threads.js";
 import type { StoredRow } from "./thread-state.js";
 import type { StopCoordinator } from "./stops.js";
 import type { RunAddress } from "./runs.js";
@@ -24,6 +24,69 @@ const persistenceSchema = z.object({ version: z.literal(1), data: z.object({
 }).and(z.discriminatedUnion("discussion", [z.object({ discussion: z.literal("main") }), z.object({ discussion: z.literal("thread"), rootId: z.string() })])) });
 const supported = ["prompt.message", "prompt.steer", "session.persistence", "session.subsession", "session.list", "timeline.plugin", "session.archive", "session.unarchive", "permission"];
 
+/** The host appends at first emission: hold attachments and children until their source position. */
+class DiscussionOrder {
+  private readonly comments = new Set<string>();
+  private readonly cards = new Map<string, { item: ProviderTimelineItem; commentId: string; waitingAt: number }>();
+  private readonly emittedCards = new Set<string>();
+  private readonly waitingRuns = new Map<string, { anchor?: string; waitingAt: number }>();
+  private readonly releasedRuns = new Set<string>();
+  private completedRefresh = 0;
+  constructor(private issue: IssueMapping, private readonly rootId: string, private readonly emittedRows: Set<string>,
+    private readonly refreshSequence: () => number, private readonly replayMarkers: boolean,
+    private readonly projectRuns: (issue: IssueMapping, runIds: Iterable<string>) => void,
+    private readonly emitCard: (item: ProviderTimelineItem) => void) {}
+  update(issue: IssueMapping) {
+    this.issue = issue;
+    for (const [id, run] of Object.entries(issue.runs)) {
+      if (run.ownerRootId !== this.rootId || this.releasedRuns.has(id)) continue;
+      const triggerRoot = run.triggerCommentId ? issue.commentRoots[run.triggerCommentId] : undefined;
+      const anchor = run.triggerCommentId && (triggerRoot === undefined || triggerRoot === this.rootId) ? run.triggerCommentId
+        : [...new Set([...run.coalescedCommentIds, ...(run.deliveredCommentIds ?? []), ...run.supplementCommentIds])]
+        .filter(id => issue.commentRoots[id] === this.rootId)
+        .sort((a, b) => {
+          const first = sourceTime(issue.commentCreatedAt[a]) ?? 0n, second = sourceTime(issue.commentCreatedAt[b]) ?? 0n;
+          return first < second ? -1 : first > second ? 1 : a.localeCompare(b);
+        })[0];
+      if (!this.waitingRuns.has(id) || this.waitingRuns.get(id)!.anchor !== anchor)
+        this.waitingRuns.set(id, { anchor, waitingAt: this.refreshSequence() });
+      if (!this.replayMarkers && run.markerProjected) this.releasedRuns.add(id);
+    }
+    this.flush(undefined, true);
+  }
+  askuser(item: ProviderTimelineItem, commentId: string) {
+    if (this.emittedCards.has(item.id)) { this.emitCard(item); return; }
+    this.cards.set(item.id, { item, commentId, waitingAt: this.cards.get(item.id)?.waitingAt ?? this.refreshSequence() });
+    this.flush();
+  }
+  beforeRow(row: StoredRow) {
+    if (row.id === `multica:comment:${row.commentId}`) this.flush(sourceTime(row.sourceCreatedAt));
+  }
+  afterRow(row: StoredRow) { this.comments.add(row.commentId); this.flush(); }
+  refreshed(sequence: number) { this.completedRefresh = sequence; this.flush(); }
+  private flush(before?: bigint, projectUpdates = false) {
+    const released = this.releasedRuns.size;
+    const history = projectionHistory(this.issue, this.rootId);
+    // Store notifications precede delivery of the rows in that same snapshot.
+    const complete = history.historyLoaded && history.rows.every(row => this.emittedRows.has(row.id));
+    const anchored = (commentId: string, waitingAt: number) => this.comments.has(commentId) || (complete && this.completedRefresh > waitingAt);
+    for (const [id, card] of this.cards) {
+      if (!anchored(card.commentId, card.waitingAt)) continue;
+      this.cards.delete(id); this.emittedCards.add(id); this.emitCard(card.item);
+    }
+    const candidates = [...this.waitingRuns].filter(([id]) => !this.releasedRuns.has(id)).sort(([a], [b]) => {
+      const first = sourceTime(this.issue.runs[a].createdAt), second = sourceTime(this.issue.runs[b].createdAt);
+      return first === second ? a.localeCompare(b) : first === undefined ? -1 : second === undefined ? 1 : first < second ? -1 : 1;
+    });
+    for (const [id, { anchor, waitingAt }] of candidates) {
+      if (anchor ? !anchored(anchor, waitingAt) : !history.historyLoaded) continue;
+      const time = sourceTime(this.issue.runs[id].createdAt);
+      if (time === undefined || complete || (before !== undefined && time < before)) this.releasedRuns.add(id);
+    }
+    if (projectUpdates || this.releasedRuns.size !== released) this.projectRuns(this.issue, this.releasedRuns);
+  }
+}
+
 interface SessionContext {
   address: RunAddress;
   emittedRows: Set<string>;
@@ -33,6 +96,7 @@ interface SessionContext {
   subscriptions: Array<() => void>;
   interrupts: Set<Promise<void>>;
   permissions: Map<string, AskuserCardData>;
+  order?: DiscussionOrder;
   turnId?: string;
   settleInterrupt?: (turnId: string) => void;
 }
@@ -75,6 +139,7 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
       const emitRow = (sessionId: string, row: StoredRow, includeOriginal = true) => {
         const session = sessions.get(sessionId);
         if (!session || session.emittedRows.has(row.id)) return;
+        session.order?.beforeRow(row);
         session.emittedRows.add(row.id);
         const timestamp = row.role === "event" ? row.sourceUpdatedAt ?? row.sourceCreatedAt : row.sourceCreatedAt;
         // Canonical recovery acknowledges originals it skips, including native input IDs.
@@ -86,6 +151,7 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
         if ((includeOriginal && firstOriginal) || row.role === "event")
           emit({ type: "timeline.item", sessionId, item: projectRow(session.address, row),
             ...(timestamp && Number.isFinite(Date.parse(timestamp)) ? { timestamp } : {}) });
+        session.order?.afterRow(row);
       };
       return {
         version: 1, capabilities,
@@ -128,12 +194,30 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
             const address = session.address;
             emit({ type: "session.opened", requestId: input.requestId, sessionId: input.sessionId, capabilities,
               restoration: "core", persistence: parsed.data, cwd: issue.cwd, title: issue.title, description: issue.description });
+            const projection = new RunProjection(input.sessionId, address.rootId, emit);
+            const order = new DiscussionOrder(issue, address.rootId, session.emittedRows, () => threads.refreshSequence(address), input.history === "replay", (latest, runIds) => {
+              if (!capabilities.includes("session.subsession")) return;
+              const markers = projection.project(latest, input.history === "replay", runIds);
+              if (!markers.some(runId => !latest.runs[runId].markerProjected)) return;
+              void store.update(state => {
+                const saved = state.connections[address.connectionKey]?.issues[address.issueId];
+                for (const runId of markers) if (saved?.runs[runId]) saved.runs[runId].markerProjected = true;
+              }).catch(() => {});
+            }, item => emit({ type: "timeline.item", sessionId: input.sessionId, item }));
+            session.order = order;
+            order.update(issue);
+            session.subscriptions.push(store.subscribe(state => {
+              const latest = state.connections[address.connectionKey]?.issues[address.issueId];
+              if (latest) order.update(latest);
+            }), () => projection.close());
+            let replaying = input.history === "replay";
+            const deferredRows: Array<() => void> = [];
+            const afterReplay = (deliver: () => void) => { if (replaying) deferredRows.push(deliver); else deliver(); };
             if (parsed.data.data.discussion === "thread") {
               const { connectionKey, issueId, rootId } = parsed.data.data;
               emit({ type: "timeline.item", sessionId: input.sessionId, item: { type: "plugin", id: `multica:thread:${rootId}`, pluginId: "multica", kind: "thread", version: 1,
                 data: { connectionKey, issueId, rootId, title: issue.threads[rootId].title } } });
-              if (input.history === "replay") for (const row of issue.threads[rootId].rows) emitRow(input.sessionId, row);
-              session.subscriptions.push(threads.subscribe(address, (row, includeOriginal) => emitRow(input.sessionId, row, includeOriginal), input.history !== "replay"));
+              session.subscriptions.push(threads.subscribe(address, (row, includeOriginal) => afterReplay(() => emitRow(input.sessionId, row, includeOriginal)), input.history !== "replay", sequence => afterReplay(() => order.refreshed(sequence))));
             } else if (input.history === "replay") emit({ type: "timeline.item", sessionId: input.sessionId, item: {
               type: "plugin", pluginId: providerId, kind: taskDescriptionKind, version: taskDescriptionVersion,
               id: `multica:description:${parsed.data.data.issueId}`,
@@ -149,8 +233,7 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
                   id: `multica:description:${parsed.data.data.issueId}`, data } });
               }));
               emit({ type: "timeline.item", sessionId: input.sessionId, item: { type: "plugin", id: `multica:thread:main:${address.issueId}`, pluginId: "multica", kind: "thread", version: 1, data: { ...address, title: "主讨论" } } });
-              if (input.history === "replay") for (const row of issue.mainHistory.rows) emitRow(input.sessionId, row);
-              session.subscriptions.push(threads.subscribe(address, (row, includeOriginal) => emitRow(input.sessionId, row, includeOriginal), input.history !== "replay"));
+              session.subscriptions.push(threads.subscribe(address, (row, includeOriginal) => afterReplay(() => emitRow(input.sessionId, row, includeOriginal)), input.history !== "replay", sequence => afterReplay(() => order.refreshed(sequence))));
             }
             let opening = true;
             const deferredFresh = new Set<string>();
@@ -170,7 +253,7 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
               } else if (pending.delete(permissionId)) emit({ type: "session.permission_resolved", sessionId: input.sessionId, permissionId });
             };
             const projectAskuser = (item: import("@getpaseo/plugin/server/provider").ProviderTimelineItem, card: AskuserCardData, announceFresh: boolean) => {
-              emit({ type: "timeline.item", sessionId: input.sessionId, item });
+              order.askuser(item, card.commentId);
               projectPermission(card, announceFresh);
             };
             session.subscriptions.push(askusers.subscribe(address, projectAskuser));
@@ -188,25 +271,17 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
             }));
             const rows = await askusers.rows(address);
             if (sessions.get(input.sessionId) !== session || lifecycle.unavailable(address)) return;
-            for (const item of rows) emit({ type: "timeline.item", sessionId: input.sessionId, item });
+            for (const item of rows) if (item.type === "plugin") order.askuser(item, (item.data as AskuserCardData).commentId);
             const cards = await askusers.cards(address);
             if (sessions.get(input.sessionId) !== session || lifecycle.unavailable(address)) return;
             for (const card of cards) projectPermission(card);
-            const projection = new RunProjection(input.sessionId, address.rootId, emit);
-            const projectChildren = (latest: typeof issue, replay = false) => {
-              const markers = projection.project(latest, replay);
-              if (!markers.some(runId => !latest.runs[runId].markerProjected)) return;
-              void store.update(state => {
-                const saved = state.connections[address.connectionKey]?.issues[address.issueId];
-                for (const runId of markers) if (saved?.runs[runId]) saved.runs[runId].markerProjected = true;
-              }).catch(() => {});
-            };
+            const latest = (await store.read()).connections[address.connectionKey]?.issues[address.issueId];
+            if (sessions.get(input.sessionId) !== session || !latest || lifecycle.unavailable(address)) return;
+            if (input.history === "replay") for (const row of projectionHistory(latest, address.rootId).rows) emitRow(input.sessionId, row);
+            for (const deliver of deferredRows) if (sessions.get(input.sessionId) === session) deliver();
+            deferredRows.length = 0;
+            replaying = false;
             if (capabilities.includes("session.subsession")) {
-              projectChildren(issue, input.history === "replay");
-              session.subscriptions.push(store.subscribe(state => {
-                const latest = state.connections[address.connectionKey]?.issues[address.issueId];
-                if (latest) projectChildren(latest);
-              }), () => projection.close());
               runDetails.openDiscussion(address);
             }
             let currentRuns: typeof issue.runs = {};

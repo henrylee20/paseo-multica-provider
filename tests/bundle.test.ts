@@ -410,7 +410,17 @@ function componentTree() {
   function visit(node: unknown, path: string): string {
     if (typeof node === "string") return node;
     if (typeof node === "number") return String(node);
-    if (Array.isArray(node)) return node.map((child, position) => visit(child, `${path}.${isValidElement(child) && child.key !== null ? child.key : position}`)).join("");
+    if (Array.isArray(node)) {
+      const keys = new Set<string>();
+      return node.map((child, position) => {
+        const key = isValidElement(child) ? child.key : null;
+        if (key !== null) {
+          if (keys.has(key)) throw new Error(`Duplicate sibling key: ${key}`);
+          keys.add(key);
+        }
+        return visit(child, `${path}.${key ?? position}`);
+      }).join("");
+    }
     if (!isValidElement<{ children?: unknown }>(node)) return "";
     if (typeof node.type !== "function") return visit(node.props.children, path);
     const own = `${path}/${node.type.name || "component"}`;
