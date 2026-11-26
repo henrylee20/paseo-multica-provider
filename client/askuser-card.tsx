@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
-import { Pressable, Text, View } from "react-native";
+import { Text, View } from "react-native";
 import { useRpc, type PluginSurfaceProps, type PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import { Markdown, SettingsAction } from "@getpaseo/plugin/client/ui";
 import { askuserObserve, askuserRead, askuserReopen, askuserSkip, askuserCardSchema, askuserConditionHint, type AskuserCardData } from "../shared/askuser.js";
 import { collectText } from "./chunked-text.js";
 import { formatTime } from "./format.js";
+import { RuleButton } from "./ui-kit.js";
 
 type Props = PluginTimelineItemProps<AskuserCardData>;
 const status = { pending: "待答", answered: "已答", skipped: "已跳过", invalid: "不可解析" };
@@ -12,17 +13,20 @@ const status = { pending: "待答", answered: "已答", skipped: "已跳过", in
 /** Shared with cache-only history; native questions own answer submission. */
 export function AskuserContents({ data, theme }: { data: AskuserCardData; theme: PluginSurfaceProps["theme"] }) {
   const muted = { color: theme.colors.foregroundMuted };
+  const compact = data.status === "pending" && !data.readOnly && !data.offline && !data.collapsed;
   return <View style={{ gap: 8 }}>
     <Text style={{ color: theme.colors.foreground, fontWeight: "600" }}>{data.title}</Text>
-    <Text style={muted}>{status[data.status]}{data.readOnly ? " · 只读" : ""}{data.offline ? " · 离线缓存" : ""}</Text>
+    <Text style={muted}>
+      {compact ? `${status[data.status]} · 请在下方表单作答` : `${status[data.status]}${data.readOnly ? " · 只读" : ""}${data.offline ? " · 离线缓存" : ""}`}
+    </Text>
     {data.collapsed && data.status === "pending" ? <Text style={muted}>已在本地收起，远端仍待答。</Text> : null}
     {data.description ? <Markdown>{data.description}</Markdown> : null}
-    {data.questions.map((question, index) => <View key={`${index}:${question.id}`} style={{ gap: 4 }}>
+    {!compact ? data.questions.map((question, index) => <View key={`${index}:${question.id}`} style={{ gap: 4 }}>
       <Text style={{ color: theme.colors.foreground }}>{index + 1}. {question.title}</Text>
       {question.description ? <Markdown>{question.description}</Markdown> : null}
       <Text style={muted}>{question.type === "text" ? question.required_when ? "条件必填" : question.required === false ? "选填" : "必填文本" : question.type === "single" ? "单选" : "多选"}</Text>
       {question.type !== "text" ? <Text style={muted}>{question.options.map(option => option.label).join(" · ")}{question.other?.enabled ? ` · ${question.other.label || "其他（自定义）"}` : ""}</Text> : question.required_when ? <Text style={muted}>{askuserConditionHint(data.questions, question)}</Text> : null}
-    </View>)}
+    </View>) : null}
     {data.answer ? <View style={{ gap: 4 }}><Text style={muted}>答复者：{data.answer.actorId ?? "未知"}{data.answer.delegatedBy ? ` · 代理委托：${data.answer.delegatedBy}` : ""}</Text><Markdown>{data.answer.content}</Markdown></View> : null}
     {data.skippedAt || data.skippedBy ? <Text style={muted}>跳过时间：{data.skippedAt ? formatTime(data.skippedAt) ?? data.skippedAt : "未知"} · 操作者：{data.skippedBy ?? "未知"}</Text> : null}
     {data.readOnlyReason ? <Text style={muted}>{data.readOnlyReason}</Text> : null}
@@ -30,7 +34,6 @@ export function AskuserContents({ data, theme }: { data: AskuserCardData; theme:
     {data.delivery?.status === "failed" ? <Text style={muted}>{data.delivery.message}</Text> : null}
     {data.statusError ? <Text style={muted}>{data.statusError}</Text> : null}
     {data.error ? <Text accessibilityRole="alert" style={{ color: theme.colors.statusDanger }}>{data.error}</Text> : null}
-    <Text selectable style={muted}>原评论 {data.commentId} · 附件 {data.attachmentId} · Thread {data.rootId}</Text>
   </View>;
 }
 
@@ -87,15 +90,20 @@ function AskuserBody({ data, theme, onChanged }: { data: AskuserCardData; theme:
     finally { scope.busy = false; if (scope.active) setActing(false); }
   }
   const actionable = data.status === "pending" && !data.readOnly && !data.offline;
-  return <View style={{ gap: 8 }}>
+  const compact = actionable && !data.collapsed;
+  return <View style={{ gap: 8, padding: 12, borderWidth: 1, borderColor: theme.colors.border, borderRadius: 12, backgroundColor: theme.colors.surface1 }}>
     <AskuserContents data={full ?? data} theme={theme} />
-    {actionable && data.collapsed ? <Pressable accessibilityRole="button" accessibilityLabel="重新展开作答" disabled={acting} onPress={() => { void act("reopen"); }}><Text style={{ color: theme.colors.foreground }}>重新展开作答</Text></Pressable> : null}
     {actionable ? confirmSkip ? <View style={{ gap: 8 }}>
       <Text style={{ color: theme.colors.statusDanger }}>此操作会在 Multica 跳过此卡，所有成员都会看到已跳过状态。确认继续？</Text>
-      <Pressable accessibilityRole="button" accessibilityLabel="确认远端跳过" disabled={acting} onPress={() => { void act("skip"); }}><Text style={{ color: theme.colors.statusDanger }}>确认远端跳过</Text></Pressable>
-      <Pressable accessibilityRole="button" accessibilityLabel="取消" disabled={acting} onPress={() => setConfirmSkip(false)}><Text style={{ color: theme.colors.foreground }}>取消</Text></Pressable>
-    </View> : <Pressable accessibilityRole="button" accessibilityLabel="跳过此卡" disabled={acting} onPress={() => setConfirmSkip(true)}><Text style={{ color: theme.colors.foreground }}>跳过此卡</Text></Pressable> : null}
-    {data.truncated && !full ? <SettingsAction label="内容较长，当前仅显示标题、警示和题目摘要。" actionLabel={loading ? "正在读取…" : "读取完整提问"} disabled={loading} onPress={() => { void load(); }} /> : null}
+      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+        <RuleButton theme={theme} tone="danger" disabled={acting} onPress={() => { void act("skip"); }}>确认远端跳过</RuleButton>
+        <RuleButton theme={theme} disabled={acting} onPress={() => setConfirmSkip(false)}>取消</RuleButton>
+      </View>
+    </View> : <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+      {data.collapsed ? <RuleButton theme={theme} tone="primary" disabled={acting} onPress={() => { void act("reopen"); }}>重新展开作答</RuleButton> : null}
+      <RuleButton theme={theme} tone="danger" disabled={acting} onPress={() => setConfirmSkip(true)}>跳过此卡</RuleButton>
+    </View> : null}
+    {data.truncated && !full && (!compact || Boolean(data.description)) ? <SettingsAction label={compact ? "内容较长，当前仅显示标题和警示摘要。" : "内容较长，当前仅显示标题、警示和题目摘要。"} actionLabel={loading ? "正在读取…" : "读取完整提问"} disabled={loading} onPress={() => { void load(); }} /> : null}
     {error ? <Text accessibilityRole="alert" style={{ color: theme.colors.statusDanger }}>{error}</Text> : null}
   </View>;
 }

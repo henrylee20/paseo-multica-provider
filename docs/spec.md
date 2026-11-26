@@ -77,7 +77,7 @@ Paseo `0.16.0+` 的讨论输入框注册 `multica-mention` 选择器（「提及
 
 ## AskUser 结构化提问与后台唤醒
 
-所属 Thread 评论（含子回复）携带的 `askuser.json`（`version: "1"`，`application/json`）渲染为稳定的 `askuser` 时间线卡片，首次输出紧跟携带该附件的来源评论（后续状态更新原位合并；Thread 刷新先发现卡片再投递评论行，卡片发现失败仍投递已读评论），展示标题、完整警示说明、问题与选项（超长内容通过 `askuser.read` 分页展开）。附件按连接、Issue 与附件 ID 持久缓存，后台同步与打开 Thread 共用下载；严格限制当前 API 同源地址、禁止重定向、流式上限 64 KiB 并校验 schema，下载或校验失败仅在卡片报错，不阻塞普通评论同步。仅当 Issue 存在未确认终态的卡片时才额外拉取一次完整 `timeline`，核对直接回复（含超过摘要 200 runes 截断的长回答、`answer_user_id`、`delegated_by` 与条件必填）及远端跳过元数据，确认终态后停止额外轮询。
+所属 Thread 评论（含子回复）携带的 `askuser.json`（`version: "1"`，`application/json`）渲染为稳定的 `askuser` 时间线卡片，首次输出紧跟携带该附件的来源评论（后续状态更新原位合并；Thread 刷新先发现卡片再投递评论行，卡片发现失败仍投递已读评论）。卡片采用带边框与圆角的 `surface1` 容器并隐去原始评论／附件／Thread ID：待答且当前可于下方原生表单作答时仅展示标题、警示说明、待答提示与危险色「跳过此卡」按钮，不重复列出题目与选项；本地收起、已答、已跳过、只读或离线缓存时展示完整题目、选项与结果（超长内容通过 `askuser.read` 分页展开）。附件按连接、Issue 与附件 ID 持久缓存，后台同步与打开 Thread 共用下载；严格限制当前 API 同源地址、禁止重定向、流式上限 64 KiB 并校验 schema，下载或校验失败仅在卡片报错，不阻塞普通评论同步。仅当 Issue 存在未确认终态的卡片时才额外拉取一次完整 `timeline`，核对直接回复（含超过摘要 200 runes 截断的长回答、`answer_user_id`、`delegated_by` 与条件必填）及远端跳过元数据，确认终态后停止额外轮询。
 
 当卡片未决且当前连接用户可作答时，插件映射原生 `QuestionFormCard` 权限（稳定 ID 为 `multica:askuser:<cardCommentId>:<attachmentId>`，按 provider 会话、连接与 Issue 隔离）：
 

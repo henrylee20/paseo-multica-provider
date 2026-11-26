@@ -1343,30 +1343,52 @@ it("the native discussion shows only thread-open failures", async () => {
 });
 
 it.each([
-  ["pending", {}, ["待答"]],
-  ["pending", { delivery: { status: "failed", clientMessageId: "answer", message: "回答发送失败" } }, ["回答发送失败"]],
-  ["answered", { answer: { commentId: "reply", content: "**确认结果**\n\n1. **理由**：已核对", actorId: "reviewer", actorType: "member" } }, ["已答", "reviewer", "已核对"]],
-  ["skipped", { skippedAt: "2026-11-24T10:00:00Z", skippedBy: "operator" }, ["已跳过", "operator"]],
-  ["invalid", { error: "附件超过 64 KiB 上限。" }, ["不可解析", "64 KiB"]],
-  ["pending", { readOnly: true, readOnlyReason: "仅指定用户 reviewer 可作答。" }, ["只读", "reviewer"]],
-  ["pending", { offline: true, readOnly: true }, ["离线缓存", "只读"]],
-])("the host-compiled askuser renderer shows %s with its warning, questions and source references", async (status, extra, labels) => {
+  ["pending", {}, true, ["待答 · 请在下方表单作答", "跳过此卡"]],
+  ["pending", { delivery: { status: "failed", clientMessageId: "answer", message: "回答发送失败" } }, true, ["待答 · 请在下方表单作答", "回答发送失败"]],
+  ["pending", { collapsed: true }, false, ["待答", "已在本地收起，远端仍待答。", "重新展开作答", "跳过此卡"]],
+  ["answered", { answer: { commentId: "reply", content: "**确认结果**\n\n1. **理由**：已核对", actorId: "reviewer", actorType: "member" } }, false, ["已答", "reviewer", "已核对"]],
+  ["skipped", { skippedAt: "2026-11-24T10:00:00Z", skippedBy: "operator" }, false, ["已跳过", "operator"]],
+  ["invalid", { error: "附件超过 64 KiB 上限。" }, false, ["不可解析", "64 KiB"]],
+  ["pending", { readOnly: true, readOnlyReason: "仅指定用户 reviewer 可作答。" }, false, ["只读", "reviewer"]],
+  ["pending", { offline: true, readOnly: true }, false, ["离线缓存", "只读"]],
+])("the host-compiled askuser renderer formats %s (%j) with container styling and hides duplicate questions and raw IDs", async (status, extra, compact, labels) => {
   const renderers: PluginTimelineRendererContribution[] = [];
+  const views: Array<{ style?: Record<string, unknown> }> = [];
+  const pressables: Array<{ accessibilityLabel?: string; style?: Record<string, unknown> }> = [];
   const setup = await bundledContribution("../index.client.tsx", {
     react: { useEffect: () => {}, useState: (value: unknown) => [value, () => {}] },
     "@getpaseo/plugin/client": { useRpc: () => async () => ({}) },
     "@getpaseo/plugin/client/ui": { Markdown: ({ children }: { children: string }) => children },
-    "react-native": { View: "View", Text: "Text" },
+    "react-native": {
+      View: (props: { style?: Record<string, unknown>; children?: unknown }) => { views.push(props); return props.children; },
+      Text: "Text",
+      Pressable: (props: { accessibilityLabel?: string; style?: Record<string, unknown>; children?: unknown }) => { pressables.push(props); return props.children; },
+    },
   });
   const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {},
     addTimelineRenderer: (renderer: PluginTimelineRendererContribution) => { renderers.push(renderer); return () => { renderers.splice(renderers.indexOf(renderer), 1); }; } });
   try {
     const renderer = renderers.find(value => value.kind === "askuser" && value.version === 1);
     expect(renderer).toBeDefined();
-    const data = renderer!.schema.parse({ connectionKey: "connection", issueId: "issue", rootId: "root", commentId: "card-comment", attachmentId: "file", revision: "v1",
-      title: "发布确认", description: "警示：此操作会影响生产环境。", questions: [{ id: "reason", type: "text", title: "理由" }], status, readOnly: false, offline: false, truncated: false, ...extra });
-    const text = renderedText((renderer!.Component as (props: unknown) => unknown)({ item: { type: "plugin", kind: "askuser", version: 1, data }, theme: { colors: { foreground: "black", foregroundMuted: "gray", statusDanger: "red" } } }));
-    for (const label of ["发布确认", "警示：此操作会影响生产环境。", "理由", "card-comment", "file", ...labels]) expect(text).toContain(label);
+    const data = renderer!.schema.parse({ connectionKey: "connection", issueId: "issue", rootId: "root-id", commentId: "card-comment", attachmentId: "file-id", revision: "v1",
+      title: "发布确认", description: "警示：此操作会影响生产环境。",
+      questions: [
+        { id: "scope", type: "single", title: "发布范围", options: [{ id: "canary", label: "灰度发布" }, { id: "all", label: "全量发布" }] },
+        { id: "reason", type: "text", title: "理由" },
+      ],
+      status, readOnly: false, offline: false, truncated: false, ...extra });
+    const theme = { colors: { surface0: "base", surface1: "raised", border: "border", accent: "accent", accentForeground: "on-accent", foreground: "black", foregroundMuted: "gray", statusDanger: "red" } };
+    const text = renderedText((renderer!.Component as (props: unknown) => unknown)({ item: { type: "plugin", kind: "askuser", version: 1, data }, theme }));
+    expect(views[0]?.style).toMatchObject({ backgroundColor: "raised", borderColor: "border", borderWidth: 1, borderRadius: 12, padding: 12 });
+    for (const label of ["发布确认", "警示：此操作会影响生产环境。", ...labels]) expect(text).toContain(label);
+    for (const rawId of ["card-comment", "file-id", "root-id", "原评论"]) expect(text).not.toContain(rawId);
+    if (compact) {
+      for (const duplicate of ["发布范围", "灰度发布", "全量发布", "理由", "单选", "必填文本"]) expect(text).not.toContain(duplicate);
+      expect(pressables.find(button => button.accessibilityLabel === "跳过此卡")?.style).toMatchObject({ backgroundColor: "red", borderColor: "red", borderRadius: 20 });
+    } else {
+      for (const detail of ["发布范围", "灰度发布 · 全量发布", "理由", "单选", "必填文本"]) expect(text).toContain(detail);
+      expect(text).not.toContain("请在下方表单作答");
+    }
   } finally { dispose(); }
   expect(renderers).toEqual([]);
 });
@@ -1382,7 +1404,7 @@ it("the compiled askuser card loads complete warning details only on explicit re
     react: { useEffect: () => {}, useState: (initial: unknown) => { const index = cursor++; if (!(index in state)) state[index] = initial; return [state[index], (value: unknown) => { state[index] = value; }]; } },
     "@getpaseo/plugin/client": { useRpc: (contract: { name: string }) => async (input: { offset: number }) => { calls.push({ name: contract.name, input }); return input.offset === 0 ? { text: full.slice(0, 110), nextOffset: 110 } : { text: full.slice(110), nextOffset: null }; } },
     "@getpaseo/plugin/client/ui": { Markdown: ({ children }: { children: string }) => children, SettingsAction: (props: typeof actions[number]) => { actions.push(props); return props.actionLabel; } },
-    "react-native": { View: "View", Text: "Text" },
+    "react-native": { View: "View", Text: "Text", Pressable: "Pressable" },
   });
   const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: PluginTimelineRendererContribution) => { renderers.push(renderer); return () => {}; } });
   try {
