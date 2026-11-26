@@ -13,6 +13,7 @@ import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 import { createServerContribution } from "../server/contribute.js";
 import { SidebarSynchronizer } from "../server/sync.js";
+import { RunSynchronizer } from "../server/runs.js";
 import { WorkspaceEvents } from "../server/workspace-events.js";
 import type { LocalState } from "../server/state.js";
 import { FakeServer, resync, hiddenObjects, waitForSync } from "./support/fake-server.js";
@@ -41,7 +42,8 @@ async function fixture(syncIntervalMs = 15_000, homePrefix = "multica-sidebar-")
   const home = await mkdtemp(join(tmpdir(), homePrefix));
   cleanup.push(() => rm(home, { recursive: true, force: true }));
   const requests: string[] = [];
-  const runs: Array<{ id: string; issue_id: string; agent_id: string; status: string }> = [];
+  const runs: Array<{ id: string; issue_id: string; agent_id: string; status: string; completed_at?: string; error?: string | null; failure_reason?: string | null; work_dir?: string | null }> = [];
+  const runResponses = new Map<string, { status: number; body?: unknown }>();
   const effects: string[] = [];
   const creations: Array<{ workspaceId: string; idempotencyKey: string }> = [];
   const issues = [
@@ -51,7 +53,8 @@ async function fixture(syncIntervalMs = 15_000, homePrefix = "multica-sidebar-")
   const scopes: Array<{ path: string; slug?: string }> = [];
   const workspaces = [{ id: "remote-workspace", name: "产品开发", slug: "product" }];
   const heldIssueReads: Array<() => void> = [];
-  const remote = { acknowledgeEvents: true, workspacesStatus: 200, holdIssueReads: false, disconnect: false, authStatus: 200, issueStatus: 200, invalidIssuePage: false, nextPageFails: false, emptyNextPage: false };
+  const heldRunReads: Array<() => void> = [];
+  const remote = { acknowledgeEvents: true, workspacesStatus: 200, holdIssueReads: false, holdRunReads: false, disconnectRuns: false, disconnect: false, authStatus: 200, issueStatus: 200, invalidIssuePage: false, nextPageFails: false, emptyNextPage: false };
   const http = createServer((request, response) => {
     requests.push(request.url!);
     scopes.push({ path: request.url!, slug: request.headers["x-workspace-slug"] as string | undefined });
@@ -70,10 +73,20 @@ async function fixture(syncIntervalMs = 15_000, homePrefix = "multica-sidebar-")
       if (remote.holdIssueReads) heldIssueReads.push(reply); else reply();
       return;
     }
+    if (url.pathname.endsWith("/task-runs")) {
+      if (remote.disconnectRuns) { response.destroy(); return; }
+      const issueId = decodeURIComponent(url.pathname.split("/")[3]);
+      const reply = () => {
+        const override = runResponses.get(issueId);
+        response.statusCode = override?.status ?? 200;
+        response.end(JSON.stringify(override && "body" in override ? override.body : runs.filter(run => run.issue_id === issueId)));
+      };
+      if (remote.holdRunReads) heldRunReads.push(reply); else reply();
+      return;
+    }
     if (url.pathname === "/api/workspaces") response.statusCode = remote.workspacesStatus;
     if (url.pathname === "/api/me") response.statusCode = remote.authStatus;
     response.end(JSON.stringify(url.pathname === "/api/me" ? { id: "user-42", name: "Lin" }
-      : url.pathname.endsWith("/task-runs") ? runs.filter(run => url.pathname.includes(run.issue_id))
       : url.pathname.endsWith("/comments") ? []
       : url.pathname.endsWith("/members") ? [{ id: "membership-row", user_id: "user-42", name: "Lin", email: "lin@example.test" }]
       : url.pathname === "/api/agents" ? [{ id: "agent-owned", name: "Builder", owner_id: "user-42" }]
@@ -189,7 +202,7 @@ async function fixture(syncIntervalMs = 15_000, homePrefix = "multica-sidebar-")
   }
   const { server, dispose } = start();
   const paseo = { hosts: { list: async () => ({ self: { serverId: "owning-daemon" } }) } } as unknown as PaseoApi;
-  return { server, requests, paseo, native, home, issues, start, dispose, host, connectHost, remote, heldIssueReads, websocket, websocketRequests, signal, scopes, workspaces, runs, effects, creations };
+  return { server, requests, paseo, native, home, issues, start, dispose, host, connectHost, remote, heldIssueReads, heldRunReads, runResponses, websocket, websocketRequests, signal, scopes, workspaces, runs, effects, creations };
 }
 
 it("client bootstrap leaves the native sidebar empty until a workspace rule is explicitly enabled", async () => {
@@ -1183,19 +1196,206 @@ async function finishRebuild(server: FakeServer, paseo: PaseoApi, connectionKey:
   return server.rpc(rebuildStatus, { connectionKey }, paseo);
 }
 
-it("rebuild preflight and start reject every cached active Run with its discussion", async () => {
+async function cachedRebuildFixture(issueId = "issue-one") {
+  const f = await fixture(60_000);
+  f.runs.push({ id: "cached-run", issue_id: issueId, agent_id: "agent-owned", status: "running" });
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const connectionKey = (await f.server.rpc(connectionStatus, {}, f.paseo)).connectionKey!;
+  await f.dispose();
+  return { ...f, connectionKey, store: new StateStore(join(f.home, "multica-provider")) };
+}
+
+it("rebuild preflight and start recheck every cached active Run and report its latest status without persisting active changes", async () => {
   const f = await fixture();
   f.runs.push(...["queued", "dispatched", "running", "waiting_local_directory", "deferred"].map((status, index) => ({ id: `run-${index}`, issue_id: "issue-one", agent_id: "agent-owned", status })));
   await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   const connectionKey = (await f.server.rpc(connectionStatus, {}, f.paseo)).connectionKey!;
+  const cachedStatuses = f.runs.map(run => run.status);
+  f.runs[0].status = "running";
+  const before = f.requests.length;
   const preview = await f.server.rpc(rebuildPreflight, { connectionKey }, f.paseo);
-  expect(preview).toMatchObject({ projects: 1, workspaces: 2, discussions: 2, blockers: [{ title: "PRD-1 实现登录", discussion: "主讨论", runs: f.runs.map(run => ({ runId: run.id, status: run.status, agentName: "Builder" })) }] });
+  expect(preview).toMatchObject({ projects: 1, workspaces: 2, discussions: 2, blockers: [{ title: "PRD-1 实现登录", discussion: "主讨论", runs: f.runs.map(run => ({ runId: run.id, status: run.status, agentName: "Builder", verification: "active" })) }] });
+  expect(f.requests.slice(before)).toEqual(["/api/issues/issue-one/task-runs?view=timeline"]);
+  const cached = (await new StateStore(join(f.home, "multica-provider")).read()).connections[connectionKey].issues["issue-one"].runs;
+  expect(Object.values(cached).map(run => run.status)).toEqual(cachedStatuses);
   expect(await f.server.rpc(rebuildStart, { connectionKey }, f.paseo)).toMatchObject({ started: false, blockers: preview.blockers });
+  expect(await f.server.rpc(rebuildStart, { connectionKey, acknowledgedRunIds: f.runs.map(run => run.id) }, f.paseo)).toMatchObject({ started: false, blockers: preview.blockers });
   expect(f.effects).toEqual([]);
+  expect(f.requests.some(path => path.endsWith("/cancel"))).toBe(false);
   await expect(f.server.rpc(rebuildStart, { connectionKey: "other" }, f.paseo)).rejects.toThrow("连接已变化");
   f.remote.authStatus = 401;
   await writeFile(join(f.home, ".multica/config.json"), "{}");
   await expect(f.server.rpc(rebuildPreflight, { connectionKey }, f.paseo)).rejects.toThrow("unavailable");
+});
+
+it.each(["hidden", "filter_exit", "rule_disabled"] as const)("rebuild settles stale active Runs in %s tasks without changing ownership or other Run fields", async kind => {
+  const f = await cachedRebuildFixture();
+  await f.store.update(state => {
+    const issue = state.connections[f.connectionKey].issues["issue-one"];
+    if (kind === "hidden") issue.manualHidden = { workspace: true, discussions: ["main"] };
+    else issue.archiveReason = kind;
+    issue.runs["cached-run"].metadata = { error: "old", failure_reason: "preserved", work_dir: "cached", relative_work_dir: "relative" };
+    issue.runs.terminal = { ...issue.runs["cached-run"], status: "completed" };
+  });
+  const previous = structuredClone((await f.store.read()).connections[f.connectionKey].issues["issue-one"].runs);
+  f.runs[0] = { ...f.runs[0], agent_id: "changed-agent", status: "failed", completed_at: "2026-11-26T12:00:00Z", error: null, work_dir: "" };
+  f.runs.push({ ...f.runs[0], id: "terminal" }, { ...f.runs[0], id: "not-cached", status: "running" });
+  const observer = vi.spyOn(RunSynchronizer.prototype, "observe");
+  try {
+    const restarted = f.start(), before = f.requests.length;
+    expect(await restarted.server.rpc(rebuildPreflight, { connectionKey: f.connectionKey }, f.paseo)).toMatchObject({ blockers: [] });
+    expect(f.requests.slice(before).filter(path => path !== "/api/me")).toEqual(["/api/issues/issue-one/task-runs?view=timeline"]);
+    const saved = (await new StateStore(f.store.directory).read()).connections[f.connectionKey].issues["issue-one"].runs;
+    expect(saved).toEqual({ ...previous, "cached-run": { ...previous["cached-run"], status: "failed", completedAt: f.runs[0].completed_at,
+      metadata: { error: null, failure_reason: "preserved", work_dir: "", relative_work_dir: "relative" } } });
+    expect(observer).toHaveBeenCalledWith({ connectionKey: f.connectionKey, issueId: "issue-one", rootId: "main" });
+    expect(await restarted.server.rpc(rebuildStart, { connectionKey: f.connectionKey }, f.paseo)).toMatchObject({ started: true });
+    expect(await finishRebuild(restarted.server, f.paseo, f.connectionKey)).toMatchObject({ status: "completed" });
+    expect(f.requests.some(path => path.endsWith("/cancel"))).toBe(false);
+  } finally { observer.mockRestore(); }
+});
+
+it.each(["issue404", "workspace403", "missingRun", "missingWorkspace"])("rebuild requires explicit acknowledgement for %s and never cancels remote Runs", async kind => {
+  const f = await cachedRebuildFixture();
+  await f.store.update(state => {
+    const local = state.connections[f.connectionKey];
+    local.rules["remote-workspace"].enabled = false;
+    if (kind === "missingWorkspace") delete local.projects["remote-workspace"].slug;
+  });
+  if (kind === "issue404") f.runResponses.set("issue-one", { status: 404 });
+  if (kind === "workspace403") f.runResponses.set("issue-one", { status: 403 });
+  if (kind === "missingRun") f.runs.length = 0;
+  if (kind === "missingWorkspace") f.workspaces.length = 0;
+  const { server } = f.start(), input = { connectionKey: f.connectionKey };
+  const preview = await server.rpc(rebuildPreflight, input, f.paseo);
+  expect(preview.blockers).toMatchObject([{ runs: [{ runId: "cached-run", verification: "unconfirmable", reason: expect.any(String) }] }]);
+  expect(await server.rpc(rebuildStart, input, f.paseo)).toMatchObject({ started: false, blockers: preview.blockers });
+  expect(await server.rpc(rebuildStart, { ...input, acknowledgedRunIds: ["other-run"] }, f.paseo)).toMatchObject({ started: false });
+  expect(f.effects).toEqual([]);
+  expect(await server.rpc(rebuildStart, { ...input, acknowledgedRunIds: ["cached-run"] }, f.paseo)).toMatchObject({ started: true });
+  expect(await finishRebuild(server, f.paseo, f.connectionKey)).toMatchObject({ status: "completed", total: 0 });
+  expect(f.requests.some(path => path.endsWith("/cancel"))).toBe(false);
+});
+
+it.each(["run503", "schema", "network", "workspace503", "workspaceList403"])("rebuild only permits retry after %s, even for acknowledged Runs", async kind => {
+  const f = await cachedRebuildFixture();
+  if (kind === "run503") f.runResponses.set("issue-one", { status: 503 });
+  if (kind === "schema") f.runResponses.set("issue-one", { status: 200, body: [{ ...f.runs[0], status: "unknown" }] });
+  if (kind === "network") f.remote.disconnectRuns = true;
+  if (kind === "workspace503" || kind === "workspaceList403") {
+    await f.store.update(state => { delete state.connections[f.connectionKey].projects["remote-workspace"].slug; });
+    f.remote.workspacesStatus = kind === "workspaceList403" ? 403 : 503;
+  }
+  const { server } = f.start(), input = { connectionKey: f.connectionKey };
+  const preview = await server.rpc(rebuildPreflight, input, f.paseo);
+  expect(preview.blockers).toMatchObject([{ runs: [{ verification: "failed", reason: expect.any(String) }] }]);
+  expect(await server.rpc(rebuildStart, { ...input, acknowledgedRunIds: ["cached-run"] }, f.paseo)).toMatchObject({ started: false, blockers: preview.blockers });
+  expect(f.effects).toEqual([]);
+  f.runResponses.clear(); f.remote.disconnectRuns = false; f.remote.workspacesStatus = 200; f.runs[0].status = "completed";
+  expect(await server.rpc(rebuildPreflight, input, f.paseo)).toMatchObject({ blockers: [] });
+  expect(f.requests.some(path => path.endsWith("/cancel"))).toBe(false);
+});
+
+it("rebuild resolves missing workspace slugs once and requests candidate Issues serially", async () => {
+  const f = await cachedRebuildFixture();
+  await f.store.update(state => {
+    const local = state.connections[f.connectionKey];
+    delete local.projects["remote-workspace"].slug;
+    local.issues["issue-two"].runs.second = { ...local.issues["issue-one"].runs["cached-run"] };
+  });
+  f.runs.push({ ...f.runs[0], id: "second", issue_id: "issue-two" });
+  const { server } = f.start(), before = f.requests.length;
+  f.remote.holdRunReads = true;
+  const inspecting = server.rpc(rebuildPreflight, { connectionKey: f.connectionKey }, f.paseo);
+  try {
+    await expect.poll(() => f.heldRunReads.length).toBe(1);
+    expect(f.requests.slice(before).filter(path => path !== "/api/me")).toEqual(["/api/workspaces", "/api/issues/issue-one/task-runs?view=timeline"]);
+    f.heldRunReads.shift()!();
+    await expect.poll(() => f.heldRunReads.length).toBe(1);
+    f.heldRunReads.shift()!();
+    expect((await inspecting).blockers).toHaveLength(2);
+    expect(f.requests.slice(before).filter(path => path !== "/api/me")).toEqual(["/api/workspaces", "/api/issues/issue-one/task-runs?view=timeline", "/api/issues/issue-two/task-runs?view=timeline"]);
+    expect(f.scopes.filter(scope => scope.path.endsWith("task-runs?view=timeline")).every(scope => scope.slug === "product")).toBe(true);
+  } finally { f.remote.holdRunReads = false; for (const reply of f.heldRunReads.splice(0)) reply(); await inspecting; }
+});
+
+it.each(["preflight", "start"])("rebuild %s fails as a whole if the CLI identity changes during remote verification", async phase => {
+  const f = await cachedRebuildFixture();
+  const { server } = f.start();
+  f.remote.holdRunReads = true;
+  const inspecting = phase === "preflight" ? server.rpc(rebuildPreflight, { connectionKey: f.connectionKey }, f.paseo)
+    : server.rpc(rebuildStart, { connectionKey: f.connectionKey }, f.paseo);
+  const rejected = expect(inspecting).rejects.toThrow("CLI 登录上下文已变化");
+  try {
+    await expect.poll(() => f.heldRunReads.length).toBe(1);
+    await writeFile(join(f.home, ".multica/config.json"), "{}");
+  } finally { f.remote.holdRunReads = false; for (const reply of f.heldRunReads.splice(0)) reply(); }
+  await rejected;
+  expect(f.effects).toEqual([]);
+  expect((await new StateStore(f.store.directory).read()).connections[f.connectionKey].issues["issue-one"].runs["cached-run"].status).toBe("running");
+  expect(f.requests.some(path => path.endsWith("/cancel"))).toBe(false);
+});
+
+it("rebuild start refuses a new unacknowledged blocker discovered after preflight", async () => {
+  const f = await cachedRebuildFixture();
+  f.runResponses.set("issue-one", { status: 404 });
+  const restarted = f.start(), input = { connectionKey: f.connectionKey };
+  expect((await restarted.server.rpc(rebuildPreflight, input, f.paseo)).blockers).toMatchObject([{ runs: [{ runId: "cached-run", verification: "unconfirmable" }] }]);
+  await restarted.dispose();
+  await f.store.update(state => { state.connections[f.connectionKey].issues["issue-two"].runs.new = { ...state.connections[f.connectionKey].issues["issue-one"].runs["cached-run"] }; });
+  const { server } = f.start();
+  const result = await server.rpc(rebuildStart, { ...input, acknowledgedRunIds: ["cached-run"] }, f.paseo);
+  expect(result).toMatchObject({ started: false, blockers: [{ runs: [{ runId: "cached-run" }] }, { runs: [{ runId: "new", verification: "unconfirmable" }] }] });
+  expect(f.effects).toEqual([]);
+  expect(f.requests.some(path => path.endsWith("/cancel"))).toBe(false);
+});
+
+it("rebuild returns immediately then fails progress before deleting when exclusive finds new blockers from in-flight synchronization", async () => {
+  const f = await cachedRebuildFixture("issue-two");
+  const { server } = f.start(), input = { connectionKey: f.connectionKey };
+  f.runResponses.set("issue-two", { status: 404 });
+  expect((await server.rpc(rebuildPreflight, input, f.paseo)).blockers).toMatchObject([{ runs: [{ runId: "cached-run", verification: "unconfirmable" }] }]);
+  f.runs.push({ ...f.runs[0], id: "new", issue_id: "issue-one" });
+  f.remote.holdRunReads = true;
+  const syncing = resync(server, f.paseo, "remote-workspace");
+  await expect.poll(() => f.heldRunReads.length).toBe(1);
+  const starting = server.rpc(rebuildStart, { ...input, acknowledgedRunIds: ["cached-run"] }, f.paseo);
+  try {
+    await expect.poll(() => f.heldRunReads.length).toBe(2);
+    // Finish the start check while the earlier sync still holds the native queue.
+    f.heldRunReads.pop()!();
+    expect(await starting).toMatchObject({ started: true, blockers: [], progress: { status: "running", step: "等待后台同步" } });
+    expect(f.heldRunReads).toHaveLength(1);
+    expect(f.effects).toEqual([]);
+    f.remote.holdRunReads = false;
+    f.heldRunReads.shift()!();
+    f.runResponses.set("issue-one", { status: 404 });
+    const progress = await finishRebuild(server, f.paseo, f.connectionKey);
+    expect(progress).toMatchObject({ status: "failed", stage: "deleting", completed: 0, total: 0 });
+    expect(progress.message).toContain("PRD-1 实现登录 · 主讨论：new（无法确认）");
+    expect(progress.message).toContain("PRD-2 修复同步 · 主讨论：cached-run（无法确认）");
+    expect(progress.message).toContain("请重新打开重建以重新复核");
+    expect(f.effects).toEqual([]);
+    expect(f.requests.some(path => path.endsWith("/cancel"))).toBe(false);
+  } finally { f.remote.holdRunReads = false; for (const reply of f.heldRunReads.splice(0)) reply(); await starting; await syncing; }
+});
+
+it("rebuild terminal writeback preserves a terminal result written while its remote read was in flight", async () => {
+  const f = await cachedRebuildFixture();
+  const { server_url: apiUrl } = JSON.parse(await readFile(join(f.home, ".multica/config.json"), "utf8")) as { server_url: string };
+  const runs = new RunSynchronizer(f.store);
+  f.runs[0].status = "failed";
+  f.remote.holdRunReads = true;
+  const checking = runs.recheck({ apiUrl, token: "private-token", connectionKey: f.connectionKey, userId: "user-42" }, f.workspaces[0], "issue-one", ["cached-run"]);
+  try {
+    await expect.poll(() => f.heldRunReads.length).toBe(1);
+    await f.store.update(state => {
+      const run = state.connections[f.connectionKey].issues["issue-one"].runs["cached-run"];
+      run.status = "cancelled"; run.completedAt = "from-concurrent-sync"; run.metadata = { error: "keep" };
+    });
+    f.heldRunReads.shift()!(); await checking;
+    expect((await f.store.read()).connections[f.connectionKey].issues["issue-one"].runs["cached-run"]).toMatchObject({ status: "cancelled", completedAt: "from-concurrent-sync", metadata: { error: "keep" } });
+  } finally { f.remote.holdRunReads = false; for (const reply of f.heldRunReads.splice(0)) reply(); await checking; runs.close(); }
 });
 
 it("rebuild deletes discussions including archived orphans before workspaces and projects, preserves rules and only resets its connection", async () => {
@@ -1274,7 +1474,7 @@ it("rebuild waits for in-flight synchronization, reports failures and restarts c
   f.remote.holdIssueReads = true;
   const syncing = resync(f.server, f.paseo, "remote-workspace");
   await expect.poll(() => f.heldIssueReads.length).toBeGreaterThan(0);
-  await f.server.rpc(rebuildStart, { connectionKey }, f.paseo);
+  expect(await f.server.rpc(rebuildStart, { connectionKey }, f.paseo)).toMatchObject({ started: true, progress: { status: "running", step: "等待后台同步" } });
   expect(f.effects).toEqual([]);
   await expect(f.server.rpc(rebuildStart, { connectionKey }, f.paseo)).rejects.toThrow("正在进行");
   f.remote.holdIssueReads = false;

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { AuthenticatedConnection } from "./connection.js";
+import { remoteFetch, type AuthenticatedConnection } from "./connection.js";
 import { StateStore, type IssueMapping } from "./state.js";
 import type { StoredRun } from "./run-state.js";
 import { remoteJson, workspaceAgents, workspaceMembers, type RemoteWorkspace } from "./sync.js";
@@ -47,6 +47,33 @@ export class RunSynchronizer {
     const listeners = this.listeners.get(id) ?? new Set();
     listeners.add(listener); this.listeners.set(id, listeners);
     return () => { listeners.delete(listener); if (!listeners.size) this.listeners.delete(id); };
+  }
+  /** Rebuild only settles cached candidates; ownership and active snapshots stay untouched. */
+  async recheck(connection: AuthenticatedConnection, workspace: RemoteWorkspace, issueId: string, runIds: string[]) {
+    const response = await remoteFetch(connection, `/api/issues/${encodeURIComponent(issueId)}/task-runs?view=timeline`, { headers: { "X-Workspace-Slug": workspace.slug } });
+    if (!response.ok) {
+      await response.body?.cancel();
+      if (response.status === 403 || response.status === 404) return { unavailable: response.status };
+      throw new Error(`Multica read failed (HTTP ${response.status})`);
+    }
+    const parsed = z.array(remoteRunSchema).safeParse(await response.json());
+    if (!parsed.success || parsed.data.some(run => run.issue_id !== issueId) || new Set(parsed.data.map(run => run.id)).size !== parsed.data.length)
+      throw new Error("远端 Run 快照格式无效，请重新复核。");
+    await connection.assertCurrent?.();
+    const candidates = new Set(runIds), roots = new Set<string>();
+    await this.store.update(state => {
+      const issue = state.connections[connection.connectionKey]?.issues[issueId];
+      for (const run of parsed.data) {
+        const previous = issue?.runs[run.id];
+        if (!candidates.has(run.id) || !previous || !isActiveRun(previous.status) || isActiveRun(run.status)) continue;
+        previous.status = run.status;
+        previous.completedAt = run.completed_at ?? undefined;
+        previous.metadata = { ...previous.metadata, ...runMetadataSchema.parse(run) };
+        if (previous.ownerRootId) roots.add(previous.ownerRootId);
+      }
+    });
+    for (const rootId of roots) await this.observe({ connectionKey: connection.connectionKey, issueId, rootId });
+    return { runs: parsed.data };
   }
   async discover(connection: AuthenticatedConnection, workspace: RemoteWorkspace, issueId: string) {
     const records = await remoteJson(connection, `/api/issues/${encodeURIComponent(issueId)}/task-runs?view=timeline`, z.array(remoteRunSchema), workspace) as Array<z.infer<typeof remoteRunSchema>>;

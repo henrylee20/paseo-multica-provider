@@ -177,9 +177,9 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       await store.observeProfile(state.values.profile);
       if (changed) synchronizer.settingsChanged();
     });
-    const rebuild = new DataRebuild(store, connection, synchronizer, lifecycle, runDetails);
+    const rebuild = new DataRebuild(store, connection, synchronizer, lifecycle, runDetails, runs);
     server.handle(rebuildPreflight, (input, context) => rebuild.preflight(input.connectionKey, context.paseo));
-    server.handle(rebuildStart, (input, context) => rebuild.start(input.connectionKey, context.paseo));
+    server.handle(rebuildStart, (input, context) => rebuild.start(input.connectionKey, context.paseo, input.acknowledgedRunIds));
     server.handle(rebuildStatus, input => rebuild.status(input.connectionKey));
     server.handle(hiddenRestore, async (input, context) => {
       try {
