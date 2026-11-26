@@ -32,6 +32,7 @@ export interface ServerDependencies extends ConnectionDependencies {
   stateDirectory: string;
   connectHost: (paseoHome: string) => Promise<NativeHost>;
   syncIntervalMs: number;
+  eventDebounceMs?: number;
   now: () => Date;
 }
 
@@ -135,7 +136,8 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     threads.coordinateDeliveries(() => deliveries.waitForPosts());
     server.handle(deliveryMentions, async input => deliveries.mentions(input));
     const descriptions = new TaskDescriptions(store);
-    server.registerProvider(createMulticaProvider(store, threads, runs, stops, deliveries, descriptions, lifecycle, askusers, runDetails));
+    server.registerProvider(createMulticaProvider(store, threads, runs, stops, deliveries, descriptions, lifecycle, askusers, runDetails,
+      () => { void synchronizer.reconcile().catch(() => {}); }));
     server.handle(readTaskDescription, async input => {
       // The host authenticates this RPC. Cached history belongs to its persisted
       // connection, even while the CLI is offline, logged out, or using another account.
@@ -168,7 +170,7 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
         await runDetails.refreshOpened();
         await wakeups.discover(connection, issueId, host);
       },
-      connectHost: () => (dependencies.connectHost ?? connectNativeHost)(owningHome), intervalMs: dependencies.syncIntervalMs ?? 15_000 });
+      connectHost: () => (dependencies.connectHost ?? connectNativeHost)(owningHome), intervalMs: dependencies.syncIntervalMs ?? 15_000, eventDebounceMs: dependencies.eventDebounceMs });
     let observedProfile: string | undefined;
     let settingsObserved = false;
     const observeSettings: Parameters<typeof settings.subscribe>[0] = async state => {

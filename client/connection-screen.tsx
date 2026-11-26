@@ -131,7 +131,9 @@ export function ConnectionScreen({ host, theme }: PluginSurfaceProps) {
     : value === "offline" || value === "isolated_context" ? theme.colors.statusWarning : theme.colors.statusDanger;
   const sync = describeSync(syncStatus, failure !== null);
   const syncColor = sync.tone === "danger" ? theme.colors.statusDanger : sync.tone === "warning" ? theme.colors.statusWarning : theme.colors.foreground;
-  const syncHint = sync.tone !== "muted" ? sync.message || sync.label : syncStatus?.status === "syncing" ? sync.progress : undefined;
+  const syncHint = sync.tone !== "muted" ? sync.message || sync.label
+    : [syncStatus?.status === "syncing" ? sync.progress : undefined,
+      (syncStatus?.status === "ready" || syncStatus?.status === "syncing") && sync.lastSuccess ? `最近完成 ${sync.lastSuccess}` : undefined].filter(Boolean).join(" · ") || undefined;
   const scopeKey = JSON.stringify([host.id, configuredProfile, status?.connectionKey]);
   const workspacesRead = workspaceScope === scopeKey;
   const current = workspacesRead ? workspaces.filter(workspace => workspace.connectionKey === status?.connectionKey) : [];

@@ -38,10 +38,11 @@ const catalogRpc = defineRpc({ name: "workspace.catalog", input: z.object({ work
 const cleanup: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const dispose of cleanup.splice(0).reverse()) await dispose(); });
 
-async function fixture(syncIntervalMs: number | null = 15_000, homePrefix = "multica-sidebar-") {
+async function fixture(syncIntervalMs: number | null = 15_000, homePrefix = "multica-sidebar-", eventDebounceMs: number | null = 20) {
   const home = await mkdtemp(join(tmpdir(), homePrefix));
   cleanup.push(() => rm(home, { recursive: true, force: true }));
   const requests: string[] = [];
+  const comments: Array<{ id: string; issue_id: string; content: string }> = [];
   const runs: Array<{ id: string; issue_id: string; agent_id: string; status: string; completed_at?: string; error?: string | null; failure_reason?: string | null; work_dir?: string | null }> = [];
   const runResponses = new Map<string, { status: number; body?: unknown }>();
   const effects: string[] = [];
@@ -53,9 +54,9 @@ async function fixture(syncIntervalMs: number | null = 15_000, homePrefix = "mul
   const workspaceIssues = new Map([["product", issues]]);
   const scopes: Array<{ path: string; slug?: string }> = [];
   const workspaces = [{ id: "remote-workspace", name: "产品开发", slug: "product" }];
-  const heldIssueReads: Array<() => void> = [];
+  const heldIssueReads: Array<(() => void) & { slug?: string }> = [];
   const heldRunReads: Array<() => void> = [];
-  const remote = { acknowledgeEvents: true, workspacesStatus: 200, holdIssueReads: false, holdRunReads: false, disconnectRuns: false, disconnect: false, authStatus: 200, issueStatus: 200, invalidIssuePage: false, nextPageFails: false, failingWorkspace: "", emptyNextPage: false };
+  const remote = { acknowledgeEvents: true, workspacesStatus: 200, holdIssueReads: false, holdIssueWorkspace: "", holdRunReads: false, disconnectRuns: false, disconnect: false, authStatus: 200, issueStatus: 200, invalidIssuePage: false, nextPageFails: false, failingWorkspace: "", emptyNextPage: false };
   const http = createServer((request, response) => {
     requests.push(request.url!);
     scopes.push({ path: request.url!, slug: request.headers["x-workspace-slug"] as string | undefined });
@@ -71,7 +72,9 @@ async function fixture(syncIntervalMs: number | null = 15_000, homePrefix = "mul
         (!values("project_ids").length || values("project_ids").includes(issue.project_id)) &&
         (!values("label_ids").length || issue.labels.some(label => values("label_ids").includes(label.id))));
       const reply = () => response.end(JSON.stringify(remote.invalidIssuePage ? { issues: [] } : { issues: remote.emptyNextPage && Number(url.searchParams.get("offset")) > 0 ? [] : found.slice(Number(url.searchParams.get("offset")), Number(url.searchParams.get("offset")) + 1), total: found.length }));
-      if (remote.holdIssueReads) heldIssueReads.push(reply); else reply();
+      if (remote.holdIssueReads && (!remote.holdIssueWorkspace || remote.holdIssueWorkspace === request.headers["x-workspace-slug"]))
+        heldIssueReads.push(Object.assign(reply, { slug: request.headers["x-workspace-slug"] as string }));
+      else reply();
       return;
     }
     if (url.pathname.endsWith("/task-runs")) {
@@ -88,7 +91,8 @@ async function fixture(syncIntervalMs: number | null = 15_000, homePrefix = "mul
     if (url.pathname === "/api/workspaces") response.statusCode = remote.workspacesStatus;
     if (url.pathname === "/api/me") response.statusCode = remote.authStatus;
     response.end(JSON.stringify(url.pathname === "/api/me" ? { id: "user-42", name: "Lin" }
-      : url.pathname.endsWith("/comments") ? []
+      : url.pathname.endsWith("/comments") ? comments.filter(comment => comment.issue_id === decodeURIComponent(url.pathname.split("/")[3]))
+        .map(comment => ({ parent_id: null, type: "comment", author_id: "user-42", author_type: "member", created_at: "2026-11-24T12:00:00Z", ...comment }))
       : url.pathname.endsWith("/members") ? [{ id: "membership-row", user_id: "user-42", name: "Lin", email: "lin@example.test" }]
       : url.pathname === "/api/agents" ? [{ id: "agent-owned", name: "Builder", owner_id: "user-42" }]
       : url.pathname === "/api/squads" ? [{ id: "squad-owned", name: "Team", leader_id: "agent-owned" }]
@@ -105,8 +109,10 @@ async function fixture(syncIntervalMs: number | null = 15_000, homePrefix = "mul
     clients: Set<Socket>; close(): void;
   } };
   const websocket = new WebSocketServer({ server: http });
+  const socketSlugs = new WeakMap<Socket, string | null>();
   const websocketRequests: Array<{ url: string; auth?: unknown }> = [];
   websocket.on("connection", (socket, request) => {
+    socketSlugs.set(socket, new URL(request.url!, "http://localhost").searchParams.get("workspace_slug"));
     const entry = { url: request.url! } as { url: string; auth?: unknown };
     websocketRequests.push(entry);
     socket.on("message", data => {
@@ -115,7 +121,7 @@ async function fixture(syncIntervalMs: number | null = 15_000, homePrefix = "mul
     });
   });
   cleanup.push(() => { for (const socket of websocket.clients) socket.close(); websocket.close(); });
-  const signal = (type: string, payload = {}) => { for (const socket of websocket.clients) socket.send(JSON.stringify({ type, payload })); };
+  const signal = (type: string, payload = {}, slug?: string) => { for (const socket of websocket.clients) if (!slug || socketSlugs.get(socket) === slug) socket.send(JSON.stringify({ type, payload })); };
   const address = http.address() as { port: number };
   await mkdir(join(home, ".multica"));
   await writeFile(join(home, ".multica", "config.json"), JSON.stringify({ server_url: `http://127.0.0.1:${address.port}`, token: "private-token" }));
@@ -198,13 +204,13 @@ async function fixture(syncIntervalMs: number | null = 15_000, homePrefix = "mul
   function start(values?: unknown) {
     const server = new FakeServer();
     if (values) server.setSettings(multicaSettings.id, values);
-    const dispose = createServerContribution({ homeDirectory: home, workingDirectory: home, environment: { PASEO_HOME: home }, connectHost, syncIntervalMs: syncIntervalMs ?? undefined })(server.context);
+    const dispose = createServerContribution({ homeDirectory: home, workingDirectory: home, environment: { PASEO_HOME: home }, connectHost, syncIntervalMs: syncIntervalMs ?? undefined, eventDebounceMs: eventDebounceMs ?? undefined })(server.context);
     cleanup.push(dispose);
     return { server, dispose };
   }
   const { server, dispose } = start();
   const paseo = { hosts: { list: async () => ({ self: { serverId: "owning-daemon" } }) } } as unknown as PaseoApi;
-  return { server, requests, paseo, native, home, issues, start, dispose, host, connectHost, remote, heldIssueReads, heldRunReads, runResponses, websocket, websocketRequests, signal, scopes, workspaces, workspaceIssues, runs, effects, creations };
+  return { server, requests, paseo, native, home, issues, comments, start, dispose, host, connectHost, remote, heldIssueReads, heldRunReads, runResponses, websocket, websocketRequests, signal, scopes, workspaces, workspaceIssues, runs, effects, creations };
 }
 
 it("client bootstrap leaves the native sidebar empty until a workspace rule is explicitly enabled", async () => {
@@ -415,6 +421,107 @@ it("rebuilt Projects retain manual hiding and restore the original discussion on
   expect(main.archivedAt).toBeNull();
   expect(f.native.agents).toHaveLength(2);
   expect(f.native.workspaces.find(workspace => workspace.id === main.workspaceId)?.projectId).toBe(f.native.projects[0].projectId);
+});
+
+it("reconciles native workspace restoration once across all pages and imports new Threads while retaining separately archived tabs", async () => {
+  const f = await fixture(60_000); f.remote.acknowledgeEvents = false;
+  f.comments.push({ id: "existing-thread", issue_id: "issue-one", content: "已有讨论" });
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const fetch = vi.spyOn(f.host, "fetchWorkspaces");
+  await resync(f.server, f.paseo, "remote-workspace");
+  expect(fetch).not.toHaveBeenCalled();
+  const thread = f.native.agents.find(agent => agent.labels["multica.discussion"] === "existing-thread")!;
+  thread.archivedAt = "separately-hidden";
+  await f.server.hook("agent.archive.after", { agent: { ...thread, provider: "multica", title: thread.name!, parentAgentId: null }, archivedAt: thread.archivedAt }, f.paseo);
+  for (const workspace of f.native.workspaces) {
+    await f.host.archiveWorkspace(workspace.id);
+    for (const agent of f.native.agents.filter(agent => agent.workspaceId === workspace.id)) {
+      await f.server.hook("agent.archive.after", { agent: { ...agent, provider: "multica", title: agent.name!, parentAgentId: null }, archivedAt: agent.archivedAt! }, f.paseo);
+    }
+    await f.server.hook("workspace.archive.after", { workspace: { id: workspace.id, projectId: workspace.projectId, cwd: workspace.cwd, name: workspace.title, archivedAt: "manually-hidden" } }, f.paseo);
+    await f.host.restoreWorkspace(workspace.id);
+    f.native.agents.find(agent => agent.workspaceId === workspace.id && agent.labels["multica.discussion"] === "main")!.archivedAt = null;
+  }
+  f.native.workspacePageSize = 1;
+  f.comments.push({ id: "new-thread", issue_id: "issue-one", content: "恢复后的新讨论" });
+  f.issues[0].title = "恢复后的任务标题";
+  expect(await resync(f.server, f.paseo, "remote-workspace")).toEqual({ status: "ready" });
+  expect(fetch.mock.calls).toEqual([[{ page: { limit: 100, cursor: undefined } }], [{ page: { limit: 100, cursor: "1" } }]]);
+  const state = JSON.parse(await readFile(join(f.home, "multica-provider/state.json"), "utf8")) as LocalState;
+  const local = Object.values(state.connections)[0];
+  expect(local.issues["issue-one"].manualHidden).toEqual({ workspace: false, discussions: ["existing-thread"] });
+  expect(local.issues["issue-two"].manualHidden).toEqual({ workspace: false, discussions: [] });
+  expect(f.native.workspaces[0].title).toBe("PRD-1 恢复后的任务标题");
+  expect(thread.archivedAt).toBeTruthy();
+  expect(f.native.agents.find(agent => agent.labels["multica.discussion"] === "new-thread")).toMatchObject({ workspaceId: thread.workspaceId, name: "恢复后的新讨论" });
+  fetch.mockClear();
+  await resync(f.server, f.paseo, "remote-workspace");
+  expect(fetch).not.toHaveBeenCalled();
+});
+
+it("reconciles a native Thread unarchive immediately while ignoring unarchive notifications inside the hidden-discussion hold", async () => {
+  const f = await fixture(60_000); f.remote.acknowledgeEvents = false;
+  f.comments.push({ id: "restored-thread", issue_id: "issue-one", content: "恢复的讨论" }, { id: "protected-thread", issue_id: "issue-one", content: "仍隐藏的讨论" });
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const thread = f.native.agents.find(agent => agent.labels["multica.discussion"] === "restored-thread")!;
+  const protectedThread = f.native.agents.find(agent => agent.labels["multica.discussion"] === "protected-thread")!;
+  for (const agent of [thread, protectedThread]) {
+    agent.archivedAt = "manually-hidden";
+    await f.server.hook("agent.archive.after", { agent: { ...agent, provider: "multica", title: agent.name!, parentAgentId: null }, archivedAt: agent.archivedAt }, f.paseo);
+  }
+  const provider = await f.server.providers.get("multica")!.connect({ versions: [1], capabilities: ["session.unarchive"] });
+  cleanup.push(() => provider.close());
+  const events: ProviderEvent[] = []; provider.onEvent(event => events.push(event));
+  let entered!: () => void, release!: () => void;
+  const arrived = new Promise<void>(resolve => { entered = resolve; }), blocked = new Promise<void>(resolve => { release = resolve; });
+  const fetch = f.host.fetchAgent.bind(f.host);
+  vi.spyOn(f.host, "fetchAgent").mockImplementation(async id => { if (id === protectedThread.id) { entered(); await blocked; } return fetch(id); });
+  const restoring = f.server.rpc(hiddenRestore, { connectionKey: thread.labels["multica.connection"], issueId: "issue-one", rootId: "main" }, f.paseo);
+  await arrived;
+  try {
+    await provider.send({ type: "session.unarchive", requestId: "held-unarchive", persistence: JSON.parse(protectedThread.handle.slice(7)) });
+    expect(events).toContainEqual({ type: "request.completed", requestId: "held-unarchive" });
+    expect((await f.server.rpc(connectionStatus, {}, f.paseo)).sync.status).toBe("ready");
+    expect((await hiddenObjects(f.server, f.paseo)).map(item => item.rootId)).toEqual(["restored-thread", "protected-thread"]);
+  } finally { release(); await restoring; }
+  thread.archivedAt = null;
+  const workspaces = vi.spyOn(f.host, "fetchWorkspaces");
+  await provider.send({ type: "session.unarchive", requestId: "native-unarchive", persistence: JSON.parse(thread.handle.slice(7)) });
+  expect(events).toContainEqual({ type: "request.completed", requestId: "native-unarchive" });
+  await expect.poll(async () => (await hiddenObjects(f.server, f.paseo)).map(item => item.rootId)).toEqual(["protected-thread"]);
+  expect((await waitForSync(f.server, f.paseo)).status).toBe("ready");
+  expect(workspaces).not.toHaveBeenCalled();
+  expect(thread.archivedAt).toBeNull(); expect(protectedThread.archivedAt).toBeTruthy();
+  const state = JSON.parse(await readFile(join(f.home, "multica-provider/state.json"), "utf8")) as LocalState;
+  expect(Object.values(state.connections)[0].issues["issue-one"].manualHidden).toEqual({ workspace: false, discussions: ["protected-thread"] });
+});
+
+it.each(["missing", "workspaceId", "cwd", "provider"])("retains discussion hiding when the native agent is %s or does not match", async field => {
+  const f = await fixture(60_000); f.remote.acknowledgeEvents = false;
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const main = f.native.agents[0];
+  main.archivedAt = "manually-hidden";
+  await f.server.hook("agent.archive.after", { agent: { ...main, provider: "multica", title: "主讨论", parentAgentId: null }, archivedAt: main.archivedAt }, f.paseo);
+  main.archivedAt = null;
+  const fetch = f.host.fetchAgent.bind(f.host);
+  vi.spyOn(f.host, "fetchAgent").mockImplementation(async id => {
+    const result = await fetch(id);
+    return id !== main.id ? result : field === "missing" ? null : { ...result!, agent: { ...result!.agent, [field]: "other" } };
+  });
+  expect(await resync(f.server, f.paseo, "remote-workspace")).toEqual({ status: "ready" });
+  expect(await hiddenObjects(f.server, f.paseo)).toMatchObject([{ kind: "main", agentId: main.id, rootId: "main" }]);
+});
+
+it.each(["missing", "repeated"])("retains workspace hiding when the native directory has a %s cursor", async kind => {
+  const f = await fixture(60_000); f.remote.acknowledgeEvents = false;
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const workspace = f.native.workspaces[0];
+  await f.server.hook("workspace.archive.after", { workspace: { id: workspace.id, projectId: workspace.projectId, cwd: workspace.cwd, name: workspace.title, archivedAt: "manually-hidden" } }, f.paseo);
+  const page = await f.host.fetchWorkspaces();
+  const fetch = vi.spyOn(f.host, "fetchWorkspaces").mockResolvedValue({ ...page, pageInfo: { ...page.pageInfo, hasMore: true, nextCursor: kind === "missing" ? null : "loop" } });
+  expect(await resync(f.server, f.paseo, "remote-workspace")).toEqual({ status: "unavailable" });
+  expect(fetch).toHaveBeenCalledTimes(kind === "missing" ? 1 : 2);
+  expect(await hiddenObjects(f.server, f.paseo)).toMatchObject([{ kind: "workspace", workspaceId: workspace.id }]);
 });
 
 it("rebuilding a disabled Project leaves manually hidden tasks archived until explicitly restored", async () => {
@@ -821,6 +928,77 @@ it("workspace events discover new matching issues and restore every automaticall
   await expect.poll(() => f.websocket.clients.size, { timeout: 2_000 }).toBe(0);
 });
 
+it("ignores streaming task telemetry while auth_ack and task lifecycle events still trigger sidebar snapshots", async () => {
+  const f = await fixture(60_000, undefined, null); f.remote.acknowledgeEvents = false;
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await expect.poll(() => f.websocketRequests[0]?.auth).toBeDefined();
+  const reads = () => f.requests.filter(path => path.startsWith("/api/issues?")).length;
+  const beforeAuth = reads(); f.signal("auth_ack");
+  await expect.poll(reads).toBe(beforeAuth + 2); await waitForSync(f.server, f.paseo);
+  const before = reads();
+  for (let i = 0; i < 10; i++) for (const type of ["task:message", "task:usage", "task:progress"]) f.signal(type);
+  await new Promise(resolve => setTimeout(resolve, 600));
+  expect(reads()).toBe(before);
+  expect((await f.server.rpc(connectionStatus, {}, f.paseo)).sync.status).toBe("ready");
+  f.issues[0].title = "执行已完成"; f.signal("task:completed");
+  await expect.poll(() => f.native.workspaces[0].title).toBe("PRD-1 执行已完成");
+  expect((await waitForSync(f.server, f.paseo)).status).toBe("ready");
+  expect(reads()).toBe(before + 2);
+});
+
+it("coalesces event bursts and settles ready before waiting a new window for events received during a snapshot", async () => {
+  const f = await fixture(60_000, undefined, null); f.remote.acknowledgeEvents = false;
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await expect.poll(() => f.websocketRequests[0]?.auth).toBeDefined();
+  const reads = () => f.requests.filter(path => path.startsWith("/api/issues?")).length;
+  let before = reads(); f.signal("auth_ack");
+  await expect.poll(reads).toBe(before + 2); await waitForSync(f.server, f.paseo);
+  before = reads(); f.remote.holdIssueReads = true;
+  try {
+    for (let i = 0; i < 20; i++) f.signal("task:started");
+    await expect.poll(() => f.heldIssueReads.length).toBe(1);
+    for (let i = 0; i < 20; i++) f.signal("task:failed");
+    await new Promise(resolve => setTimeout(resolve, 600));
+    expect(reads()).toBe(before + 1);
+  } finally { f.remote.holdIssueReads = false; for (const reply of f.heldIssueReads.splice(0)) reply(); }
+  const ready = await waitForSync(f.server, f.paseo);
+  expect(ready).toMatchObject({ status: "ready", lastSuccessAt: expect.any(String) });
+  expect(reads()).toBe(before + 2);
+  await expect.poll(reads).toBe(before + 4);
+  expect((await waitForSync(f.server, f.paseo)).status).toBe("ready");
+  expect(reads()).toBe(before + 4);
+});
+
+it("scopes workspace events without disconnecting other sockets and preserves unexamined workspace failures until their own recovery", async () => {
+  const f = await fixture(60_000); f.remote.acknowledgeEvents = false;
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await enableSecondWorkspace(f);
+  await expect.poll(() => f.websocketRequests.filter(request => request.auth).length).toBe(2);
+  f.signal("auth_ack");
+  await new Promise(resolve => setTimeout(resolve, 50)); await waitForSync(f.server, f.paseo);
+  f.remote.nextPageFails = true; f.remote.failingWorkspace = "second";
+  expect(await resync(f.server, f.paseo, "remote-workspace")).toEqual({ status: "unavailable" });
+  const reads = () => f.scopes.filter(request => request.path.startsWith("/api/issues?"));
+  const eventPass = async (slug: string) => {
+    const before = reads().length;
+    f.signal("task:cancelled", {}, slug);
+    await expect.poll(() => reads().length).toBe(before + 2);
+    const status = await waitForSync(f.server, f.paseo);
+    expect(reads().slice(before).map(request => request.slug)).toEqual([slug, slug]);
+    expect(f.websocket.clients.size).toBe(2); expect(f.websocketRequests).toHaveLength(2);
+    return status;
+  };
+  expect(await eventPass("product")).toMatchObject({ status: "unavailable", enabledWorkspaces: 1, completedWorkspaces: 1, failedWorkspaces: [{ workspaceId: "second-workspace" }] });
+  f.remote.failingWorkspace = "product";
+  expect(await eventPass("product")).toMatchObject({ status: "unavailable", enabledWorkspaces: 1, completedWorkspaces: 0,
+    failedWorkspaces: [{ workspaceId: "remote-workspace" }, { workspaceId: "second-workspace" }] });
+  f.remote.nextPageFails = false;
+  expect(await eventPass("product")).toMatchObject({ status: "unavailable", enabledWorkspaces: 1, completedWorkspaces: 1, failedWorkspaces: [{ workspaceId: "second-workspace" }] });
+  const recovered = await eventPass("second");
+  expect(recovered).toMatchObject({ status: "ready", enabledWorkspaces: 1, completedWorkspaces: 1 });
+  expect(recovered.failedWorkspaces ?? []).toEqual([]);
+});
+
 
 it("failed or incomplete snapshots retain cached native workspaces and only an authoritative empty result archives them", async () => {
   const f = await fixture(60_000);
@@ -1116,8 +1294,92 @@ async function enableSecondWorkspace(f: Awaited<ReturnType<typeof fixture>>) {
   return issues;
 }
 
+it("syncs another Multica workspace while one snapshot is blocked and keeps each workspace's Issues and steps serial", async () => {
+  const f = await fixture(60_000); f.remote.acknowledgeEvents = false;
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const second = await enableSecondWorkspace(f);
+  f.issues[0].title = "等待第一个工作区";
+  second[0].title = "第二个工作区第一项"; second[1].title = "第二个工作区第二项";
+  const first = f.native.agents.find(agent => agent.labels["multica.issue"] === "second-0")!;
+  const last = f.native.agents.find(agent => agent.labels["multica.issue"] === "second-1")!;
+  let entered!: () => void, release!: () => void;
+  const arrived = new Promise<void>(resolve => { entered = resolve; }), blocked = new Promise<void>(resolve => { release = resolve; });
+  const title = f.host.setWorkspaceTitle.bind(f.host);
+  const updating = vi.spyOn(f.host, "setWorkspaceTitle").mockImplementation(async (id, value) => {
+    if (id === first.workspaceId) { entered(); await blocked; }
+    return title(id, value);
+  });
+  f.remote.holdIssueReads = true; f.remote.holdIssueWorkspace = "product";
+  let settled = false;
+  const syncing = resync(f.server, f.paseo, "remote-workspace").finally(() => { settled = true; });
+  try {
+    await arrived;
+    expect(f.heldIssueReads).toHaveLength(1);
+    expect(updating.mock.calls.some(([id]) => id === last.workspaceId)).toBe(false);
+    const local = Object.values((await new StateStore(join(f.home, "multica-provider")).read()).connections)[0];
+    expect(local.issues["second-1"].title).not.toContain("第二项");
+    release();
+    await expect.poll(() => f.native.workspaces.find(workspace => workspace.id === last.workspaceId)!.title).toContain("第二项");
+    await expect.poll(async () => (await f.server.rpc(connectionStatus, {}, f.paseo)).sync.completedWorkspaces).toBe(1);
+    expect((await f.server.rpc(connectionStatus, {}, f.paseo)).sync).toMatchObject({ status: "syncing", stage: "issues", enabledWorkspaces: 2 });
+    expect(settled).toBe(false);
+    expect(f.native.workspaces[0].title).not.toContain("等待第一个工作区");
+  } finally {
+    release(); f.remote.holdIssueReads = false;
+    for (const reply of f.heldIssueReads.splice(0)) reply();
+    await syncing;
+  }
+  expect((await f.server.rpc(connectionStatus, {}, f.paseo)).sync).toMatchObject({ status: "ready", completedWorkspaces: 2, enabledWorkspaces: 2 });
+  expect(f.native.workspaces[0].title).toContain("等待第一个工作区");
+});
+
+it("bounds parallel snapshots at four and waits for every in-flight worker after a fatal daemon mismatch before closing", async () => {
+  const f = await fixture(60_000); f.remote.acknowledgeEvents = false;
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await enableSecondWorkspace(f);
+  for (let i = 3; i <= 5; i++) {
+    const id = `workspace-${i}`;
+    f.workspaces.push({ id, name: id, slug: id });
+    f.workspaceIssues.set(id, f.issues.map(issue => ({ ...issue, id: `${id}-${issue.id}`, workspace_id: id })));
+    await f.server.syncRpc(enable, { workspaceId: id, enabled: true }, f.paseo);
+  }
+  let mismatch = false, fatalChecks = 0;
+  const list = f.host.listHosts.bind(f.host);
+  vi.spyOn(f.host, "listHosts").mockImplementation(async () => {
+    const result = await list(); if (mismatch) { result.self.serverId = "different-daemon"; fatalChecks++; } return result;
+  });
+  f.remote.holdIssueReads = true; f.remote.issueStatus = 503;
+  const before = f.scopes.length;
+  const writes = vi.spyOn(f.host, "addProject");
+  let closing: Promise<void> | undefined, closed = false;
+  try {
+    await f.server.rpc(workspaceRule, { workspaceId: "remote-workspace", rule: taskRuleSchema.parse({}) }, f.paseo);
+    await expect.poll(() => f.heldIssueReads.length).toBe(4);
+    mismatch = true;
+    const index = f.heldIssueReads.findIndex(reply => reply.slug === "product");
+    expect(index).toBeGreaterThanOrEqual(0); f.heldIssueReads.splice(index, 1)[0]();
+    await expect.poll(() => fatalChecks).toBeGreaterThan(0);
+    closing = Promise.resolve(f.dispose()).then(() => { closed = true; });
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect(closed).toBe(false);
+    expect((await f.server.rpc(connectionStatus, {}, f.paseo)).sync.status).toBe("syncing");
+    expect(writes).not.toHaveBeenCalled();
+    expect(f.scopes.slice(before).filter(scope => scope.path.startsWith("/api/issues?")).map(scope => scope.slug).sort()).toEqual(["product", "second", "workspace-3", "workspace-4"]);
+  } finally {
+    f.remote.holdIssueReads = false;
+    for (const reply of f.heldIssueReads.splice(0)) reply();
+    await closing;
+  }
+  expect(closed).toBe(true); expect(writes).not.toHaveBeenCalled();
+  const saved = await readFile(join(f.home, "multica-provider/state.json"), "utf8");
+  await new Promise(resolve => setTimeout(resolve, 30));
+  expect(await readFile(join(f.home, "multica-provider/state.json"), "utf8")).toBe(saved);
+  expect(f.scopes.slice(before).some(scope => scope.slug === "workspace-5")).toBe(false);
+});
+
 it.each(["pagination", "missing"])("isolates a %s failure to one Multica workspace, retains its cache and clears partial status after recovery", async failure => {
   const f = await fixture(60_000);
+  f.remote.acknowledgeEvents = false; // Observe the explicit full pass without a reconnect's later scoped auth_ack pass.
   await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   const second = await enableSecondWorkspace(f);
   const before = (await f.server.rpc(connectionStatus, {}, f.paseo)).sync;
@@ -1165,15 +1427,15 @@ it("a missing Multica workspace without a cached project name falls back to its 
   } finally { add.mockRestore(); }
 });
 
-it("revoking the CLI identity during a blocked snapshot fails the whole pass and stops later Multica workspaces", async () => {
-  const f = await fixture(60_000);
+it("revoking the CLI identity makes all concurrent snapshots yield without continuing pagination or writes", async () => {
+  const f = await fixture(60_000); f.remote.acknowledgeEvents = false;
   await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   await enableSecondWorkspace(f);
   f.remote.holdIssueReads = true;
   const before = f.scopes.length;
   try {
     await f.server.rpc(workspaceRule, { workspaceId: "remote-workspace", rule: taskRuleSchema.parse({}) }, f.paseo);
-    await expect.poll(() => f.heldIssueReads.length).toBe(1);
+    await expect.poll(() => f.heldIssueReads.length).toBe(2);
     const path = join(f.home, ".multica/config.json");
     const config = JSON.parse(await readFile(path, "utf8"));
     await writeFile(path, JSON.stringify({ ...config, token: "replacement-token" }));
@@ -1184,11 +1446,11 @@ it("revoking the CLI identity during a blocked snapshot fails the whole pass and
   const status = await waitForSync(f.server, f.paseo);
   expect(status).toMatchObject({ status: "unavailable", message: expect.stringContaining("同步失败；已保存的规则与开关不受影响") });
   expect(status.failedWorkspaces).toBeUndefined();
-  expect(f.scopes.slice(before).filter(scope => scope.slug === "second")).toEqual([]);
+  expect(f.scopes.slice(before).filter(scope => scope.path.startsWith("/api/issues?")).map(scope => scope.slug).sort()).toEqual(["product", "second"]);
 });
 
-it("a superseded snapshot yields before later Multica workspaces and applies only the new rule", async () => {
-  const f = await fixture(60_000);
+it("superseded parallel snapshots all settle before a new pass applies the latest rule", async () => {
+  const f = await fixture(60_000); f.remote.acknowledgeEvents = false;
   await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   const second = await enableSecondWorkspace(f);
   second[0].title = "最新轮次"; f.issues[0].title = "旧轮次不应写入";
@@ -1196,11 +1458,12 @@ it("a superseded snapshot yields before later Multica workspaces and applies onl
   const before = f.scopes.length;
   try {
     await f.server.rpc(workspaceRule, { workspaceId: "remote-workspace", rule: taskRuleSchema.parse({}) }, f.paseo);
-    await expect.poll(() => f.heldIssueReads.length).toBe(1);
+    await expect.poll(() => f.heldIssueReads.length).toBe(2);
     await f.server.rpc(workspaceRule, { workspaceId: "remote-workspace", rule: taskRuleSchema.parse({ labelIds: ["blue"] }) }, f.paseo);
     f.heldIssueReads.shift()!();
-    await expect.poll(() => f.scopes.slice(before).filter(scope => scope.path.startsWith("/api/issues?")).length).toBe(2);
-    expect(f.scopes.slice(before).filter(scope => scope.slug === "second")).toEqual([]);
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect(f.scopes.slice(before).filter(scope => scope.path.startsWith("/api/issues?")).map(scope => scope.slug).sort()).toEqual(["product", "second"]);
+    expect(f.heldIssueReads).toHaveLength(1);
     const local = Object.values((await new StateStore(join(f.home, "multica-provider")).read()).connections)[0];
     expect(local.issues["issue-one"].title).not.toContain("不应写入");
     expect(local.issues["second-0"].title).not.toContain("最新轮次");

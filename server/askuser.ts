@@ -41,7 +41,7 @@ export function cachedAskuserCard(address: CardAddress, issue: IssueMapping, con
     if (!record) throw new Error("提问卡片缓存不可用。");
     const cached = issue.askuserAttachments?.[record.attachmentId];
     const document = cached?.document;
-    const delivery = context.delivery;
+    const delivery = (record.status === "pending" && !record.deleted) || context.delivery?.status === "saved" ? context.delivery : undefined;
     const offline = context.offline;
     const targetUser = document?.answer_user_id;
     const readOnlyReason = askuserUnavailableReason(issue, record.rootId, context.lifecycle, address.connectionKey, address.issueId)
@@ -168,6 +168,10 @@ export class AskUsers {
   }
   private async resolveStatuses(connection: AuthenticatedConnection, workspace: RemoteWorkspace, issueId: string) {
     const issue = (await this.store.read()).connections[connection.connectionKey].issues[issueId];
+    for (const card of Object.values(issue.askuserCards ?? {})) {
+      const id = discoveryKey({ connectionKey: connection.connectionKey, issueId, ...card });
+      if ((card.status !== "pending" || card.deleted) && this.deliveries.get(id)?.status !== "saved") this.deliveries.delete(id);
+    }
     const unresolved = Object.entries(issue.askuserCards ?? {}).filter(([, card]) => card.status !== "answered" && card.status !== "skipped" && !card.deleted);
     if (!unresolved.length) return true;
     try {
@@ -179,16 +183,18 @@ export class AskUsers {
         const local = state.connections[connection.connectionKey].issues[issueId];
         for (const [key] of unresolved) {
           const record = local.askuserCards![key];
+          const id = discoveryKey({ connectionKey: connection.connectionKey, issueId, ...record });
           delete record.statusError;
           const original = entries.find(entry => entry.id === record.commentId);
-          if (original?.deleted_at) { record.deleted = true; continue; }
+          if (original?.deleted_at) { record.deleted = true; this.deliveries.delete(id); continue; }
           if (original?.askuser_skipped_at?.trim()) {
-            record.status = "skipped"; delete record.collapsed; record.skippedAt = original.askuser_skipped_at; record.skippedBy = original.askuser_skipped_by ?? undefined; continue;
+            record.status = "skipped"; delete record.collapsed; record.skippedAt = original.askuser_skipped_at; record.skippedBy = original.askuser_skipped_by ?? undefined; this.deliveries.delete(id); continue;
           }
           const document = local.askuserAttachments?.[record.attachmentId]?.document;
           const answer = document && entries.find(entry => entry.type === "comment" && entry.parent_id === record.commentId && !entry.deleted_at && entry.content && isAskuserReplyValid(document, { ...entry, content: entry.content }));
           if (answer) {
             record.status = "answered";
+            this.deliveries.delete(id);
             delete record.collapsed;
             record.answer = { commentId: answer.id, content: answer.content!, actorId: answer.actor_id, actorType: answer.actor_type, delegatedBy: answer.delegated_by ?? undefined };
           }
@@ -363,6 +369,7 @@ export class AskUsers {
       record.status = "skipped"; delete record.collapsed; delete record.statusError;
       if (metadata) { record.skippedAt = metadata.askuser_skipped_at!; record.skippedBy = metadata.askuser_skipped_by ?? undefined; }
     });
+    this.deliveries.delete(discoveryKey(address));
     await this.publish(address.connectionKey, address.issueId);
     return bounded(this.data(address, (await this.store.read()).connections[address.connectionKey].issues[address.issueId]));
   }

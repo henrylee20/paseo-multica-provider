@@ -36,7 +36,7 @@ async function fixture(loadHistory = true) {
   let clock = new Date(stamp);
   const documents = new Map<string, unknown>();
   const requests: Array<{ path: string; slug?: string; authorization?: string }> = [];
-  const remote = { receiptMismatch: "", visible: true, status: 200, contentType: "application/json", redirect: false, chunked: false, issueStatus: 200, meStatus: 200, userId: "me", objectChecksUntilDeny: -1, postStatus: 200, loseResponse: false, skipStatus: 204, loseSkipResponse: false, beforeTimeline: undefined as (() => Promise<void>) | undefined, beforeWorkspaces: undefined as (() => Promise<void>) | undefined, beforeMe: undefined as (() => Promise<void>) | undefined, beforeSkip: undefined as (() => Promise<void>) | undefined, beforeIssueCheck: undefined as (() => Promise<void>) | undefined, beforePost: undefined as (() => Promise<void>) | undefined, beforeDownload: undefined as (() => Promise<void>) | undefined };
+  const remote = { receiptOverrides: {} as Record<string, unknown>, visible: true, status: 200, contentType: "application/json", redirect: false, chunked: false, issueStatus: 200, meStatus: 200, userId: "me", objectChecksUntilDeny: -1, postStatus: 200, loseResponse: false, skipStatus: 204, loseSkipResponse: false, beforeTimeline: undefined as (() => Promise<void>) | undefined, beforeWorkspaces: undefined as (() => Promise<void>) | undefined, beforeMe: undefined as (() => Promise<void>) | undefined, beforeSkip: undefined as (() => Promise<void>) | undefined, beforeIssueCheck: undefined as (() => Promise<void>) | undefined, beforePost: undefined as (() => Promise<void>) | undefined, beforeDownload: undefined as (() => Promise<void>) | undefined };
   const http = createServer(async (request, response) => {
     requests.push({ path: request.url!, slug: request.headers["x-workspace-slug"] as string, authorization: request.headers.authorization });
     const url = new URL(request.url!, "http://localhost");
@@ -53,7 +53,7 @@ async function fixture(loadHistory = true) {
       await remote.beforePost?.(); response.statusCode = remote.postStatus;
       if (remote.postStatus === 200) {
         const saved = { ...comment(`saved-${posts.length}`, input.parent_id ?? null), content: input.content, askuser_answer_to: input.askuser_answer_to };
-        receipts.set(key, saved); comments.push(saved); body = remote.receiptMismatch ? { ...saved, [remote.receiptMismatch]: "another-card" } : saved;
+        receipts.set(key, saved); comments.push(saved); body = { ...saved, ...remote.receiptOverrides };
         if (remote.loseResponse) { response.destroy(); return; }
       } else body = {};
     }
@@ -99,7 +99,7 @@ async function fixture(loadHistory = true) {
     const config = JSON.parse(await readFile(configPath, "utf8"));
     await writeFile(configPath, JSON.stringify({ ...config, token: `synthetic-${++credentialVersion}` }));
   };
-  const agents: Array<{ id: string; workspaceId: string; cwd: string; labels: Record<string, string>; handle: string }> = [];
+  const agents: Array<{ id: string; workspaceId: string; cwd: string; labels: Record<string, string>; handle: string; archivedAt?: string | null }> = [];
   const workspaces: Array<{ id: string }> = [];
   const rows = new Map<string, ProviderTimelineItem[]>();
   const events: ProviderEvent[] = [];
@@ -135,6 +135,7 @@ async function fixture(loadHistory = true) {
       return agent;
     }, updateAgent: async () => {}, close: async () => {},
     fetchAgent: async (id: string) => ({ agent: { provider: "multica", ...agents.find(agent => agent.id === id)! } }), restoreWorkspace: async () => {},
+    refreshAgent: async (id: string) => { agents.find(agent => agent.id === id)!.archivedAt = null; },
     listCommands: async (id: string) => ({ agentId: id, commands: [], error: null, requestId: "commands" }),
     fetchAgentTimeline: async (agentId: string) => ({ agentId, epoch: "epoch", entries: (rows.get(agentId) ?? []).map((item, index) => ({ seqStart: index + 1, seqEnd: index + 1, item, timestamp: stamp })), hasOlder: false, hasNewer: false }),
   } as unknown as DaemonClient;
@@ -481,7 +482,8 @@ it("keeps an unusually long designated-user warning inside the timeline row budg
 });
 
 it("defers new attachment downloads until a manually hidden discussion is restored", async () => {
-  const f = await fixture(); await f.server.hook("agent.archive.after", { agent: { ...f.agents[1], provider: "multica" } } as never, f.paseo);
+  const f = await fixture(); f.agents[1].archivedAt = stamp;
+  await f.server.hook("agent.archive.after", { agent: { ...f.agents[1], provider: "multica" } } as never, f.paseo);
   f.comments[0].attachments = [attachment("hidden")]; f.documents.set("hidden", card); await f.sync();
   expect(f.requests.some(request => request.path.startsWith("/api/attachments/"))).toBe(false);
   expect(f.cards()).toEqual([]);
@@ -1012,11 +1014,48 @@ it.each([200, 403])("waits for the answer POST result before settling native per
   expect(f.cards()[0].data.delivery.status).toBe(status === 200 ? "saved" : "failed");
 });
 
+it.each([undefined, null, ""])("accepts an answer receipt with askuser_answer_to %j and resolves its native permission", async target => {
+  const f = await fixture(); f.comments[0].attachments = [attachment("optional-target")]; f.documents.set("optional-target", card); await f.sync();
+  f.remote.receiptOverrides = { askuser_answer_to: target };
+  await expect(answer(f, ["已确认"])).resolves.toBeUndefined();
+  expect(f.posts.map(post => post.body)).toEqual([{ content: "**确认结果**\n\n1. **理由**：已确认", type: "comment", parent_id: "root", askuser_answer_to: "root" }]);
+  expect(f.cards()[0].data).toMatchObject({ status: "answered", delivery: { status: "saved" }, answer: { commentId: "saved-1" } });
+  expect(f.events).toContainEqual({ type: "session.permission_resolved", sessionId: f.agents[1].id, permissionId: "multica:askuser:root:optional-target" });
+  await f.sync();
+  expect(f.cards()[0].data.delivery.status).toBe("saved");
+});
+
 it.each(["parent_id", "askuser_answer_to"])("rejects an answer receipt with mismatched %s", async field => {
   const f = await fixture(); f.comments[0].attachments = [attachment("mismatch")]; f.documents.set("mismatch", card); await f.sync();
-  f.remote.beforePost = async () => { f.remote.receiptMismatch = field; };
+  f.remote.receiptOverrides = { [field]: "another-card" };
   await expect(answer(f, ["检查回执目标"])).rejects.toThrow("不匹配");
   expect(f.cards()[0].data).toMatchObject({ status: "pending", delivery: { status: "failed" } });
+});
+
+it.each(["answered", "skipped", "deleted"])("clears a failed answer delivery when the full timeline confirms the card is %s", async status => {
+  const f = await fixture(); f.comments[0].attachments = [attachment("failed-delivery")]; f.documents.set("failed-delivery", card); await f.sync();
+  f.remote.postStatus = 403;
+  await expect(answer(f, ["未提交"])).rejects.toThrow("HTTP 403");
+  expect(f.cards()[0].data).toMatchObject({ status: "pending", delivery: { status: "failed" } });
+  if (status === "answered") f.timeline.push({ id: "web-answer", type: "comment", parent_id: "root", content: `**确认结果**\n\n1. **理由**：${"网页回答".repeat(100)}`, actor_type: "member", actor_id: "me" });
+  else f.timeline.push({ id: "root", type: "comment", ...(status === "skipped" ? { askuser_skipped_at: stamp } : { deleted_at: stamp }) });
+  await f.sync();
+  expect(f.cards()[0].data).toMatchObject({ status: status === "deleted" ? "pending" : status, readOnly: true });
+  expect(f.cards()[0].data.delivery).toBeUndefined();
+  const observed = await f.server.rpc(askuserObserve, { ...f.address(), commentId: "root", attachmentId: "failed-delivery" }, f.paseo);
+  expect(observed.delivery).toBeUndefined();
+  expect(f.events).toContainEqual({ type: "session.permission_resolved", sessionId: f.agents[1].id, permissionId: "multica:askuser:root:failed-delivery" });
+});
+
+it("clears a failed answer delivery when an explicit remote skip succeeds", async () => {
+  const f = await fixture(); f.comments[0].attachments = [attachment("skip-failed-delivery")]; f.documents.set("skip-failed-delivery", card); await f.sync();
+  f.remote.postStatus = 403;
+  await expect(answer(f, ["未提交"])).rejects.toThrow("HTTP 403");
+  expect(f.cards()[0].data.delivery.status).toBe("failed");
+  const result = await f.server.rpc(skipCard, { ...f.address(), commentId: "root", attachmentId: "skip-failed-delivery", confirmed: true }, f.paseo);
+  expect(result).toMatchObject({ status: "skipped", readOnly: true });
+  expect(result.delivery).toBeUndefined();
+  expect(f.cards()[0].data.delivery).toBeUndefined();
 });
 
 it("adds one input divider before a native AskUser answer and no second divider for its echo", async () => {

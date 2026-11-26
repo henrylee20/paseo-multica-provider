@@ -724,12 +724,13 @@ it("profile confirmation shows local counts and remote safety, and cancel never 
 
 it("purging disables profile selection and retained Projects explain why their paths remain", async () => {
   const h = await settingsHarness((name, input) => name === "connection.status" ? { ...readyStatus,
-    sync: { status: "syncing", stage: "purging", completedWorkspaces: 0, enabledWorkspaces: 0,
+    sync: { status: "syncing", stage: "purging", completedWorkspaces: 0, enabledWorkspaces: 0, lastSuccessAt: "2026-11-24T10:00:00Z",
       retainedProjects: [{ name: "Product", cwd: "/state/placeholders/old/product" }] } } : empty(name, input));
   try {
     await vi.waitFor(() => {
       const page = h.render();
       for (const text of ["清理旧 profile 数据", "正在清理旧 profile 本地数据…", "用户自建工作区", "Product", "/state/placeholders/old/product"]) expect(page).toContain(text);
+      expect(page).not.toContain("最近完成");
       expect(h.selects[0].disabled).toBe(true);
     });
     h.selects[0].onValueChange("office"); h.render();
@@ -1583,6 +1584,20 @@ it.each(["rule", "enable", "disable"])("keeps the saved %s visible when backgrou
       h.action("编辑筛选").onPress();
       await vi.waitFor(() => { h.render(); expect(h.checkbox("Bug").accessibilityState?.checked).toBe(true); });
     }
+  } finally { h.dispose(); }
+});
+
+it.each(["ready", "syncing", "unavailable"])("shows the last completed sync time in settings when %s while preserving failure hints", async status => {
+  const h = await settingsHarness(name => name === "connection.status" ? { ...readyStatus, sync: {
+    status, stage: status === "syncing" ? "issues" : "idle", completedWorkspaces: 1, enabledWorkspaces: 2,
+    lastSuccessAt: new Date(2026, 10, 24, 10, 30).toISOString(), ...(status === "unavailable" ? { message: "同步失败，后台将重试" } : {}),
+  } } : empty(name, {}));
+  try {
+    await vi.waitFor(() => {
+      const page = h.render();
+      if (status === "unavailable") { expect(page).toContain("同步失败，后台将重试"); expect(page).not.toContain("最近完成"); }
+      else expect(page).toContain(status === "ready" ? "最近完成 2026-11-24 10:30" : "任务与筛选核对 · Multica 工作区 1/2 · 最近完成 2026-11-24 10:30");
+    });
   } finally { h.dispose(); }
 });
 

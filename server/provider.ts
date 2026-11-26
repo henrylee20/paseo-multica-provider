@@ -102,7 +102,7 @@ interface SessionContext {
 }
 
 /** A Multica discussion projection, never a local code execution engine. */
-export function createMulticaProvider(store: StateStore, threads: ThreadSynchronizer, runs: RunSynchronizer, stops: StopCoordinator, deliveries: CommentDelivery, descriptions: TaskDescriptions, lifecycle: DiscussionLifecycle, askusers: AskUsers, runDetails: RunDetails): ProviderRegistration {
+export function createMulticaProvider(store: StateStore, threads: ThreadSynchronizer, runs: RunSynchronizer, stops: StopCoordinator, deliveries: CommentDelivery, descriptions: TaskDescriptions, lifecycle: DiscussionLifecycle, askusers: AskUsers, runDetails: RunDetails, onUnarchive?: () => void): ProviderRegistration {
   return {
     id: providerId, label: "Multica", description: "Multica 任务讨论（目录仅为本地占位目录）",
     status: async () => ({ available: true }),
@@ -369,6 +369,14 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
           }
           if (input.type === "session.archive" || input.type === "session.unarchive") {
             emit({ type: "request.completed", requestId: input.requestId });
+            if (input.type === "session.unarchive") {
+              const parsed = persistenceSchema.safeParse(input.persistence);
+              if (parsed.success) {
+                const address = { connectionKey: parsed.data.data.connectionKey, issueId: parsed.data.data.issueId,
+                  rootId: parsed.data.data.discussion === "thread" ? parsed.data.data.rootId : "main" };
+                if (!lifecycle.unavailable(address)) onUnarchive?.();
+              }
+            }
             return;
           }
           if (input.type === "session.permission") {
