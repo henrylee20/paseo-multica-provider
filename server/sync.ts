@@ -36,8 +36,8 @@ export function importedIssues(local: ConnectionState | undefined, workspaceId: 
   return Object.entries(local?.issues ?? {}).filter(([, issue]) => issue.remoteWorkspaceId === workspaceId && !issue.archiveReason);
 }
 
-export async function remoteJson(connection: AuthenticatedConnection, path: string, schema: z.ZodType, workspace?: RemoteWorkspace) {
-  const response = await remoteFetch(connection, path, { headers: workspace ? { "X-Workspace-Slug": workspace.slug } : {} });
+export async function remoteJson(connection: AuthenticatedConnection, path: string, schema: z.ZodType, workspace?: RemoteWorkspace, signal?: AbortSignal) {
+  const response = await remoteFetch(connection, path, { headers: workspace ? { "X-Workspace-Slug": workspace.slug } : {}, signal });
   if (!response.ok) { await response.body?.cancel(); throw new Error(`Multica read failed (HTTP ${response.status})`); }
   return schema.parse(await response.json());
 }
@@ -93,17 +93,44 @@ export class SidebarSynchronizer {
     onIssue?: (connection: AuthenticatedConnection, workspace: RemoteWorkspace, issueId: string, host: NativeHost) => Promise<void>;
   }) {}
 
-  async workspaces(connection: AuthenticatedConnection): Promise<RemoteWorkspace[]> {
-    return await remoteJson(connection, "/api/workspaces", z.array(workspaceSchema)) as RemoteWorkspace[];
+  private readonly previews = new Map<string, AbortController>();
+  private readonly idsSupport = new Map<string, Promise<boolean>>();
+  async workspaces(connection: AuthenticatedConnection, signal?: AbortSignal): Promise<RemoteWorkspace[]> {
+    return await remoteJson(connection, "/api/workspaces", z.array(workspaceSchema), undefined, signal) as RemoteWorkspace[];
   }
-  private async matchingIssues(connection: AuthenticatedConnection, workspace: RemoteWorkspace, rule: TaskRule, version?: number) {
+  private async issuePage(connection: AuthenticatedConnection, workspace: RemoteWorkspace, query: URLSearchParams, signal?: AbortSignal) {
+    const page = await remoteJson(connection, `/api/issues?${query}`, pageSchema, workspace, signal) as z.infer<typeof pageSchema>;
+    if (page.issues.some(issue => issue.workspace_id !== workspace.id)) throw new Error("Issue belongs to a different workspace");
+    return page;
+  }
+  private async supportsIds(connection: AuthenticatedConnection, workspace: RemoteWorkspace, signal: AbortSignal): Promise<boolean> {
+    const existing = this.idsSupport.get(connection.connectionKey);
+    if (existing) return existing;
+    const probe = (async () => {
+      const response = await remoteFetch(connection, "/api/issues?limit=1&offset=0&ids=", { headers: { "X-Workspace-Slug": workspace.slug }, signal });
+      if (!response.ok) {
+        await response.body?.cancel();
+        if (response.status === 400 || response.status === 422) return false;
+        throw new Error(`Multica read failed (HTTP ${response.status})`);
+      }
+      const page = pageSchema.parse(await response.json());
+      if (page.issues.some(issue => issue.workspace_id !== workspace.id)) throw new Error("Issue belongs to a different workspace");
+      return page.total === 0 && page.issues.length === 0;
+    })();
+    this.idsSupport.set(connection.connectionKey, probe);
+    try { return await probe; }
+    catch (error) {
+      if (this.idsSupport.get(connection.connectionKey) === probe) this.idsSupport.delete(connection.connectionKey);
+      throw error;
+    }
+  }
+  private async matchingIssues(connection: AuthenticatedConnection, workspace: RemoteWorkspace, rule: TaskRule, version?: number, signal?: AbortSignal) {
     const issues: z.infer<typeof remoteIssueSchema>[] = [];
     let offset = 0;
     for (;;) {
       if (version !== undefined && version !== this.ruleVersion) return issues;
       const query = issueQuery(rule, offset);
-      const page = await remoteJson(connection, `/api/issues?${query}`, pageSchema, workspace) as z.infer<typeof pageSchema>;
-      if (page.issues.some(issue => issue.workspace_id !== workspace.id)) throw new Error("Issue belongs to a different workspace");
+      const page = await this.issuePage(connection, workspace, query, signal);
       issues.push(...page.issues);
       offset += page.issues.length;
       if (offset >= page.total) break;
@@ -113,16 +140,47 @@ export class SidebarSynchronizer {
   }
   async preview(workspaceId: string, rule: TaskRule, expectedConnectionKey?: string) {
     // Preview bypasses the sync queue and identity-change projection notifications.
-    const connection = await this.options.connection(false);
-    if (expectedConnectionKey && connection.connectionKey !== expectedConnectionKey) throw new Error("Connection identity changed");
-    const workspace = (await this.workspaces(connection)).find(item => item.id === workspaceId);
-    if (!workspace) throw new Error("Multica workspace unavailable");
-    const issues = await this.matchingIssues(connection, workspace, rule);
-    const imported = importedIssues((await this.options.store.read()).connections[connection.connectionKey], workspaceId);
-    await connection.assertCurrent?.();
-    const matchingIds = new Set(issues.map(issue => issue.id)), importedIds = new Set(imported.map(([id]) => id));
-    return { total: matchingIds.size, imported: imported.length, entering: [...matchingIds].filter(id => !importedIds.has(id)).length,
-      leaving: imported.filter(([id]) => !matchingIds.has(id)).map(([id, issue]) => ({ id, title: issue.title })) };
+    this.previews.get(workspaceId)?.abort();
+    const controller = new AbortController(), { signal } = controller;
+    this.previews.set(workspaceId, controller);
+    try {
+      const connection = await this.options.connection(false);
+      signal.throwIfAborted();
+      if (expectedConnectionKey && connection.connectionKey !== expectedConnectionKey) throw new Error("Connection identity changed");
+      const workspace = (await this.workspaces(connection, signal)).find(item => item.id === workspaceId);
+      if (!workspace) throw new Error("Multica workspace unavailable");
+      const imported = importedIssues((await this.options.store.read()).connections[connection.connectionKey], workspaceId);
+      let total: number, matchingIds: Set<string>;
+      if (await this.supportsIds(connection, workspace, signal)) {
+        const query = issueQuery(rule, 0); query.set("limit", "1");
+        const batches: string[][] = [];
+        for (let offset = 0; offset < imported.length; offset += 100) batches.push(imported.slice(offset, offset + 100).map(([id]) => id));
+        const [count, ...intersections] = await Promise.all([
+          this.issuePage(connection, workspace, query, signal),
+          ...batches.map(async ids => {
+            const query = issueQuery(rule, 0); query.set("ids", ids.join(","));
+            const page = await this.issuePage(connection, workspace, query, signal);
+            if (page.issues.some(issue => !ids.includes(issue.id))) throw new Error("Issue outside requested IDs");
+            if (new Set(page.issues.map(issue => issue.id)).size !== page.total) throw new Error("Incomplete issue pagination");
+            return page;
+          }),
+        ]);
+        total = count.total;
+        matchingIds = new Set(intersections.flatMap(page => page.issues.map(issue => issue.id)));
+      } else {
+        const issues = await this.matchingIssues(connection, workspace, rule, undefined, signal);
+        matchingIds = new Set(issues.map(issue => issue.id)); total = matchingIds.size;
+      }
+      signal.throwIfAborted();
+      await connection.assertCurrent?.();
+      signal.throwIfAborted();
+      const intersection = imported.filter(([id]) => matchingIds.has(id));
+      return { total, imported: imported.length, entering: total - intersection.length,
+        leaving: imported.filter(([id]) => !matchingIds.has(id)).map(([id, issue]) => ({ id, title: issue.title })) };
+    } finally {
+      controller.abort();
+      if (this.previews.get(workspaceId) === controller) this.previews.delete(workspaceId);
+    }
   }
   private async assertOwningDaemon(paseo?: PaseoApi) {
     const serverId = (await (paseo ? paseo.hosts.list() : this.host!.listHosts())).self.serverId;
@@ -606,6 +664,8 @@ export class SidebarSynchronizer {
     if (this.timer) clearInterval(this.timer);
     if (this.eventTimer) clearTimeout(this.eventTimer);
     this.events.close();
+    for (const controller of this.previews.values()) controller.abort();
+    this.previews.clear();
     return Promise.all([this.mutationPending, this.pending]).then(async () => { await this.host?.close(); });
   }
 }

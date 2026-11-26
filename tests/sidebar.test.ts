@@ -223,7 +223,9 @@ it("workspace preview counts all matched tasks against unarchived mappings witho
   expect(await reader.server.rpc(workspacePreview, { workspaceId: "remote-workspace", connectionKey, rule }, f.paseo)).toEqual({
     total: 3, imported: 2, entering: 2, leaving: [{ id: "left-task", title: "保留的本地标题" }],
   });
-  expect(f.requests.slice(requests).filter(path => path.startsWith("/api/issues?"))).toHaveLength(3);
+  const previewReads = f.requests.slice(requests).filter(path => path.startsWith("/api/issues?"));
+  expect(previewReads.filter(path => new URL(path, "http://fixture").searchParams.has("ids"))).toHaveLength(1);
+  expect(previewReads.filter(path => !new URL(path, "http://fixture").searchParams.has("ids"))).toHaveLength(3);
   expect(f.scopes.filter(item => item.path.startsWith("/api/issues?")).every(item => item.slug === "product")).toBe(true);
   expect(await reader.server.rpc(workspacePreview, { workspaceId: "remote-workspace", connectionKey, rule: { ...rule, labelIds: ["blue"] } }, f.paseo)).toEqual({
     total: 2, imported: 2, entering: 2, leaving: [{ id: "issue-one", title: "PRD-1 实现登录" }, { id: "left-task", title: "保留的本地标题" }],
