@@ -29,7 +29,7 @@ export function describeSync(status: SyncStatus | null, disconnected: boolean): 
   ].filter(Boolean).join(" · ") || undefined;
   return {
     label: [labels[status.status], progress].filter(Boolean).join(" · "), short: shortLabels[status.status], progress,
-    message: status.message || undefined, lastSuccess: formatTime(status.lastSuccessAt),
+    message: status.message || (status.failedWorkspaces?.length ? `${status.failedWorkspaces.length} 个 Multica 工作区同步失败：${status.failedWorkspaces.map(failure => failure.name).join("、")}` : undefined), lastSuccess: formatTime(status.lastSuccessAt),
     tone: status.status === "unavailable" ? "warning" : "muted",
   };
 }

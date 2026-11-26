@@ -56,7 +56,9 @@ export function WorkspaceList({ workspaces, read, failure, status, syncStatus, t
     {receipt ? <Text style={{ color: theme.colors.statusSuccess, marginHorizontal: 4 }}>{syncStatus?.status === "syncing" ? receipt.syncing : receipt.saved}</Text> : null}
     {failure ? <Notice theme={theme}>{failure}</Notice> : null}
     {enabled.map(workspace => <SettingsCard key={workspace.id}>
-      <SettingsSwitch label={workspace.name} hint={`已导入 ${workspace.importedCount} 项任务`} value disabled={saving.includes(workspace.id)}
+      <SettingsSwitch label={workspace.name} hint={`已导入 ${workspace.importedCount} 项任务`}
+        error={syncStatus?.connectionKey === workspace.connectionKey ? syncStatus.failedWorkspaces?.find(failure => failure.workspaceId === workspace.id)?.message : undefined}
+        value disabled={saving.includes(workspace.id)}
         onValueChange={value => { if (!value) { setDisabling(workspace); setDisableFailure(null); } }} />
       <SettingsAction label={catalogs[workspace.id]?.data ? describeCatalogRule(workspace.rule, catalogs[workspace.id].data!, status?.user?.id) : describeRule(workspace.rule)}
         actionLabel="编辑筛选" disabled={saving.includes(workspace.id)} onPress={() => edit(workspace)} />

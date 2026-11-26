@@ -168,15 +168,26 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       },
       connectHost: () => (dependencies.connectHost ?? connectNativeHost)(owningHome), intervalMs: dependencies.syncIntervalMs ?? 15_000 });
     let observedProfile: string | undefined;
-    const unsubscribeSettings = settings.subscribe(async state => {
+    let settingsObserved = false;
+    const observeSettings: Parameters<typeof settings.subscribe>[0] = async state => {
       if (shuttingDown) return;
-      resolve.invalidate();
-      if (state.status !== "ready") { await store.observeProfile(undefined); await askusers.connectionChanged(); return; }
+      const first = !settingsObserved;
+      settingsObserved = true;
+      if (state.status === "ready") synchronizer.setIntervalMs(dependencies.syncIntervalMs ?? state.values.syncIntervalSeconds * 1_000);
+      if (first) { observedProfile = state.status === "ready" ? state.values.profile : undefined; return; }
+      if (state.status !== "ready") {
+        resolve.invalidate(); await store.observeProfile(undefined); await askusers.connectionChanged(); return;
+      }
       const changed = observedProfile !== state.values.profile;
+      if (!changed) return;
       observedProfile = state.values.profile;
+      resolve.invalidate();
       await store.observeProfile(state.values.profile);
-      if (changed) synchronizer.settingsChanged();
-    });
+      synchronizer.settingsChanged();
+    };
+    // Subscriptions report saves, resets and migrations; read the initial values separately.
+    void settings.read().then(state => { if (!settingsObserved) return observeSettings(state); }).catch(() => {});
+    const unsubscribeSettings = settings.subscribe(observeSettings);
     const rebuild = new DataRebuild(store, connection, synchronizer, lifecycle, runDetails, runs);
     server.handle(rebuildPreflight, (input, context) => rebuild.preflight(input.connectionKey, context.paseo));
     server.handle(rebuildStart, (input, context) => rebuild.start(input.connectionKey, context.paseo, input.acknowledgedRunIds));

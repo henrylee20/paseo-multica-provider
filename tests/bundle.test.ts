@@ -468,15 +468,16 @@ async function settingsHarness(answer: Answer, host: { composerItems?: boolean }
   const scrolls: Array<{ style?: unknown; contentContainerStyle?: unknown }> = [];
   const rpcs = new Map<string, (input: unknown) => Promise<unknown>>();
   let profile = "";
+  let syncIntervalSeconds = 15;
   const settings = { status: "ready", saving: false, saveError: null as string | null, error: "Settings validation failed" };
-  const settingsSave = vi.fn(async (values: { profile: string }, _revision: string) => { profile = values.profile; return true; });
+  const settingsSave = vi.fn(async (values: { profile: string; syncIntervalSeconds: number }, _revision: string) => { profile = values.profile; syncIntervalSeconds = values.syncIntervalSeconds; return true; });
   const settingsReload = vi.fn(async () => {});
   const settingsReset = vi.fn(async () => { profile = ""; settings.status = "ready"; return true; });
   const passthrough = (props: Record<string, unknown>) => [props.label, props.title, props.info, props.hint, props.error, props.trailing, props.children];
   const setup = await bundledContribution("../index.client.tsx", {
     react: tree.react,
     "@getpaseo/plugin/client": {
-      useSettings: () => ({ ...settings, values: { profile }, revision: "1", reload: settingsReload, save: settingsSave, reset: settingsReset }),
+      useSettings: () => ({ ...settings, values: { profile, syncIntervalSeconds }, revision: "1", reload: settingsReload, save: settingsSave, reset: settingsReset }),
       useRpc: (contract: { name: string }) => {
         if (!rpcs.has(contract.name)) rpcs.set(contract.name, async input => { calls.push({ name: contract.name, input }); return contract.name === "connection.status" ? { sync: { status: "ready", stage: "idle", completedWorkspaces: 1, enabledWorkspaces: 1 }, hidden: [], ...(await answer(contract.name, input) as object) } : answer(contract.name, input); });
         return rpcs.get(contract.name);
@@ -486,7 +487,7 @@ async function settingsHarness(answer: Answer, host: { composerItems?: boolean }
       Markdown: ({ children }: { children: string }) => children, Icon: () => null, ExternalLink: ({ children }: { children: unknown }) => children,
       SettingsSection: passthrough, SettingsCard: passthrough, SettingsRow: passthrough,
       SettingsAction: (props: typeof actions[number] & { error?: string }) => { actions.push(props); return [props.label, props.hint, props.error, props.actionLabel]; },
-      SettingsSwitch: (props: typeof switches[number] & { hint?: string }) => { switches.push(props); return [props.label, props.hint]; },
+      SettingsSwitch: (props: typeof switches[number] & { hint?: string; error?: string }) => { switches.push(props); return [props.label, props.hint, props.error]; },
       SettingsSelect: (props: typeof selects[number]) => { selects.push(props); return [props.label, props.hint, props.error]; },
       Modal: Object.assign((props: typeof modals[number] & { children: unknown }) => { modals.push(props); return [props.title, props.children]; },
         { Content: (props: typeof modalContents[number]) => { modalContents.push(props); return props.children; } }),
@@ -530,6 +531,76 @@ const defaultRule: TaskRule = { statusCategories: ["unstarted", "started"], stat
 const empty: Answer = name => name === "workspace.preview" ? { total: 0, imported: 0, entering: 0, leaving: [] }
   : name === "profile.list" ? { profiles: [], overridden: false, isolated: false } : undefined;
 
+it("the polling dropdown saves complete settings without a confirmation and profile changes preserve the interval", async () => {
+  const h = await settingsHarness((name, input) => name === "connection.status" ? readyStatus : name === "profile.list"
+    ? { profiles: [{ name: "office", loggedIn: true }], overridden: false, isolated: false } : empty(name, input));
+  try {
+    await vi.waitFor(() => { h.render(); expect(h.selects[0].disabled).toBe(false); });
+    const interval = h.selects.find(select => select.label === "后台轮询间隔")!;
+    expect(interval).toMatchObject({ value: "15", hint: "Multica 事件到达时立即同步；此间隔是事件遗漏时的定时兜底。", options: [
+      { value: "10", label: "10 秒" }, { value: "15", label: "15 秒（默认）" }, { value: "30", label: "30 秒" },
+      { value: "60", label: "1 分钟" }, { value: "120", label: "2 分钟" }, { value: "300", label: "5 分钟" }, { value: "600", label: "10 分钟" },
+    ] });
+    await interval.onValueChange("120");
+    expect(h.settingsSave).toHaveBeenCalledExactlyOnceWith({ profile: "", syncIntervalSeconds: 120 }, "1");
+    h.render();
+    expect(h.modals).toHaveLength(0);
+    h.selects[0].onValueChange("office"); h.render(); h.press("确认切换");
+    await vi.waitFor(() => expect(h.settingsSave).toHaveBeenLastCalledWith({ profile: "office", syncIntervalSeconds: 120 }, "1"));
+    h.settings.saving = true; h.render();
+    const disabled = h.selects.find(select => select.label === "后台轮询间隔")!;
+    expect(disabled.disabled).toBe(true);
+    disabled.onValueChange("30");
+    expect(h.settingsSave).toHaveBeenCalledTimes(2);
+  } finally { h.dispose(); }
+});
+
+it("a polling interval save failure stays on its settings row", async () => {
+  const h = await settingsHarness((name, input) => name === "connection.status" ? readyStatus : empty(name, input));
+  try {
+    h.settingsSave.mockResolvedValue(false);
+    h.render(); h.selects.find(select => select.label === "后台轮询间隔")!.onValueChange("60");
+    await vi.waitFor(() => expect(h.render()).toContain("无法保存后台轮询间隔，请重试。"));
+    expect(h.modals).toHaveLength(0);
+  } finally { h.dispose(); }
+});
+
+it.each(["profile", "interval"])("SDK save errors from %s appear only on the corresponding settings row", async source => {
+  const h = await settingsHarness((name, input) => name === "connection.status" ? readyStatus : name === "profile.list"
+    ? { profiles: [{ name: "office", loggedIn: true }], overridden: false, isolated: false } : empty(name, input));
+  try {
+    await vi.waitFor(() => { h.render(); expect(h.selects[0].disabled).toBe(false); });
+    h.settingsSave.mockImplementation(async () => { h.settings.saveError = "SDK 保存失败"; return false; });
+    if (source === "profile") {
+      h.selects[0].onValueChange("office"); h.render(); h.press("确认切换");
+    } else h.selects.find(select => select.label === "后台轮询间隔")!.onValueChange("60");
+    await vi.waitFor(() => {
+      h.render();
+      expect(h.selects.find(select => select.label === (source === "profile" ? "CLI profile" : "后台轮询间隔"))!.error).toBe("SDK 保存失败");
+      expect(h.selects.find(select => select.label === (source === "profile" ? "后台轮询间隔" : "CLI profile"))!.error).toBeFalsy();
+    });
+  } finally { h.dispose(); }
+});
+
+it.each([true, false])("partial sync failures show names even when the failed Multica workspace is accessible=%s and clear after recovery", async accessible => {
+  let failures = [{ workspaceId: "a", name: "产品开发", message: "Multica 读取失败（HTTP 503）" }];
+  const h = await settingsHarness((name, input) => name === "connection.status" ? { ...readyStatus, sync: {
+    connectionKey: "current", status: failures.length ? "unavailable" : "ready", stage: "idle", completedWorkspaces: 1, enabledWorkspaces: 2, failedWorkspaces: failures,
+  } } : name === "workspace.list" ? { connectionKey: "current", workspaces: (accessible ? ["a", "b"] : ["b"]).map(id => ({ id, name: id, enabled: true, rule: defaultRule, importedCount: 1 })) }
+    : name === "workspace.catalog" ? { assignees: [], statuses: [], projects: [], labels: [] } : empty(name, input));
+  try {
+    await vi.waitFor(() => expect(h.render()).toContain("1 个 Multica 工作区同步失败：产品开发"));
+    if (accessible) expect(h.switches[0]).toMatchObject({ label: "a", error: failures[0].message });
+    else expect(h.switches.map(row => row.label)).toEqual(["b"]);
+    expect(h.switches.find(row => row.label === "b")).not.toHaveProperty("error", failures[0].message);
+    failures = []; h.press("刷新");
+    await vi.waitFor(() => {
+      expect(h.render()).not.toContain("Multica 读取失败（HTTP 503）");
+      expect(h.render()).not.toContain("1 个 Multica 工作区同步失败：产品开发");
+    });
+  } finally { h.dispose(); }
+});
+
 it("the profile dropdown lists logged-in choices and retains logged-out or missing selections", async () => {
   const h = await settingsHarness((name, input) => name === "profile.list" ? { profiles: [
     { name: "", loggedIn: true, apiHost: "default.example.test" },
@@ -562,7 +633,7 @@ it("the profile dropdown lists logged-in choices and retains logged-out or missi
     expect(h.settingsSave).not.toHaveBeenCalled();
     h.press("确认切换");
     await vi.waitFor(() => { h.render(); expect(h.calls.filter(call => call.name === "connection.status").length).toBeGreaterThan(statusReads); });
-    expect(h.settingsSave).toHaveBeenCalledExactlyOnceWith({ profile: "office" }, "1");
+    expect(h.settingsSave).toHaveBeenCalledExactlyOnceWith({ profile: "office", syncIntervalSeconds: 15 }, "1");
     expect(h.selects[0].value).toBe("office");
     expect(h.render()).not.toContain("Profile 必须是单个名称");
     expect(h.calls.filter(call => call.name === "profile.list")).toHaveLength(1);
@@ -822,7 +893,7 @@ it.each([
     await vi.waitFor(() => expect(h.render()).toContain("Team space"));
     h.action("编辑筛选").onPress();
     await vi.waitFor(() => expect(h.render()).toContain("In Review"));
-    expect(h.selects.map(select => select.label)).toEqual(["CLI profile"]);
+    expect(h.selects.map(select => select.label)).toEqual(["CLI profile", "后台轮询间隔"]);
     for (const label of clicks) { h.press(label); h.render(); }
     if (expected.statuses.length) {
       expect(h.checkbox("进行中").accessibilityState).toEqual({ checked: "mixed" });
