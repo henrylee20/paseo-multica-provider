@@ -21,7 +21,7 @@ export function describeSync(status: SyncStatus | null, disconnected: boolean): 
   if (disconnected) return { label: "无法读取 daemon 同步状态；已读历史仍可阅读。", short: "无法读取", message: "已读历史仍可阅读。", tone: "danger" };
   if (!status) return { label: "正在读取同步状态…", short: "读取中", tone: "muted" };
   if (status.stage === "purging" && status.status === "syncing") return {
-    label: "清理旧 profile 数据", short: "清理旧 profile 数据", progress: "正在清理旧 profile 本地数据…", lastSuccess: formatTime(status.lastSuccessAt), tone: "muted",
+    label: "清理旧 profile 数据", short: "清理旧 profile 数据", progress: "正在清理旧 profile 本地数据…", tone: "muted",
   };
   const progress = [stages[status.stage],
     status.stage === "archiving" ? `已归档 ${status.completedArchives ?? 0} 项 · 剩余 ${status.pendingArchives ?? 0} 项`

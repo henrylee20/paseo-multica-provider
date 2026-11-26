@@ -54,9 +54,9 @@ async function fixture(syncIntervalMs: number | null = 15_000, homePrefix = "mul
   const workspaceIssues = new Map([["product", issues]]);
   const scopes: Array<{ path: string; slug?: string }> = [];
   const workspaces = [{ id: "remote-workspace", name: "产品开发", slug: "product" }];
-  const heldIssueReads: Array<() => void> = [];
+  const heldIssueReads: Array<(() => void) & { slug?: string }> = [];
   const heldRunReads: Array<() => void> = [];
-  const remote = { acknowledgeEvents: true, workspacesStatus: 200, holdIssueReads: false, holdRunReads: false, disconnectRuns: false, disconnect: false, authStatus: 200, issueStatus: 200, invalidIssuePage: false, nextPageFails: false, failingWorkspace: "", emptyNextPage: false };
+  const remote = { acknowledgeEvents: true, workspacesStatus: 200, holdIssueReads: false, holdIssueWorkspace: "", holdRunReads: false, disconnectRuns: false, disconnect: false, authStatus: 200, issueStatus: 200, invalidIssuePage: false, nextPageFails: false, failingWorkspace: "", emptyNextPage: false };
   const http = createServer((request, response) => {
     requests.push(request.url!);
     scopes.push({ path: request.url!, slug: request.headers["x-workspace-slug"] as string | undefined });
@@ -72,7 +72,9 @@ async function fixture(syncIntervalMs: number | null = 15_000, homePrefix = "mul
         (!values("project_ids").length || values("project_ids").includes(issue.project_id)) &&
         (!values("label_ids").length || issue.labels.some(label => values("label_ids").includes(label.id))));
       const reply = () => response.end(JSON.stringify(remote.invalidIssuePage ? { issues: [] } : { issues: remote.emptyNextPage && Number(url.searchParams.get("offset")) > 0 ? [] : found.slice(Number(url.searchParams.get("offset")), Number(url.searchParams.get("offset")) + 1), total: found.length }));
-      if (remote.holdIssueReads) heldIssueReads.push(reply); else reply();
+      if (remote.holdIssueReads && (!remote.holdIssueWorkspace || remote.holdIssueWorkspace === request.headers["x-workspace-slug"]))
+        heldIssueReads.push(Object.assign(reply, { slug: request.headers["x-workspace-slug"] as string }));
+      else reply();
       return;
     }
     if (url.pathname.endsWith("/task-runs")) {
@@ -989,7 +991,7 @@ it("scopes workspace events without disconnecting other sockets and preserves un
   expect(await eventPass("product")).toMatchObject({ status: "unavailable", enabledWorkspaces: 1, completedWorkspaces: 1, failedWorkspaces: [{ workspaceId: "second-workspace" }] });
   f.remote.failingWorkspace = "product";
   expect(await eventPass("product")).toMatchObject({ status: "unavailable", enabledWorkspaces: 1, completedWorkspaces: 0,
-    failedWorkspaces: [{ workspaceId: "second-workspace" }, { workspaceId: "remote-workspace" }] });
+    failedWorkspaces: [{ workspaceId: "remote-workspace" }, { workspaceId: "second-workspace" }] });
   f.remote.nextPageFails = false;
   expect(await eventPass("product")).toMatchObject({ status: "unavailable", enabledWorkspaces: 1, completedWorkspaces: 1, failedWorkspaces: [{ workspaceId: "second-workspace" }] });
   const recovered = await eventPass("second");
@@ -1292,6 +1294,89 @@ async function enableSecondWorkspace(f: Awaited<ReturnType<typeof fixture>>) {
   return issues;
 }
 
+it("syncs another Multica workspace while one snapshot is blocked and keeps each workspace's Issues and steps serial", async () => {
+  const f = await fixture(60_000); f.remote.acknowledgeEvents = false;
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const second = await enableSecondWorkspace(f);
+  f.issues[0].title = "等待第一个工作区";
+  second[0].title = "第二个工作区第一项"; second[1].title = "第二个工作区第二项";
+  const first = f.native.agents.find(agent => agent.labels["multica.issue"] === "second-0")!;
+  const last = f.native.agents.find(agent => agent.labels["multica.issue"] === "second-1")!;
+  let entered!: () => void, release!: () => void;
+  const arrived = new Promise<void>(resolve => { entered = resolve; }), blocked = new Promise<void>(resolve => { release = resolve; });
+  const title = f.host.setWorkspaceTitle.bind(f.host);
+  const updating = vi.spyOn(f.host, "setWorkspaceTitle").mockImplementation(async (id, value) => {
+    if (id === first.workspaceId) { entered(); await blocked; }
+    return title(id, value);
+  });
+  f.remote.holdIssueReads = true; f.remote.holdIssueWorkspace = "product";
+  let settled = false;
+  const syncing = resync(f.server, f.paseo, "remote-workspace").finally(() => { settled = true; });
+  try {
+    await arrived;
+    expect(f.heldIssueReads).toHaveLength(1);
+    expect(updating.mock.calls.some(([id]) => id === last.workspaceId)).toBe(false);
+    const local = Object.values((await new StateStore(join(f.home, "multica-provider")).read()).connections)[0];
+    expect(local.issues["second-1"].title).not.toContain("第二项");
+    release();
+    await expect.poll(() => f.native.workspaces.find(workspace => workspace.id === last.workspaceId)!.title).toContain("第二项");
+    await expect.poll(async () => (await f.server.rpc(connectionStatus, {}, f.paseo)).sync.completedWorkspaces).toBe(1);
+    expect((await f.server.rpc(connectionStatus, {}, f.paseo)).sync).toMatchObject({ status: "syncing", stage: "issues", enabledWorkspaces: 2 });
+    expect(settled).toBe(false);
+    expect(f.native.workspaces[0].title).not.toContain("等待第一个工作区");
+  } finally {
+    release(); f.remote.holdIssueReads = false;
+    for (const reply of f.heldIssueReads.splice(0)) reply();
+    await syncing;
+  }
+  expect((await f.server.rpc(connectionStatus, {}, f.paseo)).sync).toMatchObject({ status: "ready", completedWorkspaces: 2, enabledWorkspaces: 2 });
+  expect(f.native.workspaces[0].title).toContain("等待第一个工作区");
+});
+
+it("bounds parallel snapshots at four and waits for every in-flight worker after a fatal daemon mismatch before closing", async () => {
+  const f = await fixture(60_000); f.remote.acknowledgeEvents = false;
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await enableSecondWorkspace(f);
+  for (let i = 3; i <= 5; i++) {
+    const id = `workspace-${i}`;
+    f.workspaces.push({ id, name: id, slug: id });
+    f.workspaceIssues.set(id, f.issues.map(issue => ({ ...issue, id: `${id}-${issue.id}`, workspace_id: id })));
+    await f.server.syncRpc(enable, { workspaceId: id, enabled: true }, f.paseo);
+  }
+  let mismatch = false, fatalChecks = 0;
+  const list = f.host.listHosts.bind(f.host);
+  vi.spyOn(f.host, "listHosts").mockImplementation(async () => {
+    const result = await list(); if (mismatch) { result.self.serverId = "different-daemon"; fatalChecks++; } return result;
+  });
+  f.remote.holdIssueReads = true; f.remote.issueStatus = 503;
+  const before = f.scopes.length;
+  const writes = vi.spyOn(f.host, "addProject");
+  let closing: Promise<void> | undefined, closed = false;
+  try {
+    await f.server.rpc(workspaceRule, { workspaceId: "remote-workspace", rule: taskRuleSchema.parse({}) }, f.paseo);
+    await expect.poll(() => f.heldIssueReads.length).toBe(4);
+    mismatch = true;
+    const index = f.heldIssueReads.findIndex(reply => reply.slug === "product");
+    expect(index).toBeGreaterThanOrEqual(0); f.heldIssueReads.splice(index, 1)[0]();
+    await expect.poll(() => fatalChecks).toBeGreaterThan(0);
+    closing = Promise.resolve(f.dispose()).then(() => { closed = true; });
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect(closed).toBe(false);
+    expect((await f.server.rpc(connectionStatus, {}, f.paseo)).sync.status).toBe("syncing");
+    expect(writes).not.toHaveBeenCalled();
+    expect(f.scopes.slice(before).filter(scope => scope.path.startsWith("/api/issues?")).map(scope => scope.slug).sort()).toEqual(["product", "second", "workspace-3", "workspace-4"]);
+  } finally {
+    f.remote.holdIssueReads = false;
+    for (const reply of f.heldIssueReads.splice(0)) reply();
+    await closing;
+  }
+  expect(closed).toBe(true); expect(writes).not.toHaveBeenCalled();
+  const saved = await readFile(join(f.home, "multica-provider/state.json"), "utf8");
+  await new Promise(resolve => setTimeout(resolve, 30));
+  expect(await readFile(join(f.home, "multica-provider/state.json"), "utf8")).toBe(saved);
+  expect(f.scopes.slice(before).some(scope => scope.slug === "workspace-5")).toBe(false);
+});
+
 it.each(["pagination", "missing"])("isolates a %s failure to one Multica workspace, retains its cache and clears partial status after recovery", async failure => {
   const f = await fixture(60_000);
   f.remote.acknowledgeEvents = false; // Observe the explicit full pass without a reconnect's later scoped auth_ack pass.
@@ -1342,15 +1427,15 @@ it("a missing Multica workspace without a cached project name falls back to its 
   } finally { add.mockRestore(); }
 });
 
-it("revoking the CLI identity during a blocked snapshot fails the whole pass and stops later Multica workspaces", async () => {
-  const f = await fixture(60_000);
+it("revoking the CLI identity makes all concurrent snapshots yield without continuing pagination or writes", async () => {
+  const f = await fixture(60_000); f.remote.acknowledgeEvents = false;
   await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   await enableSecondWorkspace(f);
   f.remote.holdIssueReads = true;
   const before = f.scopes.length;
   try {
     await f.server.rpc(workspaceRule, { workspaceId: "remote-workspace", rule: taskRuleSchema.parse({}) }, f.paseo);
-    await expect.poll(() => f.heldIssueReads.length).toBe(1);
+    await expect.poll(() => f.heldIssueReads.length).toBe(2);
     const path = join(f.home, ".multica/config.json");
     const config = JSON.parse(await readFile(path, "utf8"));
     await writeFile(path, JSON.stringify({ ...config, token: "replacement-token" }));
@@ -1361,11 +1446,11 @@ it("revoking the CLI identity during a blocked snapshot fails the whole pass and
   const status = await waitForSync(f.server, f.paseo);
   expect(status).toMatchObject({ status: "unavailable", message: expect.stringContaining("同步失败；已保存的规则与开关不受影响") });
   expect(status.failedWorkspaces).toBeUndefined();
-  expect(f.scopes.slice(before).filter(scope => scope.slug === "second")).toEqual([]);
+  expect(f.scopes.slice(before).filter(scope => scope.path.startsWith("/api/issues?")).map(scope => scope.slug).sort()).toEqual(["product", "second"]);
 });
 
-it("a superseded snapshot yields before later Multica workspaces and applies only the new rule", async () => {
-  const f = await fixture(60_000);
+it("superseded parallel snapshots all settle before a new pass applies the latest rule", async () => {
+  const f = await fixture(60_000); f.remote.acknowledgeEvents = false;
   await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   const second = await enableSecondWorkspace(f);
   second[0].title = "最新轮次"; f.issues[0].title = "旧轮次不应写入";
@@ -1373,11 +1458,12 @@ it("a superseded snapshot yields before later Multica workspaces and applies onl
   const before = f.scopes.length;
   try {
     await f.server.rpc(workspaceRule, { workspaceId: "remote-workspace", rule: taskRuleSchema.parse({}) }, f.paseo);
-    await expect.poll(() => f.heldIssueReads.length).toBe(1);
+    await expect.poll(() => f.heldIssueReads.length).toBe(2);
     await f.server.rpc(workspaceRule, { workspaceId: "remote-workspace", rule: taskRuleSchema.parse({ labelIds: ["blue"] }) }, f.paseo);
     f.heldIssueReads.shift()!();
-    await expect.poll(() => f.scopes.slice(before).filter(scope => scope.path.startsWith("/api/issues?")).length).toBe(2);
-    expect(f.scopes.slice(before).filter(scope => scope.slug === "second")).toEqual([]);
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect(f.scopes.slice(before).filter(scope => scope.path.startsWith("/api/issues?")).map(scope => scope.slug).sort()).toEqual(["product", "second"]);
+    expect(f.heldIssueReads).toHaveLength(1);
     const local = Object.values((await new StateStore(join(f.home, "multica-provider")).read()).connections)[0];
     expect(local.issues["issue-one"].title).not.toContain("不应写入");
     expect(local.issues["second-0"].title).not.toContain("最新轮次");

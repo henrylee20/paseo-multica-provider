@@ -724,12 +724,13 @@ it("profile confirmation shows local counts and remote safety, and cancel never 
 
 it("purging disables profile selection and retained Projects explain why their paths remain", async () => {
   const h = await settingsHarness((name, input) => name === "connection.status" ? { ...readyStatus,
-    sync: { status: "syncing", stage: "purging", completedWorkspaces: 0, enabledWorkspaces: 0,
+    sync: { status: "syncing", stage: "purging", completedWorkspaces: 0, enabledWorkspaces: 0, lastSuccessAt: "2026-11-24T10:00:00Z",
       retainedProjects: [{ name: "Product", cwd: "/state/placeholders/old/product" }] } } : empty(name, input));
   try {
     await vi.waitFor(() => {
       const page = h.render();
       for (const text of ["清理旧 profile 数据", "正在清理旧 profile 本地数据…", "用户自建工作区", "Product", "/state/placeholders/old/product"]) expect(page).toContain(text);
+      expect(page).not.toContain("最近完成");
       expect(h.selects[0].disabled).toBe(true);
     });
     h.selects[0].onValueChange("office"); h.render();
