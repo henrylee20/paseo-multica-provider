@@ -1,6 +1,7 @@
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import { storedRunSchema } from "./run-state.js";
 import { threadSchema } from "./thread-state.js";
@@ -10,7 +11,7 @@ import { askuserAttachmentSchema, storedAskuserCardSchema } from "./askuser-stat
 const projectSchema = z.object({ cwd: z.string(), name: z.string(), slug: z.string().optional(), projectId: z.string().optional(), removed: z.boolean().optional() });
 export const issueSchema = z.object({
   remoteWorkspaceId: z.string(), workspaceId: z.string(), cwd: z.string(), title: z.string(),
-  projectId: z.string().optional(),
+  projectId: z.string().optional(), appliedTitle: z.string().optional(),
   description: z.string(), updatedAt: z.string().optional(), workspaceCreated: z.boolean().default(false), mainAgentId: z.string().optional(),
   // "inaccessible" is accepted only so states written before OPT-08 remain readable.
   archiveReason: z.enum(["rule_disabled", "filter_exit", "inaccessible"]).optional(), ruleArchivedAgentIds: z.array(z.string()).default([]),
@@ -75,10 +76,12 @@ export class StateStore {
   update(change: (state: LocalState) => void): Promise<void> {
     const profile = this.profile;
     const operation = this.pending.then(async () => {
-      const state = structuredClone(await (this.cached ??= this.load()));
+      const previous = await (this.cached ??= this.load());
+      const state = structuredClone(previous);
       change(state);
       if (profile !== undefined) state.owner ??= { profile };
       const validated = stateSchema.parse(state);
+      if (isDeepStrictEqual(previous, validated)) return;
       await mkdir(this.directory, { recursive: true, mode: 0o700 });
       const temporary = join(this.directory, "state.json.next");
       await writeFile(temporary, JSON.stringify(validated), { mode: 0o600 });

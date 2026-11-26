@@ -512,7 +512,8 @@ export class SidebarSynchronizer {
       const added = await this.host.addProject(projectDirectory);
       if (added.error || !added.project || added.project.projectKind === "git") throw new Error("Could not register non-Git native project");
       const projectId = added.project.projectId;
-      await this.host.renameProject(projectId, workspace.name);
+      if (local?.projects[workspaceId]?.name !== workspace.name || local.projects[workspaceId].projectId !== projectId)
+        await this.host.renameProject(projectId, workspace.name);
       await this.options.store.update(state => {
         connectionState(state, connection.connectionKey).projects[workspaceId] = { cwd: projectDirectory, projectId, name: workspace.name, slug: workspace.slug };
       });
@@ -534,6 +535,7 @@ export class SidebarSynchronizer {
             projectId,
             workspaceId: rebuildWorkspace ? newWorkspaceId : local.issues[issue.id]?.workspaceId ?? newWorkspaceId,
             workspaceCreated: rebuildWorkspace ? false : local.issues[issue.id]?.workspaceCreated,
+            appliedTitle: rebuildWorkspace ? undefined : local.issues[issue.id]?.appliedTitle,
             cwd, title, description: issue.description ?? "", updatedAt: issue.updated_at });
         });
         const mapping = (await this.options.store.read()).connections[connection.connectionKey].issues[issue.id];
@@ -561,10 +563,16 @@ export class SidebarSynchronizer {
           await this.options.store.update(state => {
             const saved = state.connections[connection.connectionKey].issues[issue.id];
             delete saved.archiveReason;
+            delete saved.appliedTitle;
+            delete saved.mainHistory.appliedTitle;
+            for (const thread of Object.values(saved.threads)) if (thread.agentId && saved.ruleArchivedAgentIds.includes(thread.agentId)) delete thread.appliedTitle;
             saved.ruleArchivedAgentIds = [];
           });
         }
-        await this.host.setWorkspaceTitle(mapping.workspaceId, title);
+        if (!mapping.workspaceCreated || mapping.archiveReason || mapping.appliedTitle !== title) {
+          await this.host.setWorkspaceTitle(mapping.workspaceId, title);
+          await this.options.store.update(state => { state.connections[connection.connectionKey].issues[issue.id].appliedTitle = title; });
+        }
         let mainAgentId = mapping.mainAgentId;
         if (!mainAgentId && !mapping.manualHidden.discussions.includes("main")) {
           const labels = issueLabels(connection.connectionKey, issue.id);
@@ -574,9 +582,17 @@ export class SidebarSynchronizer {
               cwd, workspaceId: mapping.workspaceId, labels })).id;
             await this.options.metadata.write(mainAgentId, connection.connectionKey, issue.id);
           }
-          await this.options.store.update(state => { state.connections[connection.connectionKey].issues[issue.id].mainAgentId = mainAgentId; });
+          await this.options.store.update(state => {
+            const saved = state.connections[connection.connectionKey].issues[issue.id];
+            saved.mainAgentId = mainAgentId;
+            delete saved.mainHistory.appliedTitle;
+          });
         }
-        if (mainAgentId && !mapping.manualHidden.discussions.includes("main")) await this.host.updateAgent(mainAgentId, { name: "主讨论" });
+        if (mainAgentId && !mapping.manualHidden.discussions.includes("main") &&
+          (mainAgentId !== mapping.mainAgentId || mapping.archiveReason || mapping.mainHistory.appliedTitle !== "主讨论")) {
+          await this.host.updateAgent(mainAgentId, { name: "主讨论" });
+          await this.options.store.update(state => { state.connections[connection.connectionKey].issues[issue.id].mainHistory.appliedTitle = "主讨论"; });
+        }
         if (version !== this.ruleVersion) return;
         this.syncState.stage = "history";
         await this.options.onIssue?.(connection, workspace, issue.id, this.host);

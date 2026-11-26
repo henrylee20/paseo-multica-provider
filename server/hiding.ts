@@ -81,8 +81,16 @@ export class ManualHiding {
       await restoreMappedDiscussion(host, this.lifecycle, agentId, issue, input);
       await this.metadata.write(agentId, input.connectionKey, input.issueId);
     }
+    if (issue.manualHidden.workspace) await host.setWorkspaceTitle(issue.workspaceId, issue.title);
+    const title = input.rootId === "main" ? "主讨论" : input.rootId ? issue.threads[input.rootId].title : undefined;
+    if (agentId && title !== undefined) await host.updateAgent(agentId, { name: title });
     await this.store.update(state => {
       const saved = state.connections[input.connectionKey].issues[input.issueId];
+      if (issue.manualHidden.workspace) saved.appliedTitle = issue.title;
+      if (input.rootId !== undefined && title !== undefined) {
+        const history = input.rootId === "main" ? saved.mainHistory : saved.threads[input.rootId];
+        history.appliedTitle = title;
+      }
       saved.manualHidden.workspace = false;
       if (input.rootId !== undefined) saved.manualHidden.discussions = saved.manualHidden.discussions.filter(rootId => rootId !== input.rootId);
     });

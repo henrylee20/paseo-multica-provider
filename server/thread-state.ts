@@ -8,7 +8,7 @@ export const storedRowSchema = z.object({
 });
 export type StoredRow = z.infer<typeof storedRowSchema>;
 export const threadSchema = z.object({
-  title: z.string(), agentId: z.string().optional(), historyLoaded: z.boolean().default(false),
+  title: z.string(), appliedTitle: z.string().optional(), agentId: z.string().optional(), historyLoaded: z.boolean().default(false),
   rows: z.array(storedRowSchema).default([]),
   observed: z.record(z.string(), z.object({ fingerprint: z.string(), deleted: z.boolean(), revision: z.number().optional(), updatedAt: z.string().optional() })).default({}),
 });

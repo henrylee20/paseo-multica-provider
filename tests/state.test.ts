@@ -77,3 +77,25 @@ it("reads old state while stripping removed fields without migration", async () 
     expect(state.connections.old.issues.task).not.toHaveProperty("access");
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
+
+it("does not create a file or notify for empty updates and skips unchanged queued snapshots", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "multica-state-"));
+  try {
+    const store = new StateStore(directory);
+    const snapshots: LocalState[] = [];
+    store.subscribe(state => snapshots.push(state));
+    await store.update(() => {});
+    await expect(readFile(join(directory, "state.json"))).rejects.toMatchObject({ code: "ENOENT" });
+    await store.update(state => { connectionState(state, "one"); });
+    const snapshot = await store.read();
+    // A no-op must not even attempt to write the atomic temporary file.
+    await mkdir(join(directory, "state.json.next"));
+    await Promise.all([store.update(() => {}), store.update(state => { state.connections.one = structuredClone(state.connections.one); })]);
+    expect(await store.read()).toBe(snapshot);
+    expect(snapshots).toEqual([snapshot]);
+    await rm(join(directory, "state.json.next"), { recursive: true });
+    await store.update(state => { connectionState(state, "two"); });
+    expect(snapshots).toHaveLength(2);
+    expect(await new StateStore(directory).read()).toEqual(await store.read());
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});

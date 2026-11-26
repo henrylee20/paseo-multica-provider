@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
@@ -472,7 +472,9 @@ it("preserves the first obtainable snapshot and appends stable edit and deletion
   connection.onEvent(event => replay.push(event));
   await connection.send({ type: "session.open", requestId: "restore", sessionId: "restored", history: "replay", persistence: JSON.parse(thread.handle.slice(7)),
     config: { cwd: thread.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
-  expect(conversationRows(replay.filter(event => event.type === "timeline.item").map(event => event.item))).toEqual(conversationRows(f.timelines.get(thread.id)));
+  const restored = conversationRows(replay.filter(event => event.type === "timeline.item").map(event => event.item));
+  expect(restored?.[0]).toMatchObject({ type: "plugin", data: { title: "Correction after reading" } });
+  expect(restored?.slice(1)).toEqual(conversationRows(f.timelines.get(thread.id))?.slice(1));
   await connection.send({ type: "session.close", requestId: "close", sessionId: "restored" });
   await connection.close();
   expect(f.requests.every(request => request.method === "GET")).toBe(true);
@@ -999,4 +1001,21 @@ it("separates a new comment immediately after skip restart before native history
   const dividers = f.providerEvents.slice(boundary).filter(event => event.type === "timeline.item" && event.sessionId === parent.id && event.item.type === "plugin" && event.item.kind === "comment-divider");
   expect(dividers).toMatchObject([{ item: { id: "multica:divider:immediate" } }]);
   expect(f.timelines.get(parent.id)!.slice(-2)).toMatchObject([{ type: "plugin", kind: "comment-divider" }, { type: "assistant_message", text: "River: \n\nBefore reconciliation" }]);
+});
+
+it("an opened Thread has no idle state writes or renames, preserves a manual name and follows source title changes", async () => {
+  const f = await fixture();
+  await loadDiscussion(f);
+  const agent = f.native.agents[1], file = join(f.home, "multica-provider", "state.json");
+  agent.name = "My thread";
+  const before = await stat(file);
+  await resync(f.server, f.paseo, "remote-workspace");
+  expect((await stat(file)).ino).toBe(before.ino);
+  expect(agent.name).toBe("My thread");
+  f.comments.find(comment => comment.id === "root")!.content = "Updated source title";
+  await resync(f.server, f.paseo, "remote-workspace");
+  expect(agent.name).toBe("Updated source title");
+  await (await f.connect()).send({ type: "session.close", requestId: "idle-recycle", sessionId: agent.id });
+  await f.reconnect();
+  expect(f.timelines.get(agent.id)?.some(row => row.type === "user_message" || row.type === "assistant_message")).toBe(true);
 });

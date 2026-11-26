@@ -1398,3 +1398,33 @@ it("excludes known archived workspace mappings even when their archived discussi
   expect(f.effects.filter(effect => effect.startsWith("archiveWorkspace:"))).toEqual([`archiveWorkspace:${f.native.workspaces[0].id}`]);
   expect(f.effects).not.toContain(`archiveWorkspace:${archived.id}`);
 });
+
+it("skips unchanged state writes and native renames across polls and restart, retries changed titles and reapplies on restore", async () => {
+  const f = await fixture();
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const title = vi.spyOn(f.host, "setWorkspaceTitle"), name = vi.spyOn(f.host, "updateAgent"), projectName = vi.spyOn(f.host, "renameProject");
+  const file = join(f.home, "multica-provider", "state.json");
+  const before = await stat(file);
+  f.native.workspaces[0].title = "My workspace";
+  f.native.agents[0].name = "My discussion";
+  await resync(f.server, f.paseo, "remote-workspace");
+  expect((await stat(file)).ino).toBe(before.ino);
+  expect(title).not.toHaveBeenCalled(); expect(name).not.toHaveBeenCalled(); expect(projectName).not.toHaveBeenCalled();
+  await f.dispose();
+  const restarted = f.start();
+  await resync(restarted.server, f.paseo, "remote-workspace");
+  expect(title).not.toHaveBeenCalled(); expect(name).not.toHaveBeenCalled();
+  expect(f.native.workspaces[0].title).toBe("My workspace");
+  expect(f.native.agents[0].name).toBe("My discussion");
+  f.issues[0].title = "New remote title";
+  title.mockRejectedValueOnce(new Error("host unavailable"));
+  expect(await resync(restarted.server, f.paseo, "remote-workspace")).toMatchObject({ status: "unavailable" });
+  await resync(restarted.server, f.paseo, "remote-workspace");
+  expect(title).toHaveBeenCalledTimes(2);
+  expect(f.native.workspaces[0].title).toBe("PRD-1 New remote title");
+  expect(name).not.toHaveBeenCalled();
+  await restarted.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: false }, f.paseo);
+  await restarted.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  expect(name).toHaveBeenCalledTimes(2);
+  expect(f.native.agents[0].name).toBe("主讨论");
+});
