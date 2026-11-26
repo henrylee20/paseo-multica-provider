@@ -206,7 +206,7 @@ export class SidebarSynchronizer {
   async bootstrap(paseo: PaseoApi, force = false): Promise<void> {
     await this.assertOwningDaemon(paseo);
     this.startTimer();
-    if (force || await this.purgePending() || this.syncState.status !== "ready") void this.requestSync().catch(() => {});
+    if (force || await this.purgePending() || this.syncState.status === "idle") void this.requestSync().catch(() => {});
   }
   settingsChanged() {
     this.ruleVersion++;
