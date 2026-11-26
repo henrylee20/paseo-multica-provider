@@ -13,6 +13,7 @@ import { workspaceEnable, syncBootstrap, connectionStatus, multicaSettings, work
 import { deliveryMentions } from "../shared/delivery.js";
 import { threadOpen } from "../shared/threads.js";
 import { createServerContribution } from "../server/contribute.js";
+import { StateStore } from "../server/state.js";
 import type { LocalState } from "../server/state.js";
 import { FakeServer, hiddenObjects, waitForSync } from "./support/fake-server.js";
 import { askuserObserve, askuserReopen } from "../shared/askuser.js";
@@ -285,6 +286,10 @@ it("retains Projects with user-created active workspaces, archives plugin worksp
 it("a failed partial purge preserves its owner, blocks synchronization, restores and rule writes, then resumes on bootstrap", async () => {
   const f = await fixture({ askuser: true });
   const original = f.address();
+  const store = new StateStore(join(f.home, "state"));
+  const detailsDirectory = store.runDetailsDirectory(original.connectionKey);
+  await mkdir(detailsDirectory, { recursive: true });
+  await writeFile(join(detailsDirectory, "cached.json"), "cached");
   const oldIds = f.agents.map(agent => agent.id);
   const remove = f.host.deleteAgent.getMockImplementation()!;
   let attempts = 0;
@@ -306,6 +311,7 @@ it("a failed partial purge preserves its owner, blocks synchronization, restores
   f.host.deleteAgent.mockImplementation(remove);
   await f.server.syncRpc(syncBootstrap, {}, f.paseo);
   expect(JSON.parse(await f.persisted())).toEqual({ version: 1, owner: { profile: "office" }, connections: {} });
+  await expect(readFile(join(detailsDirectory, "cached.json"))).rejects.toMatchObject({ code: "ENOENT" });
   expect(f.host.deleteAgent.mock.calls.map(([id]) => id)).toEqual(expect.arrayContaining(oldIds));
   expect(f.agents).toEqual([]); expect(f.projects).toEqual([]); expect(f.posts).toEqual([]);
 });

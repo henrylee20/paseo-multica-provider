@@ -432,6 +432,7 @@ export class SidebarSynchronizer {
       };
       await clean(root);
       await this.options.store.update(state => { state.connections = {}; state.owner = { profile: targetProfile }; });
+      for (const connectionKey of Object.keys(state.connections)) await this.options.store.removeRunDetails(connectionKey);
       this.syncState.retainedProjects = retainedProjects.length ? retainedProjects : undefined;
     } catch (error) {
       this.syncState = { ...this.syncState, status: "unavailable", stage: "purging", message: "清理旧 profile 本地数据失败；同步和规则写入已暂停，请重新引导以重试。" };

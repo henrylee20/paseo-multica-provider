@@ -1,8 +1,8 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { z } from "zod";
 import { storedRunSchema } from "./run-state.js";
-import { runMessageSchema } from "../shared/runs.js";
 import { threadSchema } from "./thread-state.js";
 import { taskRuleSchema } from "../shared/contracts.js";
 import { askuserAttachmentSchema, storedAskuserCardSchema } from "./askuser-state.js";
@@ -17,7 +17,6 @@ export const issueSchema = z.object({
   manualHidden: z.object({ workspace: z.boolean(), discussions: z.array(z.string()) }).default({ workspace: false, discussions: [] }),
   threads: z.record(z.string(), threadSchema).default({}),
   runs: z.record(z.string(), storedRunSchema).default({}),
-  runDetails: z.record(z.string(), z.object({ messages: z.array(runMessageSchema), finalized: z.boolean().optional() })).default({}),
   askuserAttachments: z.record(z.string(), askuserAttachmentSchema).optional(),
   askuserCards: z.record(z.string(), storedAskuserCardSchema).optional(),
   commentInputs: z.record(z.string(), z.object({ commentId: z.string(), rootId: z.string() })).default({}),
@@ -47,6 +46,12 @@ export class StateStore {
   private cached?: Promise<LocalState>;
   private profile?: string;
   constructor(readonly directory: string) {}
+  runDetailsDirectory(connectionKey: string) {
+    return join(this.directory, "run-details", createHash("sha256").update(connectionKey).digest("hex"));
+  }
+  async removeRunDetails(connectionKey: string) {
+    await rm(this.runDetailsDirectory(connectionKey), { recursive: true, force: true });
+  }
   /** Legacy data acquires an owner on first observation, without creating an empty file. */
   async observeProfile(profile: string | undefined) {
     this.profile = profile;

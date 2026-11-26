@@ -1205,6 +1205,10 @@ it("rebuild deletes discussions including archived orphans before workspaces and
     local.issues["issue-one"].commentRoots.old = "main";
     state.connections.other = structuredClone(local);
   });
+  for (const key of [connectionKey, "other"]) {
+    await mkdir(store.runDetailsDirectory(key), { recursive: true });
+    await writeFile(join(store.runDetailsDirectory(key), "cached.json"), "cached");
+  }
   const otherBefore = structuredClone((await store.read()).connections.other);
   const rulesBefore = structuredClone((await store.read()).connections[connectionKey].rules);
   const oldIds = f.native.agents.map(agent => agent.id), oldCreations = [...f.creations];
@@ -1222,6 +1226,8 @@ it("rebuild deletes discussions including archived orphans before workspaces and
   expect(saved.owner).toEqual({ profile: "" });
   expect(saved.connections[connectionKey].rebuildGeneration).toBe(1);
   expect(saved.connections.other).toEqual(otherBefore);
+  await expect(stat(store.runDetailsDirectory(connectionKey))).rejects.toMatchObject({ code: "ENOENT" });
+  expect(await readFile(join(store.runDetailsDirectory("other"), "cached.json"), "utf8")).toBe("cached");
   expect(saved.connections[connectionKey].rules).toEqual(rulesBefore);
   expect(saved.connections[connectionKey].issues["issue-one"].manualHidden).toEqual({ workspace: false, discussions: [] });
   expect(saved.connections[connectionKey].issues["issue-one"].commentRoots).not.toHaveProperty("old");

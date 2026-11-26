@@ -65,10 +65,11 @@ it("reads old state while stripping removed fields without migration", async () 
   const directory = await mkdtemp(join(tmpdir(), "multica-state-"));
   try {
     const issue = { remoteWorkspaceId: "remote", workspaceId: "native", cwd: directory, title: "Task", description: "Goal",
-      archivePending: true, stopEpochs: { main: 9 }, stopRecords: { old: { cleanup: "unknown" } }, deliveries: { old: { body: "Discarded input" } }, access: { status: "inaccessible" } };
+      runDetails: { old: { messages: "discard without validating" } }, archivePending: true, stopEpochs: { main: 9 }, stopRecords: { old: { cleanup: "unknown" } }, deliveries: { old: { body: "Discarded input" } }, access: { status: "inaccessible" } };
     await writeFile(join(directory, "state.json"), JSON.stringify({ version: 1, connections: { old: { identity: { user: { id: "former-user" } }, rules: {}, projects: {}, issues: { task: issue } } } }));
     const state = await new StateStore(directory).read();
     expect(state.connections.old).not.toHaveProperty("identity");
+    expect(state.connections.old.issues.task).not.toHaveProperty("runDetails");
     expect(state.connections.old.issues.task.title).toBe("Task");
     expect(state.connections.old.issues.task).not.toHaveProperty("stopEpochs");
     expect(state.connections.old.issues.task).not.toHaveProperty("stopRecords");
