@@ -1,35 +1,10 @@
 # 为每个 Run 保留唯一展示归属
 
-Multica 的一个 Run 可能处理多个 Thread 的评论，但 Paseo 只在一个位置展示该 Run 的执行流，不在每个相关 Thread 中复制。
-对有评论关联的 Run，优先选择触发评论所属 Thread，没有触发评论时选择最早关联评论所属 Thread；确定后不因其他 Thread 的合并或追加评论而迁移。
-首次展示时完全无评论关联的 Run 固定展示在该 Issue 的本地主讨论 tab，后续即使发现评论关联也不迁移；该 tab 同时承载 Issue 描述，且仅同步展示不会自动向 Multica 发表评论。
+Multica 的单次 Run 可以同时合并处理同一 Issue 下多个 Thread 的评论，也可能不关联任何评论，而 Paseo 中重复渲染同一 Run 会造成状态与时间线混乱。插件为每个 Run 持久固定唯一的展示归属 `ownerRootId`，确定后不因后续合并评论或重连而迁移；执行详情以归属讨论下的只读 provider subagent 呈现（[ADR 0011](./0011-run-as-provider-subagent.md)）。
 
-#7 从完整成功的 Issue `task-runs?view=timeline` 快照读取关联。远端触发、合并、已交付、补充评论 ID 与 `source_task_id` 指向该 Run 的生成评论 provenance 分开保存，首次 `ownerRootId` 独立持久化。优先解析触发评论；无触发时按评论的真实 `created_at`（含 RFC3339Nano 精度与时区）选择最早关联评论，包含已观测到的生成评论关联；生成评论不充当输入覆盖回执。缺失父链或跨 Thread 评论缺少可靠时间时等待补齐，不按 ID 猜测，也不固定到主讨论。成功读取且确实零关联时才使用主讨论。
+归属仲裁从完整成功的 `task-runs?view=timeline` 快照读取触发、合并、已交付、补充及 `source_task_id` 生成评论五类关联：优先采用明确触发评论所属 Thread；无触发评论时按关联评论真实的 RFC3339Nano `created_at` 选择最早者所属 Thread（生成评论参与归属判断但不充当触发输入描述）；缺失父链或跨 Thread 评论缺少可靠时间时等待后续快照补齐，不按数组顺序猜测，也不提前回退本地主讨论；仅当完整快照确认零评论关联时才固定到本地主讨论 `main`。
 
-每个 Run 使用稳定 `multica:run:<runId>` 插件行；后续状态更新替换同一行。行内只保存有界的 agent、状态、身份和来源时间；执行输出由后续按需读取切片提供，不追加日志 assistant 消息。
+## 影响与边界
 
-同一原生会话中的所有归属 Run 共同决定一个活动 turn：queued、dispatched、running、waiting_local_directory、deferred 均保持活动，全部终结后才完成聚合 turn。每次从空闲进入活动都生成新 UUID，不能重复使用已经完成的 turn ID。Paseo 0.15.3 实测复用已完成 ID 会使后续完成事件被忽略，造成原生状态停留在运行中。
-
-原生 Stop 成功是另一个聚合边界：操作开始时捕获原生 turn，固定取消集合全部确认终结后先完成该 turn；后来发现且仍活动的 Run 留在同一 tab，以全新 UUID 立即开始后续 turn，不扩大远端取消集合。如果原 turn 在等待回执时已自然结束，则不结束随后已经开始的新 turn。部分取消失败仍报告失败，并保留未结束 Run 的原生活动，不为失败回执主动切换 turn。
-
-原生导入在 provider `session.open` 后才注册活动观察；0.15.3 实测在 `session.ready` 前发送 started 不会使导入记录变为运行中。因此缓存重放只输出执行摘要，在导入返回后的同步中发布活动；实际摘要 renderer 挂载后通过只读 `run.observe` 再次发布缓存活动，后续后台快照也会核对。这里不通过虚构 prompt、refresh 活动 agent 或远端写入来启动展示。
-
-#8 将完整执行消息缓存放在独立 `runDetails` 映射，不向摘要行或普通 assistant 历史写入日志。`run.open` 只由展开的执行段请求，远端读取前核对当前 CLI `/api/me` 身份，任务 ID 与 Issue ID 也必须匹配已固定的展示归属。缓存按任务与序号去重，保持源顺序；增量游标只越过连续已读序号，缺口保留后续可补读的机会，不使用最大已见序号。旧连接的已读缓存依靠宿主鉴权读取，无需当前 CLI 身份仍在线。
-
-详细历史通过版本化 `run.read` 分块返回，避免单个工具结果突破 64 KiB 传输预算；读取中版本变化明确失败，由展开 renderer 重试，防止拼接不同快照。展开时每两秒补读当前可用明细，收起或卸载后停止。工具输入与结果仅在 Run 内非空且唯一的相同 `call_id` 下标记关联，仍各自留在源序号位置；缺字段、缺配对、`output_truncated:true` 与未给截断标记的未知完整性都如实说明。源端未接收的字节不能通过展开恢复。
-
-最终评审核对发现，任务可在流式执行消息产生前失败，其 `error`／`failure_reason` 独立存在于任务快照；远端 `work_dir`／`relative_work_dir` 也不能从本地占位目录推导。发现快照及逐 Run Stop 回执中的四个来源字段因此以可选 `metadata` 保存在 Run 内，区分未提供、明确 null 与空字符串；后续省略不清除已知缓存，陈旧活动快照不覆盖终态元数据。摘要行保持有界，不装入长错误或路径。
-
-`run.open` 附加独立 `metadataRevision`，即使消息为空或不可用仍可返回；新增只读 `run.metadata.read` 以相同 8192 UTF-16 字符分页及版本检查读取完整 JSON 对象。原有 `run.read` 保持消息 JSON 数组契约。执行段及管理页只读历史显示来源任务错误、失败原因和 REMOTE 路径，路径仅为可选文本，不成为 Paseo 本地 cwd 或工具链接；旧连接离线读取不重新授权远端请求。没有元数据的早期缓存照常读取，不补造日志消息。
-
-## 修订：保留首次展示归属仲裁（OPT-10）
-
-保留完整关联集合、缺失父链等待和纳秒级时间比较：关联数组并非时间顺序，跨 Thread 评论可仅相差一纳秒，直接取首项或提前回退 main 会把 Run 永久固定到错误讨论。
-
-## 修订：合并 Run 缓存分块读取（OPT-18）
-
-消息与任务元数据统一经 `run.read` 的 kind 选择读取，共用描述读取的版本校验和有界文本切片；仍分别返回消息数组与元数据对象的 JSON，保留独立 revision 和归属校验。评论事件保持现有的单次读取。
-
-## 修订：展示归属决定 subagent 的父讨论（ADR 0011）
-
-首次展示归属仲裁、聚合活动 turn 与 Stop 边界保持；归属讨论改为承载该 Run 的 provider subagent 与一个静态位置标记，不再承载执行段插件行。`multica:run:<runId>` 行、展开读取及 `run.read` 被移除，执行内容改为在讨论打开时推送，见 [ADR 0011](./0011-run-as-provider-subagent.md)。
+- **单一原生 turn 聚合与新 UUID**：Paseo 每个讨论 tab 只有一个原生活动 turn 槽位，同一讨论下所有处于 `queued`、`dispatched`、`running`、`waiting_local_directory`、`deferred` 的归属 Run 共同维持该活动周期，全部终结后才结束 turn。每次从空闲进入活动必须分配全新 UUID（Paseo `0.15.3` 实测复用已完成 turn ID 会导致后续完成事件被忽略）。
+- **原生 Stop 结算边界**：点击 Stop 时捕获当前原生 turn 与固定取消集合；集合全部终结后先结束该原 turn，若期间已有后来发现的活跃 Run，再立即以全新 UUID 开启后续 turn，避免宿主在 2 秒超时后强制取消导致新 Run 的原生活动状态丢失。部分取消失败保留当前活动状态并返回错误。

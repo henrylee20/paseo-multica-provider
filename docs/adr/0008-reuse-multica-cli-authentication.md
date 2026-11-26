@@ -1,13 +1,9 @@
 # 复用 Multica CLI 的登录上下文
 
-用户要求支持自部署 Multica，并在本机 CLI 已登录时直接使用该登录态，因此插件默认在 Paseo daemon 侧只读解析 CLI 的有效服务地址与现有凭据，不另建登录、不生成另一枚 PAT，也不把凭据复制到插件配置。
-默认选择 CLI 默认 profile，命名 profile 可显式选择；遵循 CLI 的环境覆盖和任务隔离规则，将 API 地址与凭据作为同一个上下文读取，前端 app_url 单独用于界面链接。
-CLI 配置变化时重新读取并验证身份，同服务同账号的凭据轮换续用映射，换服务或账号按独立身份处理；没有可用登录或凭据失效时引导通过 CLI 登录，不自动回退云服务或改写 CLI 配置。
+为同时支持官方云服务与自部署实例且免去用户维护独立插件 PAT，插件在 Paseo daemon 侧只读复用运行用户已有的 Multica CLI 登录上下文，不改写 CLI 配置文件、不自动发起浏览器登录，也不将凭据复制到插件持久状态或 RPC 响应中。
 
-## 修订：进程内缓存（OPT-13）
+配置解析严格对齐 Multica CLI `0.6.3`：遵循 `MULTICA_SERVER_URL`、`MULTICA_TOKEN`、`MULTICA_APP_URL` / `FRONTEND_ORIGIN` 环境变量覆盖及 `MULTICA_TASK_CONFIG_ROOT` 与任务上下文隔离标记（受隔离且缺少显式注入时拒绝读取拥有者 `~/.multica`）；API `server_url` 与界面链接 `app_url` 分开使用，不设硬编码云地址回退。配置文件按 `mtime` 与大小做内存缓存，`/api/me` 身份核验结果最多复用 60 秒并在配置变化或 `401`/`403` 时失效。
 
-每次使用仍检查 CLI 配置文件的 mtime 与大小，未变时复用解析结果；任务标记探测结果在进程内复用。身份验证结果最多复用 60 秒，配置变化或远端 401／403 后重新验证。工作区 slug 保存在已有项目映射中，Thread 与 Run 读取无需再为它查询工作区目录；不复制或持久化任何凭据。
+## 影响与边界
 
-## 修订：按目录布局枚举 CLI profile（ADR 0010）
-
-Multica CLI 0.6.3 不提供列出 profile 的命令，也不保存全局 active profile。按 [ADR 0010](./0010-clear-local-data-on-profile-switch.md)，插件通过只读枚举 `<配置根>/config.json` 与 `<配置根>/profiles/*/config.json` 供设置页下拉框选择（遵循 `MULTICA_TASK_CONFIG_ROOT`，名称须通过插件设置 schema；任务隔离上下文直接返回空列表，不读取拥有者 `~/.multica`）。该枚举属于对 CLI 0.6.3 目录布局的推断而非 CLI 公开命令契约；仅检查 `token` 与有效 `server_url`，不向 RPC 返回凭据，也不使用未选中 profile 的 token 访问 `/api/me`。
+- **按目录布局只读枚举 CLI profile**：Multica CLI `0.6.3` 没有列出 profile 的公开命令，也不保存全局 active profile。按 [ADR 0010](./0010-clear-local-data-on-profile-switch.md)，插件通过只读扫描 `<配置根>/config.json` 与 `<配置根>/profiles/*/config.json` 供设置页下拉框选择（仅检查 `token` 非空且 `server_url` 有效，名称须通过设置 schema；任务隔离上下文直接返回空列表），不使用未选中 profile 的凭据调用 `/api/me`。该枚举依赖 CLI `0.6.3` 的目录结构，若未来 CLI 调整存储布局需同步适配。

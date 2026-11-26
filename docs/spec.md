@@ -1,125 +1,119 @@
 # Paseo–Multica 当前规格
 
-本规格以已发布 [Issue #1](https://github.com/henrylee20/paseo-multica-provider/issues/1) 为起点，纳入 2026-11-25 精简决定；取消条款见文末。固定接口证据见 [设计依据](./design.md)，术语见 [GLOSSARY](../GLOSSARY.md)，安装见 [README](../README.md)，历史运行证据见 [验收记录](./acceptance.md)。
+本文件定义插件当前的完整产品与协议行为。上游宿主与 CLI 的固定源码证据见 [设计依据](./design.md)，领域术语见 [GLOSSARY](../GLOSSARY.md)，模块架构与开发红线见 [AGENTS.md](../AGENTS.md)，安装操作见 [README](../README.md)，实机与模拟验证范围见 [交付验收记录](./acceptance.md) 及 [AskUser 验收清单](./askuser-acceptance.md)。
 
-## 接入与对象映射
+## 接入形态与对象映射
 
-插件由远端 provider、daemon 侧同步器和客户端贡献组成，不修改 Paseo 核心，不在本机运行 Multica 任务。占位目录满足原生交互约束，不代表远端代码仓库；原生文件和终端功能可能指向它们。
+插件由服务端 provider、daemon 侧后台同步器与客户端界面贡献组成，不修改 Paseo 核心，不在本机执行 Multica 任务。每项任务使用独立的本地非 Git 占位目录满足 Paseo 交互式工作区契约；占位目录不代表远端代码仓库，原生文件与终端功能会指向该目录。
 
 | Multica 对象 | Paseo 表达 |
 | --- | --- |
-| Multica 工作区 | Paseo 项目 |
-| Issue | Paseo 工作区 |
-| 以顶层评论为根及其后代组成的 Thread | agent tab |
-| 连接用户本人的普通评论 | 原生 user message |
-| 其他成员或 agent 的普通评论 | 带作者名称的原生 assistant message |
+| Multica 工作区 | Paseo 项目（project） |
+| Issue | Paseo 工作区（workspace） |
+| 以顶层评论为根及其后代组成的 Thread | 独立 agent tab |
+| 连接用户本人的普通评论 | 原生 `user` 消息 |
+| 其他成员或 agent 的普通评论 | 带作者名称的原生 `assistant` 消息 |
 | 一次 Run | 唯一归属讨论下的只读 provider subagent |
-| 系统变化、评论更正与删除 | 独立事件 |
+| 系统变化、评论更正与删除 | 独立时间线事件 |
 
-每个 Issue 另有本地主讨论，展示描述、Issue 级系统事件与首次完全无评论关联的 Run。主讨论本身不是远端 Thread，在这里发送会创建新的顶层评论及 Thread；真实 Thread 内发送回复其根评论。
+每个 Issue 另有本地主讨论，展示任务描述、Issue 级系统事件与首次展示时完全无评论关联的 Run。主讨论本身不是远端 Thread：在此发送消息会创建新的顶层评论及远端 Thread；在真实 Thread 内发送则回复其根评论。
 
 ## CLI 登录与身份隔离
 
-默认复用 daemon 主机、运行用户的 Multica CLI 登录，支持云服务及自部署地址。插件只读配置，不生成 PAT、不改写 CLI、不借用客户端或其他用户的登录。API server_url 与前端 app_url 分开使用，不硬编码云地址。
+默认复用 daemon 主机同一运行用户的 Multica CLI 登录，支持云服务与自部署地址。插件只读读取配置，不生成独立 PAT、不改写 CLI 配置文件、不共享其他设备客户端或其他系统用户的登录态。API `server_url` 与前端 `app_url` 分别解析使用，不硬编码云服务兜底地址。
 
-Profile 通过设置页下拉框在 daemon 主机已登录的 CLI profile 间选择（留空表示默认配置，枚举 `<配置根>/config.json` 与 `profiles/*/config.json`，跳过不符合设置 schema 的目录名；当前已选项即使已登出仍保留在选项中）；不猜测全局 active profile，也不向 RPC 返回凭据或使用未选中 profile 的凭据访问 `/api/me`。遵循 MULTICA_SERVER_URL、MULTICA_TOKEN、MULTICA_APP_URL／FRONTEND_ORIGIN 及任务私有配置根的有效覆盖，环境变量覆盖时提示切换 profile 不改变账号；任务隔离上下文禁用下拉框且不读取拥有者配置目录。
+设置页提供 **CLI profile** 下拉框，只读枚举 `<配置根>/config.json`（默认配置，空字符串）与 `<配置根>/profiles/*/config.json`（跳过不符合设置 schema 的目录名；`token` 非空且 `server_url` 有效视为已登录，当前已选 profile 即使未登录仍保留显示）。插件不猜测全局 active profile，不向 RPC 返回凭据，也不使用未选中 profile 的凭据请求 `/api/me`。遵循 `MULTICA_SERVER_URL`、`MULTICA_TOKEN`、`MULTICA_APP_URL` / `FRONTEND_ORIGIN` 及 `MULTICA_TASK_CONFIG_ROOT` 覆盖规则：环境变量覆盖凭据时提示切换 profile 不改变账号；检测到任务隔离上下文时禁用下拉框，且不读取拥有者配置目录。
 
-服务地址和真实用户 ID 组成连接身份；同一 profile 下同账号 Token 轮换续用映射，同一 profile 下经 CLI 换服务／用户从独立空规则开始且不自动删除旧连接，历史角色、Run owner 和人工隐藏保留原身份，旧连接不能借新登录发表评论、取消 Run 或刷新远端明细。凭据不进入插件持久状态、客户端或 RPC。
+规范化 API 服务地址与 `/api/me` 返回的真实用户 ID 共同组成 `connectionKey`：
 
-切换 CLI profile 时，客户端先弹窗展示本机 Project、任务、讨论数量并提示不影响远端，确认后再保存设置。服务端以持久归属 `state.owner.profile` 驱动可重复执行的清理（见 ADR 0010）：清空前一 profile 留下的全部本地映射、规则、缓存、人工隐藏、原生讨论（`deleteAgent`，不取消远端 Run）、不含用户自建活跃工作区的插件 Project 与占位目录，再允许新 profile 的同步、导入或规则写入；两个 profile 指向同一账号时同样清理，同一 profile 下累积的多个连接一并清空；含用户自建活跃工作区的 Project 保留 Project 与占位目录，只删插件讨论、归档插件工作区并提示用户。旧版本缺少归属时采用当前 profile，升级不删数据；清理失败保留原归属并在下次引导重试。
+- **同一 profile 内**：同服务同账号轮换 Token 续用原映射；经 CLI 更换服务或账号则从独立空规则开始，不自动删除旧连接，历史消息角色、`ownerRootId` 与人工隐藏保留在原连接下，且旧连接不能借用新登录发表评论、取消 Run 或补读远端明细。
+- **切换 CLI profile 时**：客户端先弹窗展示本机 Project、任务、讨论数量并说明不影响远端，确认后再保存设置。服务端以持久归属 `state.owner.profile` 驱动可重复执行的清理（[ADR 0010](./adr/0010-clear-local-data-on-profile-switch.md)）：在允许新 profile 同步、导入或写规则前，彻底清空前一 profile 留下的本地映射、规则、缓存、人工隐藏、原生讨论（`deleteAgent`，不取消远端 Run）、不含用户自建活跃工作区的插件 Project 与占位目录；即使新旧 profile 指向同一账号也执行清理，同一 profile 下曾累积的多个连接一并清空。含用户自建活跃工作区的 Project 保留 Project 与占位目录，仅删插件讨论、归档插件工作区并在设置页提示。旧状态缺少 `owner` 时采用当前 profile，升级不删数据；清理失败保留原归属并在下次引导重试。
 
-CLI 文件原子替换、重新登录和登出会触发有效配置重读；凭据被移除后不继续使用。每次远端请求发送前核对原上下文，401／403 使身份验证缓存失效；已经发出的请求不能撤回。同一 profile 离线或登出时已读缓存仍可读；切换 profile 后前一 profile 的本地缓存已清空。
+CLI 配置文件原子替换、重新登录和登出会触发重读；每次远端请求发送前重新核对 profile 与有效凭据，`401`/`403` 使内存中的 `/api/me` 验证缓存（最长 60 秒）失效；已发出的网络请求无法撤回。同一 profile 离线或登出时本地已读缓存仍可读。
 
 ## 筛选、归档与人工隐藏
 
-初始空规则不导入任务。按 Multica 工作区启用规则，筛选负责人（成员／agent／squad）、状态类别或具体状态、Multica 项目和标签；字段间 AND，同字段多值 OR，多标签命中任一即可，空选表示不限。直接分配成员与分配其 agent／squad 不等价。
+初始无启用规则，不导入任何任务。按 Multica 工作区启用并配置筛选条件：负责人（`member` / `agent` / `squad`，“我”置顶，直接分配成员与分配其 agent/squad 独立匹配）、状态类别或具体状态、Multica 项目和标签。字段间为 AND，同字段多值为 OR，空选表示不限。
 
-`workspace.rule` 与 `workspace.enable` 按到达顺序完成连接／工作区校验及原子落盘后立即返回 `saved` 和独立的 `sync` 状态，后台同步或归档不占用保存 RPC；后台失败不回滚规则与开关。已知工作区停用可跳过远端工作区列表，启用及编辑规则仍校验远端工作区，落盘前再次核对登录上下文。
+规则编辑器默认勾选「未开始」和「进行中」整类：完整勾选某类别时按类别保存并自动纳入未来新增状态；存在部分勾选时将全部已选状态展开为具体状态键保存（旧混合规则按交集载入）。编辑已有规则时通过只读 `workspace.preview` 预览匹配总数、当前已导入数及预计新增/移出任务（不写状态、不阻塞同步队列）。`workspace.rule` 与 `workspace.enable` 按到达顺序校验并原子落盘后立即返回 `saved` 与当前 `sync` 状态，后台同步或归档异步执行且失败不回滚已保存规则；停用本地已知工作区不依赖远端工作区列表。
 
-规则编辑器按类别分组，默认勾选未开始和进行中整类。整类保存类别并自动纳入新增状态；存在部分选择时，所有选择展开为具体状态保存。旧混合规则按类别与具体状态的交集载入。
-
-| 变化 | 本地行为 |
+| 范围变化 | 本地生命周期行为 |
 | --- | --- |
-| 首次匹配 | 创建稳定映射及原生层级 |
-| 完整成功筛选列表中消失 | 按 filter_exit 归档，保留身份、目录与历史 |
-| 重新匹配 | 恢复原先活跃的讨论，人工隐藏除外 |
-| 停用规则 | 归档任务，完整核对后移除没有活跃子工作区的插件 Project |
-| 重新启用被删 Project | 重建 Project／工作区外壳，以原 handle 迁回原讨论，保留 agent ID、cwd 和历史 |
-| 用户关闭 tab 或归档 Paseo 工作区 | 记录人工隐藏，直到主动恢复 |
-| 网络、列表不完整或连接鉴权失败 | 报告同步异常，不能推导批量筛选退出 |
+| 首次匹配筛选 | 创建稳定映射、占位目录及原生 Project / Workspace / 主讨论 |
+| 从完整成功的筛选列表中消失 | 按 `filter_exit` 归档 Paseo 工作区，保留原身份、占位目录与历史 |
+| 重新匹配筛选 | 恢复 Paseo 工作区及归档前活跃的讨论（人工隐藏项除外） |
+| 显式停用工作区规则 | 按 `rule_disabled` 归档任务；完整分页核对无活跃子工作区后移除插件 Project |
+| 重新启用曾移除的 Project | 重建 Project 与新工作区外壳，以原 cwd 和 provider handle 导入迁回原讨论（保留 `agentId` 与历史） |
+| 用户关闭 tab 或手动归档 Paseo 工作区 | 持久记录人工隐藏，优先于自动同步导入，直到用户显式恢复 |
+| 网络错误、分页不完整或连接鉴权失败 | 报告同步异常并保留已有缓存，绝不推导为任务退出筛选 |
 
-Project 内有用户自建活跃工作区时不删除。自动归档保存原因和最初活跃讨论集，避免 hook 误记人工隐藏，丢失回执后继续依据原生状态重试。
+插件 Project 内存在用户自建活跃工作区时不移除 Project。自动归档事先持久化 `archiveReason` 与最初活跃讨论集合 `ruleArchivedAgentIds`，避免归档 hook 误记为人工隐藏，并在回执丢失或原生状态漂移后继续重试。
 
-人工隐藏在同一 daemon 的客户端间共享。设置页分别提供“恢复 Paseo 工作区”与“恢复讨论”：前者不解除子讨论隐藏，后者只解除选定讨论。宿主恢复可能唤醒隐藏子项，核对期间关闭这些本地投影、拒绝竞争打开并安全重新归档，不因此取消远端 Run。
+人工隐藏在同一 daemon 的所有客户端间共享。设置页分别提供 **恢复 Paseo 工作区**（不解除其中讨论的隐藏）与 **恢复讨论**（仅解除所选讨论隐藏）。由于宿主恢复工作区可能按时间戳回退唤醒同工作区隐藏讨论，自动与手动恢复均先对未选中解除隐藏的讨论持有 `DiscussionLifecycle.hold()`，关闭本地活动投影、等待已接收的 Stop 完成并拒绝竞争打开，恢复后再安全重新归档这些隐藏记录，全程不取消远端 Run（[ADR 0002](./adr/0002-use-existing-paseo-with-placeholder-directories.md)）。
 
 ## 评论、发送与回声
 
-发送仅支持非空文本；附件、非文本内容、outputSchema 与缺少任务／Thread 映射在 prompt_result 之前拒绝。校验通过后立即 emit 带 clientMessageId 和正文的原生用户消息，网络发送异步执行；失败保留该原生输入，追加一个错误。
+发送仅接受非空纯文本；附件、非文本内容、`outputSchema` 或缺失任务/Thread 映射均在 `prompt_result` 前直接拒绝。校验通过后立即在 `prompt_result` 前发出携带 `clientMessageId` 与原正文的原生 `user_message`，网络请求异步执行；发送失败保留该条原生用户消息并追加一条错误。
 
-一次发送的连接、目标、正文和 Idempotency-Key 固定，网络错误或 5xx 最多尝试三次。插件不核实历史回执或持久保存失败输入，用户可确认远端结果后重新发送；不能据失败断言评论未保存。
+单次发送固定连接、目标、正文与随机 `Idempotency-Key`，遇到网络错误或 `5xx` 最多尝试 3 次。成功发送仅持久化 `clientMessageId → commentId / rootId` 回声映射，确保后台同步或重启核对不会将同一远端评论重复投影。主讨论发送成功后追加一条 `comment-delivery` 提示（「新 Thread 已建立，可在侧边栏打开。」），真实 Thread 内发送成功不追加额外条目。评论保存成功与 Run 是否触发分别表达。
 
-成功只保存 clientMessageId → commentId／rootId 的回声关联，避免原生输入与同一远端评论重复。主讨论成功仅提示“新 Thread 已建立，可在侧边栏打开。”，不显示 ID 或跳转按钮；Thread 内成功不显示内容。评论已保存与 Run 已启动分别判断。
+Paseo `0.16.0+` 的讨论输入框注册 `multica-mention` 选择器（「提及 Agent」），搜索当前任务所属工作区的智能体并插入 `[@名称](mention://agent/<id>)` 规范引用（显示 ID 以区分同名 agent）；`0.15.x` 宿主不显示该选择器，宿主内置 `@` 文件候选保持不变。运行中普通发送通过 `prompt.steer` 接收输入并发表普通评论，交由 Multica 路由合并或排队，不强制远端中断；显式 `interrupt` 与客户端 `queue` 遵循宿主协议，插件不自建发送队列。
 
-Paseo 0.16+ 的 composer 提供“提及 Agent”选择器，插入带 ID 的 canonical 引用；0.15 不显示选择器。裸 @名称不保证指定身份，宿主内置 @ 文件候选不由插件替换。普通发送遵循 Multica 路由与合并／排队规则，不强制远端 steering；steer 返回接收时捕获的宿主 turnId。显式 interrupt／queue 继续遵循宿主协议，插件不另建队列。
+本人评论按连接用户 ID 与作者类型判定（本人名下的 agent 发言仍为 `assistant`）。相邻原生评论之间插入独立的 `comment-divider` 细线（首尾不加线，恢复与回声不重复加线）。原生消息保留首次读取正文，远端编辑、删除与系统变化追加独立的 `comment-event` 条目（超长事件经 `thread.event` 按需读取全文）；已有 Markdown 与附件链接原样保留，上传附件、编辑/删除评论、新建 Issue 与修改任务状态仍在 Multica 完成。
 
-本人评论依连接用户 ID 与作者类型判断，自己拥有的 agent 仍是 assistant。相邻原生评论之间用独立的 comment-divider 插件条目分隔，首条之前和末条之后不加线；评论正文不变，恢复与输入回声不重复发出分隔线。原生消息保留首次可获取内容，编辑、删除追加事件，不原位改写，也不虚构未读取的旧版本；已有附件链接和 Markdown 保留，上传、编辑删除、新建 Issue 及修改状态仍在 Multica 完成。
+## AskUser 结构化提问与后台唤醒
 
-## AskUser 结构化提问
+所属 Thread 评论（含子回复）携带的 `askuser.json`（`version: "1"`，`application/json`）渲染为稳定的 `askuser` 时间线卡片，首次输出紧跟携带该附件的来源评论（后续状态更新原位合并；Thread 刷新先发现卡片再投递评论行，卡片发现失败仍投递已读评论），展示标题、完整警示说明、问题与选项（超长内容通过 `askuser.read` 分页展开）。附件按连接、Issue 与附件 ID 持久缓存，后台同步与打开 Thread 共用下载；严格限制当前 API 同源地址、禁止重定向、流式上限 64 KiB 并校验 schema，下载或校验失败仅在卡片报错，不阻塞普通评论同步。仅当 Issue 存在未确认终态的卡片时才额外拉取一次完整 `timeline`，核对直接回复（含超过摘要 200 runes 截断的长回答、`answer_user_id`、`delegated_by` 与条件必填）及远端跳过元数据，确认终态后停止额外轮询。
 
-所属 Thread 的 askuser.json version "1" 附件显示稳定卡片与可读的完整警示、问题和选项；下载仅允许当前 API 同源、禁止重定向、流式上限 64 KiB，并严格校验 schema。后台和显式打开共用缓存，完整 timeline 核对直接回答与远端跳过，不用摘要截断推断终态。
+当卡片未决且当前连接用户可作答时，插件映射原生 `QuestionFormCard` 权限（稳定 ID 为 `multica:askuser:<cardCommentId>:<attachmentId>`，按 provider 会话、连接与 Issue 隔离）：
 
-保留文本、单选、多选、other、条件必填、answer_user_id 与 require_answer 规则。可答未决卡片映射为原生问题；权限 ID 保持 multica:askuser:<cardCommentId>:<attachmentId>，按会话与原连接隔离。回答生成精确 **确认结果** 正文，parent_id 与 askuser_answer_to 均为卡片评论，展示和停止归属仍为原 Thread。
+- **提交回答**：校验文本、单选、多选、`other` 与 `required_when` 条件必填；校验不通过保留原生表单并提示具体条件。提交生成精确的中文 `**确认结果**` 评论，`parent_id` 与 `askuser_answer_to` 均指向卡片评论，展示与停止归属仍留在原 Thread。原生权限响应等待有限次同 key 发送结果：成功则缓存答案并消除待答，失败则报错由用户重新提交。普通输入框聊天不充当卡片回答。
+- **本地收起与重展**：原生 **Dismiss**（及 `clearPendingPermissions`）仅在本地收起表单，跨同步与重启保留收起状态，点击时间线卡片 **重新展开作答** 可恢复（若宿主已释放空闲会话则立即重新加载）。全选填文本表单额外追加一题「提交确认」，确保即使已输入文字甚至勾选确认，点击 Dismiss 仍走 `deny` 本地收起而不误发评论；缺少已知确认的模糊 `allow` 或原题全空同样仅本地收起，确认题本身不写入远端回答正文。含必填题或选项题的表单不追加确认题。
+- **远端跳过**：通过卡片独立的 **跳过此卡 → 确认远端跳过** 二步操作调用 `askuser-skip`；成功不依赖响应 JSON 正文，尽力从完整 `timeline` 读取 `askuser_skipped_at` / `askuser_skipped_by`（无远端元数据时不伪造本地时间或操作者，`202 Accepted` 须经 `timeline` 确认才标终态）。原生 Stop 仅收起本地待决表单，不触发远端跳过。
+- **后台无中断唤醒与通知时序**：后台完成卡片与 Run 概要同步后，仅对仍处启用规则内、无 `archiveReason`、未人工隐藏、未处于 `hold`、原生工作区与 agent 活跃且存在可答未决未收起卡片的 Thread，调用无中断的 `listCommands(agentId)`（不传 `purpose: "history"`，不调用会中断运行的 `refreshAgent`）。后台尝试按讨论去重并限流 60 秒，单个失败不阻塞其他讨论；显式点击「重新展开作答」不受限流限制。由于 Paseo `0.17.4` 在初次打开期间会将早于原生注册完成的权限视为静默历史回放，插件对本进程首次发现的新卡片延迟至 `await listCommands(agentId)` 返回后再 live 公布（已加载会话的新卡片直接 live，重启后的旧缓存仍在 `ready` 前静默回放；首次发现标记仅在实际发出后于内存清除，不持久化）。
 
-原生权限响应等待 send 的成功或失败，网络／5xx 使用相同 key 最多三次，回执同时校验两项目标；失败告知用户重新回答，不另存失败原文，不提供核实或显式重发。卡片 delivery 仅保留本进程的发送中、已保存、失败；成功答案及已答／已跳过状态继续缓存。保证 A／B／C 的取消同样适用于 AskUser，回答与跳过不再受 Stop epoch 栅栏限制，原生历史及完整卡片缓存继续可读。
+## Run 子代理、活动聚合与原生停止
 
-Dismiss 只本地收起，显式重展恢复；全选填文本增加提交确认，模糊 allow 或全空原题仍只收起。远端跳过须独立二次确认；成功状态不依赖 JSON 正文，时间与操作者仅取远端元数据，202 无 timeline 证据不标终态。普通聊天不作为卡片回答，clearPendingPermissions 只本地收起。
+每个 Run 的展示归属 `ownerRootId` 按以下优先级首次确定并持久固定：明确触发评论所属 Thread → 五类关联评论（触发、合并、已交付、补充、生成评论 provenance）中按 RFC3339Nano `created_at` 最早者所属 Thread → 完整读取确认零关联时归属本地主讨论 `main`（缺父链或跨 Thread 缺可靠时间时等待，不猜测也不提前回退 `main`；后续新增关联或重连永不迁移，见 [ADR 0003](./adr/0003-unique-run-display-ownership.md)）。
 
-后台保留每讨论去重与 60 秒限流，通过 listCommands 无中断加载合格讨论；人工隐藏、归档、hold、非指定用户、已解决卡片不被主动加载。首次新权限等待原生注册完成再 live 公布，已加载会话直接 live，旧缓存 ready 前回放；StateStore 成功更新订阅继续对齐本地权限，CLI 身份变化清理旧权限。真实原生通知、表单和自部署跳过协议仍由用户按 [AskUser 手动清单](./askuser-acceptance.md) 验收。
+每个 Run ID 通过父会话协商的 `session.subsession` 呈现为只读子会话 `session.opened{parentSessionId, toolCallId, restoration: "parent"}`（[ADR 0011](./adr/0011-run-as-provider-subagent.md)）：
 
-## Run、活动与原生停止
+- 标题为执行 agent 名称，描述为输入触发来源与创建时间（Run 自身生成的评论不当作触发输入，无输入关联时显示「任务级执行」）；重跑的新 Run ID 生成新子代理。
+- 父讨论时间线按输入来源评论与创建时间排定一次静态 `sub_agent` 位置标记（状态固定 `completed`，子会话 `toolCallId` 指向该标记）：标记等待其输入锚点行（优先本讨论触发评论，否则最早输入关联评论，生成评论不作输入锚点）发出后，排在首条来源时间严格较晚的后续评论及其分隔线之前（同时间按 Run ID 排序）；无输入锚点的 Run 等完整评论快照可用后按纳秒时间参与排序；若存在输入来源却无对应行，须等开始等待后才发起的一次讨论刷新投递完成才认定锚点缺失。`markerProjected` 仅在标记实际发出后持久化，`history:skip` 只补发未发出的新标记，已有标记的 Run 立即恢复子会话。宿主按首次到达顺序固定条目位置，已错位的旧时间线需通过「重建数据」重排。
+- 父讨论内所有处于 `queued`、`dispatched`、`running`、`waiting_local_directory`、`deferred` 的归属 Run 共同维持一个原生活动 turn（每次新活动周期分配全新 UUID）；子会话将这五类状态映射为 `running` 并在细分状态变化时追加简短说明，`completed` / `failed` / `cancelled` 映射为 `completed` / `failed` / `canceled`。
+- 讨论在宿主打开（含导入）时，先按上述顺序发出 Run 标记，再同步打开对应子会话、推送已缓存内容并立即按已知终态结算，离线或明细拉取失败不阻塞终态展示；仅本进程实际打开过的讨论补读远端执行明细（活跃期每 2 秒刷新，终态成功拉取后标记 `finalized` 停止；`finalized` 前不越过消息序号缺口，完成后按可得源顺序展示运行文本、思考、工具调用及结果、任务 `error` / `failure_reason` 与标明远端的 `work_dir` / `relative_work_dir`）。父会话纯关闭时仅清理本地子会话映射，不发子会话 `session.closed`。
 
-Run 首次展示归属依次采用明确触发评论、最早关联评论、确实零关联时的 main。触发、合并、已交付、补充与生成评论 provenance 均参与判断；缺父链或跨 Thread 缺可靠时间时等待，来源时间按 RFC3339Nano 比较。owner 首次确定后持久固定，后补关联或重连不迁移、不复制。
-
-每个 Run ID 以 provider 子会话呈现，父讨论协商 `session.subsession`，子会话使用 `session.opened{parentSessionId, toolCallId, restoration: "parent"}`，不接受输入或独立 Stop／权限。标题为执行 agent 名称，描述为评论触发来源及创建时间，无评论关联时为“任务级执行”；重跑的新 ID 是新子代理。父时间线首次展示时保留一个静态 `sub_agent` 位置标记，状态始终 completed，子会话 toolCallId 指向它。恢复父会话重新发出子会话，通过 markerProjected 记录已发出的标记，history:skip 只补发尚未发出的父标记，包括关闭期间新发现的 Run。
-
-一个 tab 的 queued、dispatched、running、waiting_local_directory、deferred Run 共同维持一个原生活动 turn，每次新周期生成新 UUID；子会话将这五类状态映射为 running，细分状态变化追加简短说明。completed／failed／cancelled 对应 completed／failed／canceled。子时间线仅承载该 Run 的运行文本、思考、工具调用与结果（保持来源顺序）、任务 error／failure_reason 及远端目录；触发评论、Run 生成评论和 AskUser 卡片仍在所属讨论。缺字段不补造，源端明确截断才提示。
-
-讨论在宿主打开（含导入）时立即发出全部归属子会话和缓存，仅本进程实际打开过的讨论补读远端执行明细；活跃 Run 每两秒刷新，终态成功补齐一次后停止。父讨论 Stop 成功后相应子会话按实际终态结束，取消对应 canceled。纯关闭父资源只清理本地子会话 map，交由宿主将运行中子代理标为 canceled，不主动发送子会话 session.closed；下次打开按缓存及真实状态重建。旧执行段行、renderer 与 `run.open`／`run.read`／`run.observe` 等 RPC 完全移除，不保留历史渲染兼容。
-
-原生 Stop 和关闭运行中 tab 固定操作开始时归属该 root 的活跃 Run，逐项取消；不扩大到后来 Run、其他 tab 或已终结记录。跨 Thread Run 只能整体取消，完成竞态保留实际终态。全部成功后结束捕获的宿主 turn，仍活动的新 Run 使用新周期；部分失败返回 request.failed，用户再次点击 Stop。
-
-整个 Paseo 工作区归档、筛选退出、客户端断开和单纯 session.close 只处理本地展示或资源，不取消远端。贡献清理等待已经接收的 Stop 完成。HTTP 成功不证明进程物理退出，插件不跟踪清理四态或保存停止重试记录。
+原生 **Stop** 与关闭运行中 tab 触发 `session.interrupt`：固定操作开始时归属该讨论的活跃 Run 集合并逐项调用取消接口，不扩大到其他 tab 或随后新发现的 Run；跨 Thread 的同一 Run 只能整体取消，取消与完成竞态保留服务端实际终态。集合全部确认终结后完成捕获的原生 turn，若期间已有后来 Run 仍在活动则立即以新 UUID 开启下一周期；任一项取消失败直接返回 `request.failed`，由用户再次点击 Stop（[ADR 0004](./adr/0004-native-interrupt-stops-remote-run.md)）。整工作区归档、筛选退出、客户端断开与单纯 `session.close` 不取消远端 Run；插件卸载清理等待已接收的 Stop 请求完成。
 
 ## 同步、缓存与恢复
 
-客户端加载后立即并始终每十秒 bootstrap，确保 contribution 跨 daemon 重连仍能重新引导。服务端就绪且最近同步未失败时只校验 serverId 并确保定时器存在；bootstrap 不等待整轮同步；规则变更落盘后立即显示同步中并触发后台核对。旧快照在分页、筛选退出归档、停用归档、项目移除及任务处理边界检查规则版本，保留在途原生写入回执后以最新规则重跑。daemon 每十五秒及工作区事件后读取快照，多客户端不重复创建同步器，客户端关闭后继续同步，进程重启仍需至少一次客户端连接。
+客户端贡献加载后立即并每 10 秒调用幂等 `sync.bootstrap`（跨 daemon 重连自愈；服务端已就绪且最近同步未失败时直接校验 `serverId` 并返回，不阻塞等待整轮同步）。daemon 每 15 秒及收到工作区 WebSocket 事件后执行快照核对；多个客户端共享同一同步器，客户端关闭不停止后台循环，daemon 重启后需至少一次客户端连接重新引导。在途同步在分页、归档、移除 Project 与任务核对边界检查规则版本，遇到新规则让出并按最新规则重跑。
 
-完整成功分页快照才可决定筛选退出或评论删除；WebSocket 仅使快照失效，握手成功不代表缺口补齐。后台读取 Thread／Run 概要，Thread renderer 打开时读取评论正文，provider 讨论打开（含导入）时补读其 Run 明细；重启不自动下载尚未重新打开的讨论执行历史。每轮同步按工作区复用 agent／member 目录；metadata 首次成功补齐后只在导入和恢复时补写，初次失败在后续 bootstrap 重试。
+只有完整成功的分页快照才用于判定筛选退出或评论删除；WebSocket 事件仅用于使快照失效。每轮同步按工作区复用 `agents` / `members` 目录请求；讨论标签到 `metadata` 的存量扫描在进程内成功一次后停止（失败则在后续 bootstrap 重试，新导入与恢复单独写入）。任务描述通过有界 `revision` / `offset` 切片读取并由 provider 订阅原位更新同一条目，版本变化拒绝跨快照拼接。
 
-描述更新由 provider 推送同一条目，Thread 挂载仍 thread.open，正常不显示说明，仅失败提供重新读取。设置页以 connection.status 聚合同步与人工隐藏，保存成功即更新列表、关闭弹窗并显示回执；后台失败仅在同步行报告。同步期间显示阶段与进度，每两秒轮询，空闲恢复十秒。归档阶段提供已完成／剩余数量，仅统计未归档的已停用任务，不计 Project 移除，仅在有待归档任务时显示；停用行仍有导入任务时提示后台归档或等待重试。讨论内没有同步状态轮询。
-
-history:skip 恢复仍完整分页核对原生原文的来源 ID、角色和全文，再补缺失内容；宿主的普通消息 item ID 去重不跨 provider 会话保留，不能以缓存行代替宿主落盘回执。gap、epoch 变化、分页失败或冲突时保留缓存并报告失败。
-
-描述采用有界 revision／offset 切片，版本变化拒绝拼接；Run 内容直接推送为有界原生子时间线条目，消息按任务与序号去重，增量游标不越过缺口。活跃时及终态补读完成前等待序号缺口补齐，成功终态拉取持久化 finalized 后再按可得源顺序呈现。子会话立即按已知 Run 终态结束，离线或明细读取失败不阻塞终态，后续仍可追加执行消息；空字符串与 null 元数据不生成条目。评论事件仍由 thread.event 单次读取。缓存重放使用宿主鉴权，不借此授权远端写入。
+`history:skip` 恢复时通过 `fetchAgentTimeline` 完整分页读回原生时间线，逐条核对来源 `messageId` / 本人 `clientMessageId`、角色及全文后再补发缺失原文；遇到分页缺口、epoch 变化或冲突时保留缓存并报告失败，不盲目重放造成重复消息（[ADR 0005](./adr/0005-preserve-native-comment-history.md)）。设置页在同步进行中每 2 秒轮询进度（空闲恢复 10 秒），归档进度仅统计仍有待归档任务的已停用工作区。
 
 ## 设置页数据重建
 
-仅当前连接 ready 且 profile 清理已完成（purgePending 为 false）时允许重建，非 ready 禁用按钮并解释原因；无启用规则仍可只清理并以 0 个任务完成导入。预检使用本地缓存检查 queued、dispatched、running、waiting_local_directory、deferred Run，返回阻塞的任务／讨论和 Run 列表，提示等待或先手动 Stop。无阻塞时用 `@getpaseo/plugin/client/ui` 的 Modal 二次确认，列出待删除项目数（排除含用户自建活跃工作区的项目）、插件工作区数与插件讨论数，明示保留筛选规则与启用状态、清除人工隐藏。
+仅当当前连接 `ready` 且无未完成的 profile 清理（`purgePending === false`）时允许发起重建；无已启用规则时仍可执行清理并以 `0/0` 完成。预检基于当前连接本地缓存检查五类活跃 Run，存在活跃 Run 时返回阻塞讨论与 Run 列表并拒绝启动；无阻塞时通过原生 `Modal` 二次确认待删除的插件 Project 数（排除含用户自建活跃工作区的项目）、待归档活跃插件工作区数与待彻底删除的插件讨论数（含已归档），明示保留筛选规则与启用状态、清除人工隐藏与其余缓存。
 
-确认后 daemon 串行运行，等待在途同步让出并暂停后台同步与规则修改，按公开 SDK 严格执行：发现并 deleteAgent 当前连接全部插件讨论（含归档）→ archiveWorkspace 活跃的插件工作区（按已知 ID 或当前连接占位目录识别，包括无讨论的工作区；已归档工作区不计数、不重复归档） → removeProject 不含用户自建活跃工作区的插件项目（删除前重新完整分页核对）→ 保留顶层 state.owner 与该连接 rules、递增 rebuildGeneration，清空该连接其余状态 → 按保留规则重导。绝不调用 archiveAgent 或主动发送 session.interrupt，不取消远端 Run；其他连接不变。新任务映射使用混入持久化 rebuildGeneration（缺省 0）的 workspaceId 与 idempotencyKey，立即重导或以后普通同步导入均不会回退到旧 ID；讨论重新分配 agentId，防止旧归档工作区及创建凭据冲突。
+确认后通过 `SidebarSynchronizer.exclusive` 串行暂停后台同步与规则写入，暂停执行明细补读并关闭当前连接本地投影，严格按公开 SDK 顺序执行：
 
-进度只保存在 daemon 内存，通过独立 RPC 查询，包括删除／导入阶段、当前步骤、x/N 与成功或错误信息；逐任务更新导入进度。页面提供进度框，运行中无取消按钮，离开后继续，返回可查看进度或结果，完成后刷新设置状态并恢复后台同步。失败或进程重启后再次发起从头开始。旧空工作区留作宿主归档记录；Run 展示归属重新按远端快照判定。详见 ADR 0012。
+1. `deleteAgent` 彻底删除当前连接全部插件讨论（含已归档）；
+2. `archiveWorkspace` 归档活跃目录中属于当前连接的插件工作区（按已知 ID 或当前连接占位目录识别，含已无讨论的工作区；已归档工作区不重复归档）；
+3. 再次完整分页核对后，`removeProject` 移除不含用户自建活跃工作区的插件项目；
+4. 保留顶层 `state.owner` 与该连接 `rules`，递增持久化 `rebuildGeneration`（缺省 `0`），清空该连接其余状态并按保留规则重导（新任务的 `workspaceId` 与创建幂等键持续混入 `rebuildGeneration`，避免与宿主残留的旧空归档工作区冲突；讨论分配全新 `agentId` 与干净时间线，Run 展示归属按远端快照重新判定）。
 
-## 设置与工程验证
+全程不调用 `archiveAgent` 或 `session.interrupt`，不取消远端 Run，不改动其他连接。进度仅保存在当前 daemon 进程内存（分「删除」与「导入 x/N」两阶段，中途无取消按钮，离开页面后台继续，失败或重启后再次发起从头执行），详见 [ADR 0012](./adr/0012-data-rebuild.md)。
 
-唯一设置页包括连接（含 CLI profile 下拉框、切换确认弹窗与保留 Project 提示）、规则、数据重建和有隐藏项时的人工恢复。名称来自对应业务对象，但身份不依赖名称；后台导入新 Thread 不抢夺浏览位置。manifest 要求 Paseo >=0.15.3，不设最高版本，提及选择器需要 0.16+。Run provider subagent 的 0.15.x 应用显示未验证，无执行段后备，缺少 Subagents 显示的宿主将看不到 Run 内容。
+## 客户端入口与工程验证
 
-测试通过临时 CLI、可控时钟、HTTP／WebSocket 与宿主契约，从公开贡献、provider、RPC 和 renderer 边界验证身份隔离、回声、Run 归属、按 root 停止、人工隐藏及恢复。静态源码核查与隔离测试不等同真实服务验收；真实自部署、原生 queue 等未验证范围以历史验收记录为准。
+客户端仅注册四类公开扩展点：设置页 `multica`、侧边栏顶部快捷入口 `multica`（点击直接打开设置页）、`0.16.0+` 输入框 `multica-mention` 选择器，以及 6 个时间线 renderer（`task-description`、`thread`、`comment-divider`、`comment-event`、`askuser`、`comment-delivery`）。manifest 声明 `requirements.paseo = ">=0.15.3"`。
 
-## 明确取消的首版保证
+自动化测试通过临时 CLI 配置、可控时钟、隔离 HTTP/WebSocket 与编译后 bundle，在公开贡献、provider、RPC 与 renderer 边界验证行为；静态源码核查与隔离测试不替代真实 Paseo 宿主和真实 Multica 服务的端到端验收。
 
-- **取消保证 A**：删除投递原文持久化、七天回执核实／安全恢复、待核实状态和风险确认重发入口；只保留有限次同 key 重试，失败输入不由插件跨重启恢复，用户重发可能重复评论或执行。
-- **取消保证 B**：删除停止记录持久化、跨 tab 单 Run 重试、进程清理四态及 Stop epoch 投递栅栏；不保证 Stop 后旧在途输入不再触发执行。
-- **取消保证 C**：删除独立只读历史快照与对象失权二次取证；筛选列表缺失统一归档，403／404 写入错误直接透传，已读内容留在原生归档历史和缓存。
+## 明确不提供的保证（边界约定）
 
-独立管理页、历史连接展示及复制提及引用均已删除；状态类别与具体状态在同一编辑器中选择。原 ADR 的历史段落与验收记录中涉及这些机制的内容不作为当前功能承诺。
+- **评论投递与草稿恢复**：不持久化待发送评论原文、不查询 7 天幂等回执、不提供「待核实」状态或显式风险重发入口。单次发送仅在当次进程内以相同 `Idempotency-Key` 最多尝试 3 次；失败后不跨重启恢复草稿，不能由请求失败推断远端一定未保存，用户手动重发可能产生重复评论或执行。
+- **停止与物理进程清理**：不持久化停止失败记录、不追踪远端进程清理四态、不提供跨 tab 单 Run 重试面板，也不设置拦截在途评论/回答的 Stop epoch 栅栏；HTTP 取消成功不证明远端进程已物理退出，点击 Stop 前已发出的输入不会自动撤回。
+- **历史快照与失权区分**：不提供独立管理页、历史连接列表、复制提及引用兜底或独立只读快照浏览器；任务从完整筛选列表消失时不额外发起失权二次取证，统一按 `filter_exit` 本地归档并依赖宿主原生归档历史与已有缓存阅读，写入遇到 `403`/`404` 直接透传远端错误。

@@ -17,7 +17,7 @@ try {
   const directory = join(temporary, name);
   await mkdir(directory);
   for (const file of ["paseo-plugin.json", "package.json", "package-lock.json", "index.client.tsx", "index.server.ts",
-    "client", "server", "shared", "scripts", "tests", "tsconfig.json", "vitest.config.mjs", "README.md", "GLOSSARY.md", "CONTEXT.md", "docs"]) {
+    "client", "server", "shared", "scripts", "tests", "tsconfig.json", "vitest.config.mjs", "README.md", "GLOSSARY.md", "AGENTS.md", "docs"]) {
     await cp(join(root, file), join(directory, file), { recursive: true, dereference: false });
   }
   const archive = `${name}.tar.gz`;

@@ -1,50 +1,11 @@
 # 使用现有 Paseo 与本地占位目录
 
-Paseo v0.15.4 的 provider 契约不能单独生成原生 project/workspace 层级，交互 workspace 又要求 daemon 上存在实际目录。
-首版保持 Paseo 核心不变，采用 provider、任务同步器及本地占位目录，而不新增远程 workspace 类型；占位目录不代表 Multica 的代码工作区，因此原生文件和终端功能可能指向占位目录。
-归档 workspace 保持为本地展示操作；原生停止与关闭运行中 tab 的远端执行语义见 [ADR 0004](./0004-native-interrupt-stops-remote-run.md)。
+Paseo 的外部 provider 契约不能单独生成原生 project / workspace 层级，且交互式 workspace 要求 daemon 主机存在实际目录。插件选择不修改 Paseo 核心，改由 daemon 侧同步器配合 `PASEO_HOME/multica-provider` 下的独立非 Git 本地占位目录建立层级：通过 `PASEO_HOME/paseo.pid.listen` 连接拥有者 daemon 并校验 `serverId` 一致后调用底层 `DaemonClient`（不使用可能指向其他实例的 `PASEO_HOST`）。客户端连接后每 10 秒幂等引导后台同步，启动后客户端离线不终止同步，daemon 重启后需至少一次客户端连接重新引导。
 
-客户端连接后自动引导 daemon 侧同步，成功启动后客户端离线不终止同步。
-daemon 或插件进程重启后需要至少一次客户端连接来重新引导；首版接受这一条件，不承诺完全无人连接时自行恢复。
+归档 workspace 仅作为本地展示生命周期（远端停止语义见 [ADR 0004](./0004-native-interrupt-stops-remote-run.md)）。插件将自动归档原因 `archiveReason`（`rule_disabled` / `filter_exit`）及归档前活跃讨论集合 `ruleArchivedAgentIds` 与用户关闭 tab / 归档工作区产生的持久人工隐藏分开保存，使人工隐藏始终优先于自动恢复，并在设置页分别提供「恢复 Paseo 工作区」与「恢复讨论」。
 
-#3 的适配层使用真实低层 SDK：`addProject` 注册 Multica 工作区的非 Git 占位根目录，再以显式 `source.projectId` 将每项 Issue 的独立目录放入该 project。主讨论通过稳定 provider handle 的 `importAgent` 导入；原生 workspace ID、创建幂等键和映射意图在创建前持久化。标题不参与远端身份判断。
+## 影响与边界
 
-高层 `PaseoApi` 不公开底层 `DaemonClient`。插件从拥有者 daemon 注入的 `PASEO_HOME` 读取 `paseo.pid.listen`，使用仅在服务端读取的 `local-credential` 回调独立连接，再比较低层 `listHosts().self.serverId` 与 RPC 上下文 `paseo.hosts.list().self.serverId`，确认相同后才变更原生记录。凭据不进入插件状态或 RPC；不使用可能指向另一实例的 `PASEO_HOST`。
-
-显式停用工作区规则通过 workspace 级归档保留历史，持久化自动归档原因。重新启用先恢复原 workspace，只恢复因该规则归档的已归档 agent；不对运行中的 agent 调用具有中断语义的 `refreshAgent`。
-
-#4 将 workspace 级自动生命周期扩展到动态筛选退出。自动归档前持久化 `rule_disabled`／`filter_exit` 原因、待确认标记与所有此前活跃的 Multica tab 身份；归档回执丢失时保留该集合重试，不用归档后的空活跃集合覆盖。重新匹配时先恢复原 workspace，再仅恢复这份集合中仍已归档的 agent。工作区 WebSocket 只负责使完整分页快照失效，网络、鉴权、格式与分页错误均不能推导任务离开范围。
-
-#6 将人工隐藏独立持久化为 workspace 与讨论身份集合。真实 SDK 提供 `agent.archive.after` 和 `workspace.archive.after`；宿主 `archiveWorkspaceContents` 会先逐个产生 agent 归档事件，再归档 workspace 记录，事件没有归档原因或操作编号。常规原生 WebSocket 归档路径的 `archivingAt` 又属于各自 Session 的 WorkspaceDirectory，不能作为所有客户端、所有调用路径共享的原因标记。因此不能靠时间窗口猜测某个 tab 是先前被单独关闭还是本次 workspace 归档的组成部分。
-
-为了保留全部人工选择，管理页分别提供“仅恢复工作区”和“恢复此讨论”。恢复某个讨论先恢复原 workspace，再仅当选定原 agent 确已归档时 refresh；其他隐藏讨论保持隐藏。workspace 归档所关闭的讨论也逐项可恢复，不猜测归档前的活跃集合。自动筛选归档仍使用事先持久化的 `archiveReason`、`archivePending` 与可恢复 agent 集合，在这些事件中不新增人工隐藏。人工隐藏优先于自动重返；失败或回执丢失保留选择，重试遇到已存活 agent 不 refresh。原生归档不删除占位目录或历史，`session.close` 仅释放资源，不表示人工隐藏或远端取消。
-
-真实 0.15.3 宿主会拒绝对活跃 workspace 调用 `restoreWorkspace`，因此恢复讨论与自动规则重返都先核对低层 `fetchWorkspaces` 的活跃目录，已存在时跳过 workspace 恢复。该目录描述不含 `archivedAt`，不能猜测归档字段；0.15.3 宿主及 0.15.4 协议虽接受 `idPrefix`，实际不按该字段过滤，所以必须逐页比对完整 ID，缺失或循环分页游标视为失败。创建响应丢失后的身份核对复用同一查询，避免原 workspace 位于后续页时再次创建。恢复回执丢失后仍保留原隐藏或自动归档意图，重试依靠实际活跃目录及选定 agent 的归档状态完成剩余步骤。
-
-上述事件顺序已从固定宿主源码核对，公开贡献入口的原生契约测试覆盖之；真实 0.15.3 加载及 UI 演示由集成验收单独记录，不以模拟宿主替代实际验证。
-
-#15 将对象不可访问纳入相同的本地归档路径，使用独立 `access` 状态和 `inaccessible` 自动归档原因。完整筛选列表缺少 ID 时直接读取原 Issue，以免把失权和普通筛选退出混为一谈；403／404 需应用错误证据，并在错误后重新成功核对相同用户和原工作区。全局鉴权、网络和列表失败不会把所有缓存任务归档。只读状态先于原生归档持久化，即使宿主归档失败也不再接受新写入。
-
-管理页只读缓存入口不导入或恢复 agent，不修改人工隐藏，不触发远端取消。恢复访问先核对直接对象和当前筛选，仍使用此前保存的原 ID、目录及归档前活跃讨论集合；恢复可读而尚未重新匹配时维持归档，隐藏讨论继续隐藏。对象丢失不删除停止问题、投递记录或任何已读历史。
-
-真实 0.17.4 的原生发送会在 provider 拒绝只读输入之前解除 agent 的归档，而其 workspace 记录仍可能处于归档状态。自动归档原因是需要持续核对的意图，不能仅凭已有原因与成功回执跳过后续原生状态检查。对仍因筛选退出、规则停用或不可访问而退役的任务，同步器保留最初的可恢复讨论集合，并核对实际活跃 workspace 与讨论；若只有讨论重新活跃，先恢复原 workspace，再整 workspace 归档。已经归档的 workspace 直接重复归档在新宿主上不处理其内容，因此不足以修复这一状态；整 workspace 路径仍只关闭本地资源，不取消远端 Run。
-
-新宿主恢复 workspace 时还可能按归档时间戳恢复子记录，旧记录回退匹配可能包含人工隐藏讨论。自动重返筛选前，对持久人工隐藏的讨论单独关闭 provider 资源：等待此前已经接收的显式 Stop 完成，以原 turn 的完成事件结束本地活动投影，清理订阅并发送 session.closed，在核对期间明确拒绝该讨论的新打开与输入。原生快照确认空闲或关闭且无 activeTurn 后，才重新归档被宿主恢复的隐藏记录，并读回确认；此后释放关闭边界，再按最初的可恢复集合处理其他讨论。该资源关闭不改缓存 Run 状态、Stop epoch、人工隐藏、原 ID 或历史，不使用猜测下一次 interrupt 原因的标记。
-
-实际 0.17.4 后续用例还确认：Paseo 工作区记录仍归档时，SDK 可以先恢复所有原可见讨论，导致没有子记录保留整工作区归档的精确时间戳；此时管理页仅恢复 Paseo 工作区也会触发 60 秒回退并意外恢复另一隐藏讨论。因此自动与手动入口共用 `restoreWorkspacePreservingHidden`：对所有仍隐藏且未被明确选中的讨论持有关闭保护，再恢复原 Paseo 工作区并安全重新归档这些记录。手动选择某个讨论只授权该讨论解除隐藏；其他讨论（含整工作区归档时由公开 hook 保守记录的隐藏）继续保留。恢复回执丢失时也在释放保护前重新核对并归档其他隐藏讨论，原隐藏意图保留供重试；已接收 Stop 独立完成，远端 Run 不因本地修复取消。
-
-2026-11-25 合并后补充：显式停用 Multica 工作区规则需要同时从侧栏移除空 Paseo 项目。0.17.4 公开 `removeProject` 删除注册记录，`addProject` 分配新 ID；原工作区的恢复依赖旧项目，使用已有工作区 ID 再创建会被创建凭据拒绝。用户选择只修改插件、允许重建项目并保留任务、讨论和历史，因此先归档全部任务，再核对项目 ID、占位根目录、非 Git 类型及完整分页的活跃工作区目录，确认无活跃子项才移除注册记录。存在用户自建工作区时保留项目，不删除目录、缓存或原生归档记录。
-
-删除前持久化原父项目及移除意图，重启或回执丢失后继续核对。重新启用时按新项目生成稳定的本地工作区外壳 ID 和创建键，以原 cwd、provider handle 重新导入已归档讨论；宿主将原 agent 迁至新外壳，保留讨论 ID 与历史，不创建替代讨论。隐藏讨论继续归档在原外壳，只有明确选定恢复时才迁回；整个任务的人工隐藏也继续生效。若原生历史查询重开旧讨论，先关闭本地活动并安全归档，再迁移，不取消远端 Run。该行为仅改变重建后的原生分组及工作区外壳 ID，Multica Issue／Thread 身份、讨论 ID、来源历史、Run、停止和投递缓存均保持；普通筛选退出不删除项目，仍恢复原工作区 ID。宿主版本约束不变。
-
-## 修订：简化恢复入口文案（OPT-05）
-
-设置页以“恢复 Paseo 工作区”和“恢复讨论”区分两种操作，说明缩短为一句话；仅恢复工作区不会解除其中讨论的隐藏，恢复选定讨论仍保留其他隐藏意愿，服务端语义不变。
-
-## 修订：移除未使用的归档待确认标记（OPT-09）
-
-删除 `archivePending` 字段及读写；重试仍依据原生归档状态和持久化的自动归档原因。空 Project 删除、旧父项目重建迁移、原讨论恢复集合及隐藏讨论关闭保护保持不变。
-
-## 修订：切换 CLI profile 清理的例外（ADR 0010）
-
-[ADR 0010](./0010-clear-local-data-on-profile-switch.md) 对“不删除目录、缓存或原生记录”增加明确例外：切换 CLI profile 时删除前一 profile 的全部插件讨论（`deleteAgent`）、移除不含用户自建活跃工作区的插件 Project，并删除其占位目录与本地状态。若插件 Project 内存在用户自建活跃工作区，则保留该 Project 及其占位目录，仅删除插件讨论、归档插件工作区并提示用户。
+- **本地占位目录语义**：占位目录不代表远端代码仓库，原生文件树与终端会指向该目录；除切换 CLI profile 清理（[ADR 0010](./0010-clear-local-data-on-profile-switch.md)）外，日常归档与数据重建保留占位目录。
+- **停用规则移除空 Project 与外壳迁移**：显式停用工作区规则并归档任务后，完整分页核对确认该插件 Project 下无用户自建活跃工作区时，调用 `removeProject` 移除空项目（含用户自建活跃工作区则保留）。由于重新 `addProject` 会分配新 ID 且旧 workspace 无法直接挂回，重新启用时生成新的工作区外壳并以原 cwd 与 provider handle 重新 `importAgent`，将已归档讨论迁入新外壳，完整保留原 `agentId`、历史与人工隐藏。
+- **恢复工作区时的隐藏唤醒保护**：Paseo `0.15.3` 拒绝对已活跃工作区调用 `restoreWorkspace`（须完整分页比对 `fetchWorkspaces`，不能依赖宿主忽略的 `idPrefix`），而 `0.17.4` 恢复归档工作区时存在 60 秒时间戳回退，可能连带唤醒同工作区的其他人工隐藏讨论。自动与手动恢复因此统一走 `restoreWorkspacePreservingHidden`：先对未选定解除隐藏的讨论持有 `DiscussionLifecycle.hold()`、结束本地投影并等待已接收 Stop 完成，恢复工作区后立即安全重归档被宿主唤醒的隐藏记录，全程不调用对存活运行中会话有中断副作用的 `refreshAgent`，也不取消远端 Run。

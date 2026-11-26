@@ -1,14 +1,51 @@
 # paseo-multica-provider
 
-在 Paseo 中处理 Multica 任务：Multica 工作区对应 Paseo 项目（project），Issue 对应 Paseo 工作区（workspace），Thread 对应 agent tab。每项任务另有本地主讨论，展示任务描述及首次无评论关联的 Run；在主讨论发送会建立新的远端 Thread。
+在 Paseo 中浏览、参与和管理 Multica 任务。插件直接复用 Paseo daemon 主机上已有的 Multica CLI 登录态（支持官方云服务与自部署实例），无需创建独立插件 Token，也无需修改 Paseo 核心。
 
-插件已实现规格 [#1](https://github.com/henrylee20/paseo-multica-provider/issues/1) 的 CLI 登录复用、动态筛选、评论历史、Run provider subagent、发送与停止、隐藏及故障恢复，并加入 [#20](https://github.com/henrylee20/paseo-multica-provider/issues/20) 的结构化提问表单与卡片。它直接使用 daemon 主机现有的 Multica CLI 登录，支持云服务和自部署地址，无需新建插件 Token。真实验收的覆盖范围与尚未验证的项目见 [交付验收记录](docs/acceptance.md)；AskUser 仅完成模拟验证，真实自部署、原生表单和通知由用户按 [手动清单](docs/askuser-acceptance.md) 验收，原生 queue 控件仍待验证。
+## 对象映射速览
 
-## 构建与安装
+| Multica 概念 | Paseo 呈现 | 说明 |
+| --- | --- | --- |
+| Multica 工作区 | Paseo 项目（project） | 按启用的筛选规则动态同步其中的匹配任务 |
+| Issue（任务） | Paseo 工作区（workspace） | 指向本机独立非 Git 占位目录，代码执行仍在远端 |
+| 本地主讨论 | 每个工作区默认主 tab | 展示任务描述、任务级事件与无评论关联的 Run；在此发送会新建远端 Thread |
+| Thread（顶层评论及回复） | 独立 agent tab | 在此发送会回复该 Thread 的根评论 |
+| 本人评论 / 他人或 Agent 评论 | `user` / 带作者名的 `assistant` 消息 | 远端编辑与删除以独立事件追加，保留初始消息 |
+| Agent Run（单次执行） | 所属讨论下的只读 provider subagent | 父讨论保留静态位置标记；运行文本、思考、工具调用与错误显示在子代理中 |
+| `askuser.json` 提问附件 | 时间线卡片 + 原生提问表单 | 待答时提供交互式表单并支持后台唤醒提醒 |
 
-宿主要求为 **Paseo >=0.15.3**，不设最高版本。输入框的提及选择器需要 **Paseo 0.16.0 及以上**；更早宿主不显示选择器。Run 使用原生 provider subagent，**0.15.x 应用的 Subagents 显示未验证**，没有执行段后备；不支持该显示的宿主将看不到 Run 内容。开发 SDK 固定为 **0.15.4**；已取得实际 daemon 0.15.3、0.17.4 的运行证据。构建需要 Node.js、npm 和 `tar`，安装时 daemon 主机需能下载锁定的 npm 依赖。
+---
 
-从仓库构建：
+## 快速开始
+
+### 1. 环境与版本要求
+
+- **Paseo 宿主**：`>=0.15.3`（无最高版本限制；开发 SDK 基于 `0.15.4`，已在 `0.15.3` 与 `0.17.4` daemon 验证）。
+  - **输入框「提及 Agent」选择器**：需 **Paseo `0.16.0+`**（`0.15.x` 不显示该选择器）。
+  - **Run 子代理视图**：依赖宿主的 provider subagent 展示能力；`0.15.x` 客户端的 Subagents 界面未验证，无旧版执行段后备。
+- **Multica CLI**：兼容 CLI `0.6.3` 配置布局。
+- **构建与部署工具**：Node.js、npm、`tar`（安装生产依赖时 daemon 主机需可访问锁定的 npm 包）。
+
+### 2. 在 daemon 主机登录 Multica CLI
+
+登录作用范围是 **Paseo daemon 所在主机及其运行用户**（客户端所在其他设备或其他系统用户的登录不会自动共享）。
+
+```sh
+# 云服务或已有配置登录
+multica login
+
+# 自部署实例初始化并登录（将地址替换为你的实际 API 与前端地址）
+multica setup self-host --server-url https://api.example.com --app-url https://app.example.com
+
+# 使用命名 profile（可选）
+multica --profile work login
+```
+
+插件只读读取 CLI 配置，不会改写配置文件或自动发起登录。
+
+### 3. 构建、安装与更新
+
+在仓库根目录构建源码插件包：
 
 ```sh
 npm ci --ignore-scripts
@@ -16,9 +53,9 @@ npm run check
 npm run build
 ```
 
-生成 `dist/paseo-multica-provider-0.1.0/`、同名 `.tar.gz` 和 `.tar.gz.sha256`。这是 Paseo 所需的**源码插件产物**，包含两个入口、manifest、锁文件及文档；Paseo 在加载时编译客户端和服务端贡献，不需要修改 Paseo 核心。`node_modules`、Git 数据和本地状态不进入产物。不要用 `npm pack` 代替此步骤：它默认排除 manifest 的 `npm ci` 所需的 `package-lock.json`。
+产物位于 `dist/paseo-multica-provider-0.1.0/` 及同名 `.tar.gz`、`.tar.gz.sha256`（请勿使用 `npm pack` 代替，否则会丢失 `package-lock.json`）。
 
-将压缩包与校验文件放到 **Paseo daemon 所在主机、其运行用户可读的固定目录**，例如 `/srv/paseo-plugins`，然后执行（路径按实际部署修改）：
+将压缩包放到 **daemon 主机运行用户可读的固定目录**（如 `/srv/paseo-plugins`）并安装：
 
 ```sh
 cd /srv/paseo-plugins
@@ -29,96 +66,78 @@ npm ci --omit=dev --ignore-scripts
 paseo plugin install /srv/paseo-plugins/paseo-multica-provider-0.1.0
 ```
 
-本地目录安装会引用该目录，**保留目录及其依赖**。本地安装不会自动执行 manifest 的依赖安装命令；上面的 `npm ci` 必须先完成。Paseo 的托管 Git 来源安装才执行 manifest `build`。若 daemon 使用自定义 home，在 Paseo 命令末尾加 `--home /absolute/daemon/home`，确保操作正确实例。插件 ID 为 `multica`；可用 `paseo plugin list --json` 查看加载状态。更新既有安装时，在已配置的固定目录更新源码、重新运行生产依赖安装，再执行 `paseo plugin reload multica`，不要重复安装相同 ID。开发目录先保留本地改动与未跟踪文件；reload 会释放已加载的 provider 讨论资源，请等相关运行、发送及回答结束后更新，并保留原 daemon home 的插件状态和占位目录。
+- **本地目录安装须保留该目录**：本地路径安装不会自动执行 manifest 的依赖安装，因此必须先执行上面的 `npm ci --omit=dev --ignore-scripts`（仅托管 Git 来源安装会自动执行构建）。
+- **自定义 daemon 目录**：若 daemon 使用非默认 home，在 `paseo` 命令末尾加上 `--home /absolute/daemon/home`。可用 `paseo plugin list --json` 检查 `multica` 状态。
+- **日常更新已有安装**：在原固定目录更新文件、重新执行 `npm ci --omit=dev --ignore-scripts`，再运行 `paseo plugin reload multica`（不要重复 `install`）。`reload` 会释放当前加载的会话，请在相关运行、评论发送或表单提交结束后执行。
 
-## 复用 CLI 登录
+### 4. 启用首个工作区筛选
 
-在 daemon 主机用同一运行用户完成 CLI 登录。CLI 0.6.3 的自部署示例：
+1. 点击 Paseo 主侧边栏顶部的 **Multica**（筛选图标），或打开 **设置 → Multica**。
+2. 插件初始不导入任何任务。在 **Multica 工作区与筛选规则** 的「未启用 · 不导入任务」列表中，点击目标工作区的 **启用…**。
+3. 调整筛选条件（默认勾选「未开始」和「进行中」状态类别），点击 **启用并导入**，匹配的任务即会出现在侧边栏项目树中。
 
-```sh
-multica setup self-host --server-url https://api.example.com --app-url https://app.example.com
-```
+---
 
-已有配置只需 `multica login`。命名 profile 使用 `multica --profile work setup self-host --server-url https://api.example.com --app-url https://app.example.com` 或 `multica --profile work login`。示例地址需要替换为自己的服务；插件不修改 CLI 配置，也不自动开始登录。
+## 核心功能说明
 
-打开 Paseo 设置中的 **Multica**。设置页包含 **Multica 连接**、**Multica 工作区与筛选规则** 和 **重建数据** 入口，有隐藏对象或切换 profile 保留的 Project 时才显示对应区块。**CLI profile** 下拉框列出 daemon 主机上已登录的默认配置（`~/.multica/config.json`）及命名 profile（`~/.multica/profiles/<name>/config.json`），仅显示名称与服务主机；当前已选项即使已登出也会保留显示。选择新 profile 时会先弹窗确认本机 Project、任务和讨论数量，确认后再保存设置并清理前一 profile 的本地数据；环境变量覆盖凭据时提示切换不改变账号，任务隔离上下文会禁用选择。连接摘要显示 API 地址、已验证用户及同步／清理状态；连接异常时显示 daemon 主机、配置来源和登录命令，可点 **复制命令**。
+### 连接管理与 CLI Profile 切换
 
-登录范围是 **daemon 主机及其运行用户**。另一个设备上的 Paseo 客户端、另一用户的 CLI 或浏览器登录不会自动共享。API 的 `server_url` 与页面的 `app_url` 分别使用，保留自部署端口；没有硬编码云地址兜底。
+- **切换 CLI Profile**：设置页 **CLI profile** 下拉框列出 daemon 主机上已登录的默认配置（`~/.multica/config.json`）与命名 profile（`~/.multica/profiles/<name>/config.json`）。切换前会弹窗确认当前本机数据量；确认切换后会**清空上一 profile 在本机的全部规则、映射、缓存、讨论、插件 Project 与占位目录**，并从空规则重新开始（即使新旧 profile 登录同一账号也会清理）。若某个插件 Project 内含有用户自建的活跃工作区，则保留该 Project 与目录并在设置页提示。清理仅限本机，不影响远端任务、评论或正在运行的 Run。
+- **同 Profile 身份变化**：同一 profile 下同账号刷新 Token 会无缝续用原有映射；若通过 CLI 更换了服务地址或登录账号，插件将其视为新连接并从空规则开始，旧连接不会借用新凭据发评论或停止 Run。
+- **环境变量与任务隔离**：遵循 daemon 进程继承的 `MULTICA_SERVER_URL`、`MULTICA_TOKEN`、`MULTICA_APP_URL` / `FRONTEND_ORIGIN` 及 `MULTICA_TASK_CONFIG_ROOT`（勿在插件设置填写凭据；修改进程环境变量需重启 daemon）。当处于受隔离的任务上下文且未显式注入私有凭据时，插件拒绝读取拥有者的 CLI 登录与 profile 列表。
 
-沿用 daemon 进程已有的 `MULTICA_SERVER_URL`、`MULTICA_TOKEN`、`MULTICA_APP_URL`／`FRONTEND_ORIGIN` 覆盖，勿把凭据填入插件设置。修改启动环境后需按部署方式重启 daemon；CLI 文件的原子替换、重新登录和登出则会重新读取。`MULTICA_TASK_CONFIG_ROOT` 指定任务私有根目录；任务 ID、daemon 端口环境或目录标记触发隔离时，缺少必要注入便拒绝借用拥有者登录，也不枚举拥有者 profile。有效凭据移除后不沿用旧缓存。
+### 筛选规则、人工隐藏与占位目录
 
-同一 profile 下同服务同账号换 Token 会续用原映射；同一 profile 下经 CLI 更换服务或账号建立独立连接、从空规则开始，旧连接不自动删除，旧连接不能借用新登录发表评论或取消 Run。切换 CLI profile 时（即使新旧 profile 指向同一账号），插件会清空前一 profile 在本机留下的全部规则、映射、缓存、人工隐藏、原生讨论、插件 Project 与占位目录，并从空规则重新开始；若某个插件 Project 内存在用户自建活跃工作区，则保留该 Project 和占位目录（仅删除插件讨论、归档插件工作区）并在设置页提示。切换清理不影响 Multica 远端数据与 CLI 配置，也不会取消远端 Run。
+- **组合筛选与只读预览**：支持按状态、负责人（成员 / Agent / Squad，“我”置顶；直接指派成员与指派其 Agent/Squad 分别计算）、Multica 项目、标签筛选。字段间为 AND，同一字段多选为 OR。勾选完整状态类别会自动纳入该类未来新增状态；取消其中某项则按具体状态保存。修改已有规则时弹窗会实时预览匹配数与预计新增/移出数，若有任务移出需在底栏确认归档。
+- **停用规则与重启用**：关闭工作区开关并确认停用后，已导入任务会本地归档，且不含用户自建活跃工作区的空插件 Project 会从侧边栏移除；日后重新启用时保留原筛选条件、讨论历史与人工隐藏记录。
+- **人工隐藏与独立恢复**：手动关闭讨论 tab 或归档 Paseo 工作区会记录**人工隐藏**，后续自动同步不会擅自重开。可在设置页 **人工隐藏** 区块分别点击 **恢复 Paseo 工作区**（不解除子讨论隐藏）或 **恢复讨论**（仅恢复所选讨论）。
+- **本地占位目录**：每个导入任务对应 `PASEO_HOME/multica-provider` 下的独立非 Git 占位目录，**不是远端代码仓库**（原生文件树和终端指向该占位目录，智能体实际执行仍在远端）。请勿把手动删除状态目录当作日常恢复手段，否则会丢失映射与隐藏设置。
 
-## 筛选与本地目录
+### 讨论、提及、Run 子代理与停止
 
-点击主侧边栏顶部导航区的 **Multica**（筛选图标），即可直接打开插件设置页配置过滤条件；也可从 Paseo 设置中的 **Multica** 进入。
+- **发言与提及 Agent**：在本地主讨论发送会创建新远端 Thread（成功后提示可在侧边栏打开）；在真实 Thread 发送会回复根评论。Paseo `0.16.0+` 输入框提供 **提及 Agent** 按钮，搜索并插入带身份 ID 的完整引用（裸手写 `@名字` 无法区分同名 Agent，而输入框自带的 `@` 菜单是 Paseo 工作区文件引用）。评论保存成功不代表远端一定触发了 Run；附件上传、评论编辑/删除与任务状态修改请在 Multica 网页端完成。
+- **Run 子代理与按需刷新**：每个 Multica Run 固定归属于触发它的 Thread（无评论关联时归属主讨论），首次确定后不再跨讨论迁移。父讨论时间线按触发评论与创建时间排定静态位置徽章（AskUser 提问卡片亦紧跟来源评论），真实状态、运行文本、思考、工具调用/结果、错误信息与远端路径均展示在只读 **Run 子代理** 中。打开讨论时恢复缓存，活跃 Run 每 2 秒增量刷新，终态补齐后停止。
+- **运行中发送模式**：普通发送直接发表评论，交由 Multica 排队或合并，不强制打断运行；显式 **interrupt** 先由宿主停止当前运行再发送新输入；显式 **queue** 由 Paseo 客户端暂存，待当前 tab 全部归属 Run 结束后释放。
+- **原生 Stop 范围**：点击原生 **Stop** 或关闭运行中的讨论 tab，会取消操作开始时归属该讨论的全部未结束 Run（跨 Thread 共用的同一 Run 会整体取消），不影响其他 tab 或随后新产生的 Run；部分取消失败会报错，可再次点击 Stop。归档整个 Paseo 工作区或停用筛选规则**不会**取消远端 Run。
 
-初始没有启用规则，**不导入任何任务**。在 **Multica 工作区与筛选规则** 的“未启用 · 不导入任务”列表点击目标 Multica 工作区的 **启用…**，先在弹窗中调整条件，再点 **启用并导入**。默认只匹配“未开始”和“进行中”状态类别，其他条件不限；重新启用保留此前保存的条件。已启用的 Multica 工作区排在前面，卡片显示条件摘要，点击 **编辑筛选** 修改后点 **保存**；有未保存修改时，关闭弹窗或取消需先确认放弃。编辑弹窗会只读预览匹配总数、当前已导入数和预计新增／移出数；预览成功且有任务移出时，保存前需在底栏确认归档，预览失败仍可保存。
+### 结构化提问卡片（AskUser）
 
-状态按类别分组：勾选类别纳入整类，今后新增的状态也会自动纳入；取消整类中的某个状态改为具体状态选择，只要仍有部分选择，保存时就按具体状态记录，今后新增的状态不会自动纳入。都不选表示不限状态。负责人按成员／Agent／Squad 分组，已验证用户显示为“我”并排在成员第一位；直接分配成员与分配其 Agent／Squad 是不同条件，需分别选择。Multica 项目与标签也用标签按钮多选，选项超过 8 个时可搜索，已选项始终显示，已不在目录的值仍可取消。字段间 AND，同字段多值 OR，多个标签命中任一即可。
+- **原生表单作答**：带有 `askuser.json`（`version: "1"`）附件的评论会在所属 Thread 渲染时间线卡片。当卡片待答且当前用户可作答时，插件同时挂载原生提问表单（即使讨论尚未打开，后台同步也会无中断加载该讨论以显示待输入提醒）。支持文本、单选、多选、自定义项与条件必填校验，提交后自动生成符合 Multica 网页端格式的 `**确认结果**` 回复。
+- **本地收起与远端跳过**：点击表单 **Dismiss** 仅在本地收起，随时可在时间线卡片点击 **重新展开作答**；若需真正跳过问题，请点击卡片上的 **跳过此卡 → 确认远端跳过**。针对全选填文本表单，插件会额外附加一题「提交确认」以确保本地收起不会误提交空答或半成品。点击原生 **Stop** 仅收起本地表单，不会远端跳过卡片。
 
-匹配任务动态进入原生项目树；退出筛选自动归档，重新匹配恢复原 ID 与历史。关闭已启用卡片的开关后，需在弹窗点击 **停用** 确认归档此 Multica 工作区已导入的任务，并移除已无活跃工作区的插件 Paseo 项目；若其中有用户自建的活跃工作区，则保留 Project。重新启用时可重建 Project 和任务的本地 Paseo 工作区外壳，Multica 任务、原讨论 ID、占位目录、评论与执行历史保持，人工隐藏继续有效。停用规则和归档整个 Paseo 工作区不取消远端 Run。关闭 tab 或手动归档 Paseo 工作区会持久人工隐藏，自动同步不会重新打开；在设置页 **人工隐藏** 点 **恢复 Paseo 工作区** 或 **恢复讨论**；恢复工作区不会解除其中讨论的隐藏，恢复指定讨论也保留其他隐藏。
+### 设置页数据重建
 
-每项任务有独立非 Git 占位目录；它**不是远端代码仓库**。原生文件和终端功能指向占位目录，Multica 执行仍在远端。状态和目录位于拥有者 daemon 的 `PASEO_HOME/multica-provider`，按服务／用户与稳定远端 ID 隔离。目录在归档后保留，仅在切换 CLI profile 清理时随旧数据删除（含用户自建活跃工作区的 Project 及其占位目录除外）；手动删除本地状态会失去当前 profile 的映射、隐藏意愿与已读缓存，不能当作日常恢复手段。
+当需要清理旧版历史时间线、重排已错位的历史条目或重置当前连接的本地投影时，可在设置页点击 **重建数据**（仅连接 `ready` 且无 profile 清理进行中时可用）：
 
-## 讨论、执行与停止
+1. **活跃 Run 预检**：若本地缓存发现当前连接仍有运行中的 Run，会列出对应讨论与 Run 并阻止开始（请等待结束或先手动 Stop）。
+2. **二次确认与执行**：确认框展示待清理的插件项目、工作区与讨论数量。确认后暂停后台同步，彻底删除当前连接的插件讨论、归档插件工作区、移除不含用户自建活跃工作区的插件项目，保留筛选规则与启用状态（清除人工隐藏与旧缓存），随后按规则重新导入。全程不会取消任何远端 Run，也不影响其他连接。
 
-本人普通评论显示为原生 user，其他成员及 agent 为带作者名称的 assistant；assistant 表示呈现角色。系统变化、已观察到的编辑和删除追加独立事件，不覆盖原始消息。首次导入只代表源端当前可获取的快照。历史与长正文按需分页，保留文本、Markdown 和已有附件链接；上传、编辑、删除评论及 Issue 状态修改仍在 Multica 完成。
+---
 
-在主讨论发送创建新 Thread，在真实 Thread 发送回复根评论。Paseo 0.16.0 及以上的讨论输入框提供 **提及 Agent** 选择器：搜索当前 Multica 工作区的 agent，选择后把带 ID 的完整引用插入光标处，随评论一起发送。Paseo 0.15 宿主没有该选择器。引用不能用同名裸 `@名字` 代替身份；宿主输入框的 `@` 候选是 Paseo 内置的工作区文件引用。输入通过本地校验后立即显示原生用户消息，远端发送在后台完成；失败时保留输入并追加一条错误。主讨论保存成功后提示“新 Thread 已建立，可在侧边栏打开。”；Thread 内保存成功不追加提示。评论保存不保证启动 Run。
+## 排障速查与已知边界
 
-每个 Multica Run ID 对应所属讨论下唯一的只读 **provider subagent**，标题为执行 agent 名称，描述为输入评论触发来源与创建时间；无输入关联时显示带创建时间的“任务级执行”，自身生成的评论不当作触发评论；重跑的新 Run ID 会创建新子代理。首次固定的展示归属不因后补关联或重连迁移。父讨论时间线中的 `sub_agent` 位置徽章固定为 completed，只标记出现位置；真实状态与执行内容显示在子代理中。queued、dispatched、running、waiting_local_directory、deferred 均显示运行中，细分状态变化追加简短说明。
-
-讨论在宿主打开（含导入）时，立即重建全部归属 Run 子会话并推送已读缓存；只有本进程实际打开过的讨论才补读远端明细，活跃 Run 每两秒刷新，终态成功补齐一次后停止；补齐前保持消息序号缺口，补齐后按可得源顺序展示。子代理立即显示已知 Run 终态，离线或明细读取失败不阻塞状态，后续执行消息仍可追加。子时间线按来源顺序显示运行文本、思考、工具调用及结果、任务错误／失败原因和远端目录；长内容拆为有界原生条目，源端明确截断时说明。触发评论、最终 agent 评论及 AskUser 卡片仍在所属讨论。旧执行段 renderer 和 `run.read` 等 RPC 已移除，旧数据可通过设置页重建清理。
-
-普通运行中发送仅发表普通评论，由 Multica 排队或合并，不强制远端 steering。显式 **interrupt** 先由宿主停止，再接收新输入；停止未确认时不会继续替换。显式 **queue** 的输入先由 Paseo 客户端保留，全部归属 Run 结束后才释放给插件；它与远端 queued Run 不同。队列“立即发送”遵循当前 composer 模式，可能先中断。实际原生 queue 控件及视觉体验尚未验收。
-
-原生 **Stop** 和关闭运行中 tab，只取消操作开始时归属此 tab 的全部未结束 Run；不扩大到后来 Run 或其他 tab。跨 Thread 的同一 Run 整体取消。取消与完成竞态保留服务器实际终态；HTTP 成功不等于进程已退出。部分失败直接返回原生请求错误，用户可再次点击 Stop；插件不持久化停止记录或提供单 Run 重试入口。
-
-## 设置页数据重建
-
-在 Multica 设置页点击 **重建数据**，仅连接 ready 且 profile 清理完成时可用；重建保留当前 profile 的数据归属。预检按当前连接的本地缓存检查活跃 Run，并列出阻塞的讨论和 Run；请等其结束或先手动 Stop。无阻塞时，二次确认框展示将删除的 Paseo 项目、归档的插件工作区和彻底删除的插件讨论数量，明确保留筛选规则与启用状态、清除人工隐藏及其余缓存。含用户自建活跃工作区的项目保留。
-
-确认后 daemon 暂停后台同步，依次通过公开 SDK 执行 `deleteAgent`、`archiveWorkspace`、`removeProject`，清空当前连接除规则外的状态，再按规则重新导入；其他连接不受影响。没有启用规则时只做清理，导入完成数为 0。旧工作区作为空归档记录留在宿主；每次重建递增持久化代数，使立即重导及以后普通同步导入的任务都使用新的 workspaceId 与 idempotencyKey，讨论也获得新的 agentId 和干净时间线，Run 展示归属重新判定。
-
-进度框显示“删除”和“导入（已完成 x / 共 N 个任务）”，中途不提供取消。离开设置页后 daemon 继续运行，回来可看进度或结果；完成后恢复后台同步。进度只在当前 daemon 进程内保留，失败或重启后再次发起从头重建。不调用 `archiveAgent`，不通过中断取消远端 Run；预检后新出现的远端 Run 不在本地阻塞检查的保证范围内。
-
-## 结构化提问卡片
-
-普通评论（含子回复）中的 `askuser.json`（`version: "1"`、附件类型 `application/json`）会在所属 Thread 显示稳定的时间线卡片，保留标题、完整警示说明、题目与选项。当前连接用户可答且卡片未决时，插件提供 Paseo 原生 `QuestionFormCard`；后台同步也会主动加载符合条件的未打开讨论，使宿主根据待决问题显示 `needs_input`，人工隐藏和归档仍优先。卡片支持文本、单选、多选、自定义选项及条件必填校验；提交会生成 Multica 网页格式的 `**确认结果**` 评论，子回复卡片的回答直接指向卡片评论。原生权限响应等待同 key 有限次 send 的成功或失败；**评论已保存**不等于 Run 已开始，失败时显示错误，由用户重新回答。卡片只保留发送中、已保存和失败状态，不核实或显式重发。
-
-原生 **Dismiss** 仅本地收起，随后可在时间线点 **重新展开作答**；远端跳过使用独立的 **跳过此卡 → 确认远端跳过** 两步操作。全选填文本表单额外显示一题 **提交确认**：选中「确认提交以上非空回答」后再提交，确认题不进入远端回答正文；即使已填写文字并选中确认，Dismiss 仍仅本地收起。缺少确认的模糊 allow 或原题全空的回答也仅本地收起；含必填题或选项题的表单不增加确认题。每题携带「仅本地收起（不跳过）」按钮文案。条件校验失败会保留表单，宿主显示通用错误，详细条件提示见题目与时间线。首次发现的新卡片在原生加载完成后走 live 权限路径，重启缓存仍静默回放；通知正文包含可读标题和说明，实际系统通知仍待手动验收，详见 [主动加载与通知边界](docs/askuser-wakeup.md)。
-
-已答、已跳过、非指定用户、离线或已归档卡片保留只读信息；跳过时间和操作者仅在远端提供时显示。内容较长时点 **读取完整提问** 阅读全部详情。Stop 仅收起本地待决表单，不会远端跳过卡片；回答／跳过不再带 Stop epoch 栅栏，普通聊天保持普通评论语义。本功能尚未安装或 reload 到用户 daemon，真实原生表单、通知及远端跳过协议仍待 [#26 手动验收](docs/askuser-acceptance.md)。
-
-附件按连接、Issue 和附件 ID 持久缓存，后台同步与打开 Thread 共用下载；只允许当前 API 同源地址，拒绝重定向和超过 64 KiB 的正文。下载或严格 schema 校验失败会显示原因及原评论／附件引用，普通评论继续同步。仅有未确认终态卡片的 Issue 才额外读取一次完整 `timeline`，同时核对直接回复与跳过状态，避免摘要正文截断造成误判。已确认终态继续使用缓存；来源删除、离线及换账号后的已读卡片保留在原生历史和缓存中；远端 403／404 直接报告错误。核实／重发、Stop 栅栏和只读快照已随保证 A／B／C 取消。
-
-## 同步与问题处理
-
-客户端贡献加载后立即并始终每 10 秒调用一次引导；服务端同步已就绪时只核对 daemon 身份并确保定时器存在，不重新做全量同步。daemon 每 15 秒核对，WebSocket 事件触发快照更新。多个客户端共用同步器，关闭客户端不停止已启动的后台循环。daemon／插件重启后仍需至少一次客户端连接重新引导。设置页聚合同步与隐藏状态；讨论内只显示历史读取失败及重试入口。
-
-| 状态 | 处理方式 |
+| 现象 | 处理方式 |
 | --- | --- |
-| CLI 配置或登录异常 | 在显示的 daemon 主机，以同一用户修复 CLI／重新登录，再刷新。 |
-| 任务上下文受隔离 | 检查 daemon 的任务环境与私有配置注入。 |
-| 网络或同步失败 | 保留缓存，检查原 API、权限和网络；失败列表不会被当成空任务范围。 |
-| 评论发送失败 | 查看原生错误，在 Multica 确认是否已保存，再决定是否从输入框重发。 |
-| Stop 失败 | 再次点击原生 Stop；HTTP 成功不证明远端进程已经退出。 |
-| 任务从完整筛选列表消失 | 按筛选退出归档；已读内容保留在原生归档历史，写入遇到 403／404 直接报告远端错误。 |
-| Paseo 更新后 worker 协议不匹配 | 核对 daemon 与安装文件版本，按正常部署方式重启目标 daemon，再检查插件状态。 |
+| CLI 配置缺失或登录失效 | 在提示的 daemon 主机，以同一运行用户修复 CLI 配置或重新执行登录命令，随后点击设置页「刷新」。 |
+| 任务上下文受隔离 | 检查 daemon 进程的隔离环境变量与 `MULTICA_TASK_CONFIG_ROOT` 私有配置注入。 |
+| 网络异常或同步失败 | 本地已有缓存保持可读；检查 Multica API 连通性与权限（同步失败不会被误判为“任务退出筛选”而批量归档）。 |
+| 评论发送或卡片提交失败 | 查看原生错误提示，先在 Multica 确认评论是否实际已落库，再决定是否重新发送。 |
+| 点击 Stop 报错 | 再次点击原生 Stop；注意取消接口返回 HTTP 成功不代表远端执行进程已完成物理退出。 |
+| Paseo 升级后插件加载报错 | 确认运行的 daemon 进程版本与插件安装目录依赖一致，按部署方式重启目标 daemon。 |
 
-2026-11-25 精简明确取消以下保证：
+**已知边界（明确不提供的保证）**：
 
-- **取消保证 A**：不再保存评论投递原文、核实回执或提供风险确认重发。一次发送带同一 `Idempotency-Key`，网络错误或 5xx 最多尝试三次；失败输入不由插件在重启后恢复，用户重发可能重复评论或执行。
-- **取消保证 B**：不再持久保存停止记录、跟踪进程清理、提供跨 tab 单 Run 重试或 Stop epoch 投递栅栏；已在途的评论不会因 Stop 自动撤回。
-- **取消保证 C**：不再提供独立只读历史快照浏览器，也不额外区分筛选退出与对象失权／删除；原生历史与已读缓存继续保留。
+- **评论发送与草稿**：单次发送携带固定 `Idempotency-Key` 在网络错误或 `5xx` 时最多自动尝试 3 次；失败后不跨进程重启恢复输入草稿，也不提供历史回执核实入口，手动重发可能产生重复评论或触发新执行。
+- **停止边界**：不持久化停止告警队列或单 Run 重试面板，不跟踪远端进程物理退出，也不撤回点击 Stop 前已在途的评论或回答。
+- **归档与权限变更**：不提供独立于原生归档之外的只读快照浏览器；从完整筛选结果中消失的任务（含远端删除或失权）统一做本地归档并保留原生已读历史，后续写入若遇 `403`/`404` 直接透传远端错误。
 
-## 文档与开发依据
+---
 
-- [交付验收记录](docs/acceptance.md)：版本、实际结果、自动化范围和未验证项。
-- [AskUser 验收与手动清单](docs/askuser-acceptance.md)、[主动加载与通知边界](docs/askuser-wakeup.md)。
-- [当前规格](docs/spec.md)：包含精简后行为与取消的保证。
-- [术语表](GLOSSARY.md)、[设计与原始证据](docs/design.md)、[实现上下文](CONTEXT.md)。
-- [架构决定](docs/adr)：[Thread](docs/adr/0001-thread-as-paseo-session.md)、[目录](docs/adr/0002-use-existing-paseo-with-placeholder-directories.md)、[Run 归属](docs/adr/0003-unique-run-display-ownership.md)、[Stop](docs/adr/0004-native-interrupt-stops-remote-run.md)、[历史](docs/adr/0005-preserve-native-comment-history.md)、[身份](docs/adr/0006-isolate-connection-identities.md)、[评论重试](docs/adr/0007-retry-comments-only-with-deduplication.md)、[CLI 登录](docs/adr/0008-reuse-multica-cli-authentication.md)、[提及选择器](docs/adr/0009-composer-mention-picker.md)、[切换 profile 清理](docs/adr/0010-clear-local-data-on-profile-switch.md)、[Run 子代理](docs/adr/0011-run-as-provider-subagent.md)、[数据重建](docs/adr/0012-data-rebuild.md)。
+## 文档索引
 
-CLI 兼容依据为 Multica CLI 0.6.3 固定提交 [`18fa9f7`](https://github.com/multica-ai/multica/tree/18fa9f728a9e25f2465df2789631edb2a75442ad)。开发检查使用真实锁定 SDK、临时 CLI 配置、隔离 HTTP/WebSocket 和公开贡献／provider／RPC 边界；这些测试覆盖故障与竞态，但不能代替真实宿主或真实服务验收。构建后 `dist` 中的副本不进入类型检查或测试发现。
+- [领域术语表](GLOSSARY.md)：跨产品核心概念定义与命名边界。
+- [当前行为规格](docs/spec.md)：完整功能规则、状态流转与协议细节。
+- [上游设计依据](docs/design.md)：Paseo 与 Multica 固定版本源码核查约束。
+- [架构决策记录（ADR）](docs/adr/README.md)：`0001`–`0012` 关键设计取舍与替代方案。
+- [开发与 Agent 指南](AGENTS.md)：目录职责地图、开发命令与宿主不变量。
+- [交付验收记录](docs/acceptance.md) 与 [AskUser 验收及手动清单](docs/askuser-acceptance.md)：已验证矩阵与待手动验收项（如原生 `queue` 控件、自部署实例与 `#26` AskUser 真机通知/跳过采样）。
