@@ -333,7 +333,7 @@ it.each(["removes", "retains"] as const)("profile purge %s uncached Paseo projec
   expect(await f.server.syncRpc(syncBootstrap, {}, f.paseo)).toEqual({ status: "ready" });
   if (action === "removes") {
     expect(f.host.removeProject).toHaveBeenCalledExactlyOnceWith(project.projectId);
-    expect(f.host.archiveWorkspace).not.toHaveBeenCalledWith(workspace.id);
+    expect(f.host.archiveWorkspace).toHaveBeenCalledWith(workspace.id);
     await expect(readFile(join(project.cwd, "user-file"))).rejects.toMatchObject({ code: "ENOENT" });
   } else {
     expect(f.host.removeProject).not.toHaveBeenCalled();
@@ -364,6 +364,59 @@ it.each(["directory", "cached ID"])("profile purge archives workspaces identifie
   expect((await waitForSync(f.server, f.paseo)).status).toBe("ready");
   expect(f.host.removeProject).not.toHaveBeenCalled();
   expect(f.host.archiveWorkspace.mock.calls.map(([id]) => id).sort()).toEqual([cachedWorkspace.id, "discussion-workspace"].sort());
+});
+
+it("profile purge deletes all discussions and archives all plugin workspaces before removing any Paseo project", async () => {
+  const f = await fixture();
+  await f.login(2);
+  await f.server.syncRpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, f.paseo);
+  const agentIds = f.agents.map(agent => agent.id), workspaceIds = f.workspaces.map(workspace => workspace.id);
+  const removedProject = f.projects[0], retainedProject = f.projects[1];
+  f.workspaces.push({ id: "user-workspace", projectId: retainedProject.projectId });
+  const effects: string[] = [];
+  const removeAgent = f.host.deleteAgent.getMockImplementation()!, archive = f.host.archiveWorkspace.getMockImplementation()!, removeProject = f.host.removeProject.getMockImplementation()!;
+  f.host.deleteAgent.mockImplementation(async id => { effects.push(`deleteAgent:${id}`); await removeAgent(id); });
+  f.host.archiveWorkspace.mockImplementation(async id => { effects.push(`archiveWorkspace:${id}`); return archive(id); });
+  f.host.removeProject.mockImplementation(async id => { effects.push(`removeProject:${id}`); await removeProject(id); });
+  await f.login(1, f.primary.apiUrl, "office");
+  f.server.setSettings(multicaSettings.id, { profile: "office" });
+  expect((await waitForSync(f.server, f.paseo)).status).toBe("ready");
+  expect(effects).toEqual([
+    ...agentIds.map(id => `deleteAgent:${id}`),
+    ...workspaceIds.map(id => `archiveWorkspace:${id}`),
+    `removeProject:${removedProject.projectId}`,
+  ]);
+  expect(f.projects).toEqual([retainedProject]);
+  expect(f.workspaces.find(workspace => workspace.id === "user-workspace")?.archived).toBeUndefined();
+});
+
+it("profile purge rechecks every active workspace page after archive and retains a project with a newly created internal user workspace", async () => {
+  const f = await fixture({ respectVisibility: true });
+  const project = f.projects[0], pluginWorkspace = f.workspaces[0];
+  f.workspaces.push({ id: "unrelated-workspace", projectId: "user-project" });
+  const list = f.host.fetchWorkspaces.getMockImplementation()!;
+  f.host.fetchWorkspaces.mockImplementation(async input => {
+    const page = await list(input);
+    const offset = Number((input as { page?: { cursor?: string } } | undefined)?.page?.cursor ?? 0);
+    const hasMore = offset + 1 < page.entries.length;
+    return { entries: page.entries.slice(offset, offset + 1), pageInfo: { hasMore, nextCursor: hasMore ? String(offset + 1) : undefined } };
+  });
+  const archive = f.host.archiveWorkspace.getMockImplementation()!;
+  f.host.archiveWorkspace.mockImplementation(async id => {
+    const result = await archive(id);
+    if (id === pluginWorkspace.id) f.workspaces.push({ id: "new-user-workspace", projectId: project.projectId, internal: true });
+    return result;
+  });
+  await f.login(1, f.primary.apiUrl, "office");
+  f.server.setSettings(multicaSettings.id, { profile: "office" });
+  expect((await waitForSync(f.server, f.paseo)).status).toBe("ready");
+  expect(f.host.archiveWorkspace).toHaveBeenCalledExactlyOnceWith(pluginWorkspace.id);
+  expect(f.host.removeProject).not.toHaveBeenCalled();
+  const userWorkspace = f.workspaces.find(workspace => workspace.id === "new-user-workspace");
+  expect(userWorkspace).toMatchObject({ internal: true });
+  expect(userWorkspace?.archived).toBeUndefined();
+  expect(f.host.fetchWorkspaces).toHaveBeenLastCalledWith({ filter: { includeBackground: true, includeInternal: true }, page: { limit: 100, cursor: "1" } });
+  expect(await f.server.rpc(connectionStatus, {}, f.paseo)).toMatchObject({ sync: { retainedProjects: [{ name: "Product", cwd: project.cwd }] } });
 });
 
 it("a failed partial purge preserves its owner, blocks synchronization, restores and rule writes, then resumes on bootstrap", async () => {

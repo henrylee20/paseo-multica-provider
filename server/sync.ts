@@ -428,17 +428,20 @@ export class SidebarSynchronizer {
 
       const projects = (await host.listProjects()).projects;
       const root = resolve(this.options.store.directory, "placeholders"), prefix = root + sep;
-      const active: Awaited<ReturnType<NativeHost["fetchWorkspaces"]>>["entries"] = [];
-      let cursor: string | undefined;
-      const cursors = new Set<string>();
-      for (;;) {
-        const page = await host.fetchWorkspaces({ filter: { includeBackground: true, includeInternal: true }, page: { limit: 100, cursor } });
-        active.push(...page.entries);
-        if (!page.pageInfo.hasMore) break;
-        const next = page.pageInfo.nextCursor;
-        if (!next || cursors.has(next)) throw new Error("Incomplete native workspace pagination");
-        cursors.add(next); cursor = next;
-      }
+      const fetchActiveWorkspaces = async () => {
+        const active: Awaited<ReturnType<NativeHost["fetchWorkspaces"]>>["entries"] = [];
+        let cursor: string | undefined;
+        const cursors = new Set<string>();
+        for (;;) {
+          const page = await host.fetchWorkspaces({ filter: { includeBackground: true, includeInternal: true }, page: { limit: 100, cursor } });
+          active.push(...page.entries);
+          if (!page.pageInfo.hasMore) return active;
+          const next = page.pageInfo.nextCursor;
+          if (!next || cursors.has(next)) throw new Error("Incomplete native workspace pagination");
+          cursors.add(next); cursor = next;
+        }
+      };
+      const active = await fetchActiveWorkspaces();
       for (const workspace of active) if (workspace.workspaceDirectory?.startsWith(prefix)) knownWorkspaces.add(workspace.id);
       const candidates = new Map<string, { cwd: string; name: string }>();
       for (const conn of Object.values(state.connections)) {
@@ -453,25 +456,19 @@ export class SidebarSynchronizer {
           name: candidates.get(project.projectId)?.name ?? project.projectDisplayName ?? project.projectId });
       }
       const retainedProjects: Array<{ name: string; cwd: string }> = [];
-      const removedProjects = new Set<string>();
-      const archivedWorkspaces = new Set<string>();
-      const archive = async (id: string) => {
-        if ((await host.archiveWorkspace(id)).error) throw new Error("Native workspace archive failed");
-        archivedWorkspaces.add(id);
-      };
+      for (const workspace of active) if (knownWorkspaces.has(workspace.id)) {
+        if ((await host.archiveWorkspace(workspace.id)).error) throw new Error("Native workspace archive failed");
+      }
       for (const [projectId, cached] of candidates) {
         const project = projects.find(project => project.projectId === projectId);
         if (!project || project.projectRootPath !== cached.cwd || project.projectKind !== "non_git") continue;
-        const workspaces = active.filter(workspace => workspace.projectId === projectId);
-        if (workspaces.some(workspace => !knownWorkspaces.has(workspace.id))) {
+        const remaining = await fetchActiveWorkspaces();
+        if (remaining.some(workspace => workspace.projectId === projectId)) {
           retainedProjects.push({ name: cached.name, cwd: cached.cwd });
-          for (const workspace of workspaces) if (knownWorkspaces.has(workspace.id)) await archive(workspace.id);
         } else {
           await host.removeProject(projectId);
-          removedProjects.add(projectId);
         }
       }
-      for (const workspace of active) if (knownWorkspaces.has(workspace.id) && !removedProjects.has(workspace.projectId) && !archivedWorkspaces.has(workspace.id)) await archive(workspace.id);
 
       const inside = (target: string) => { const path = relative(root, resolve(target)); return !!path && !path.startsWith("..") && !isAbsolute(path); };
       const preserved = retainedProjects.map(project => resolve(project.cwd));
