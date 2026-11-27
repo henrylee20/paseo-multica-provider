@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { mkdir, readdir, rm, rmdir } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { mkdir } from "node:fs/promises";
+import { join, resolve, sep } from "node:path";
 import type { PaseoApi } from "@getpaseo/client";
 import { z } from "zod";
 import { taskRuleSchema, type TaskRule, type SyncStatus } from "../shared/contracts.js";
@@ -15,6 +15,7 @@ import type { DiscussionMetadata } from "./discussion-metadata.js";
 import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
 import { issuePage, matchingIssues, remoteIssueSchema, supportsIssueIds, workspaceAgents, workspaceMembers, workspaceProjects, workspaceSquads, workspaceStatuses, workspaces as readWorkspaces, type RemoteWorkspace } from "./multica-api.js";
 import { issueLabels, mainPersistence, providerId } from "./discussion-identity.js";
+import { removePlaceholderTree } from "./mapped-objects.js";
 
 function stableId(...parts: string[]) { return createHash("sha256").update(JSON.stringify(parts)).digest("hex"); }
 
@@ -470,21 +471,7 @@ export class SidebarSynchronizer {
         }
       }
 
-      const inside = (target: string) => { const path = relative(root, resolve(target)); return !!path && !path.startsWith("..") && !isAbsolute(path); };
-      const preserved = retainedProjects.map(project => resolve(project.cwd));
-      const clean = async (directory: string) => {
-        if (preserved.includes(directory)) return;
-        for (const entry of await readdir(directory, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return []; throw error; })) {
-          const target = resolve(directory, entry.name);
-          if (!inside(target)) throw new Error("Unsafe placeholder removal target");
-          if (preserved.includes(target)) continue;
-          if (entry.isDirectory() && preserved.some(path => path.startsWith(target + sep))) {
-            await clean(target);
-          } else await rm(target, { recursive: true, force: true });
-        }
-        await rmdir(directory).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT" && error.code !== "ENOTEMPTY") throw error; });
-      };
-      await clean(root);
+      await removePlaceholderTree(root, retainedProjects.map(project => project.cwd));
       await this.options.store.update(state => { state.connections = {}; state.owner = { profile: targetProfile }; });
       for (const connectionKey of Object.keys(state.connections)) await this.options.store.removeRunDetails(connectionKey);
       this.syncState.retainedProjects = retainedProjects.length ? retainedProjects : undefined;

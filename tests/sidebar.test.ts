@@ -2184,6 +2184,72 @@ it("rebuild preserves a project containing a user workspace and supports cleanup
   expect((await new StateStore(store.directory).read()).connections[connectionKey]).toMatchObject({ projects: {}, issues: {}, rules: { "remote-workspace": { enabled: false } } });
 });
 
+it.each(["discovery", "recheck"])("rebuild removes local placeholder files while preserving projects retained during %s and other connections", async phase => {
+  const f = await fixture(60_000); f.remote.acknowledgeEvents = false;
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await enableSecondWorkspace(f);
+  const connectionKey = (await f.server.rpc(connectionStatus, {}, f.paseo)).connectionKey!;
+  const [removedProject, retainedProject] = f.native.projects;
+  const removedMarker = join(removedProject.cwd, "removed-marker"), retainedMarker = join(retainedProject.cwd, "retained-marker");
+  const otherDirectory = join(f.home, "multica-provider/placeholders", "f".repeat(20), "other-project");
+  const otherMarker = join(otherDirectory, "other-marker");
+  await mkdir(otherDirectory, { recursive: true });
+  await writeFile(removedMarker, "remove"); await writeFile(retainedMarker, "retain"); await writeFile(otherMarker, "other");
+  const userWorkspace = { id: "user-workspace", projectId: retainedProject.projectId, cwd: retainedProject.cwd, title: "Mine" };
+  if (phase === "discovery") f.native.workspaces.push(userWorkspace);
+  else {
+    const trigger = f.native.workspaces.find(workspace => workspace.projectId === retainedProject.projectId)!.id;
+    const archive = f.host.archiveWorkspace.bind(f.host);
+    vi.spyOn(f.host, "archiveWorkspace").mockImplementation(async id => {
+      const result = await archive(id);
+      if (id === trigger) f.native.workspaces.push(userWorkspace);
+      return result;
+    });
+  }
+  expect(await f.server.rpc(rebuildPreflight, { connectionKey }, f.paseo)).toMatchObject({ projects: phase === "discovery" ? 1 : 2, workspaces: 4, discussions: 4 });
+  expect(await f.server.rpc(rebuildStart, { connectionKey }, f.paseo)).toMatchObject({ started: true });
+  expect(await finishRebuild(f.server, f.paseo, connectionKey)).toMatchObject({ status: "completed", completed: 4, total: 4 });
+  expect(f.effects).toContain(`removeProject:${removedProject.projectId}`);
+  expect(f.effects).not.toContain(`removeProject:${retainedProject.projectId}`);
+  await expect(readFile(removedMarker)).rejects.toMatchObject({ code: "ENOENT" });
+  expect((await stat(removedProject.cwd)).isDirectory()).toBe(true);
+  expect(await readFile(retainedMarker, "utf8")).toBe("retain");
+  expect(await readFile(otherMarker, "utf8")).toBe("other");
+});
+
+it("rebuild fails before resetting local state when placeholder cleanup fails and retries after the scope is repaired", async () => {
+  const f = await fixture(60_000); f.remote.acknowledgeEvents = false;
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const connectionKey = (await f.server.rpc(connectionStatus, {}, f.paseo)).connectionKey!;
+  await f.dispose();
+  const store = new StateStore(join(f.home, "multica-provider"));
+  await store.update(state => { state.connections[connectionKey].rules["remote-workspace"].enabled = false; });
+  await mkdir(store.runDetailsDirectory(connectionKey), { recursive: true });
+  const detailsMarker = join(store.runDetailsDirectory(connectionKey), "cached.json");
+  await writeFile(detailsMarker, "preserved until cleanup succeeds");
+  const scope = join(store.directory, "placeholders", connectionKey.slice(0, 20));
+  const remove = f.host.removeProject.bind(f.host);
+  const corruptScope = vi.spyOn(f.host, "removeProject").mockImplementation(async id => {
+    const result = await remove(id);
+    await rm(scope, { recursive: true, force: true });
+    await writeFile(scope, "not a directory");
+    return result;
+  });
+  const { server } = f.start();
+  expect(await server.rpc(rebuildStart, { connectionKey }, f.paseo)).toMatchObject({ started: true });
+  expect(await finishRebuild(server, f.paseo, connectionKey)).toMatchObject({ status: "failed", step: "清理本地占位目录", message: expect.stringContaining("ENOTDIR") });
+  const local = (await new StateStore(store.directory).read()).connections[connectionKey];
+  expect(local.rebuildGeneration).toBeUndefined();
+  expect(Object.keys(local.issues)).toHaveLength(2);
+  expect(await readFile(detailsMarker, "utf8")).toBe("preserved until cleanup succeeds");
+  corruptScope.mockRestore();
+  await rm(scope); await mkdir(scope);
+  expect(await server.rpc(rebuildStart, { connectionKey }, f.paseo)).toMatchObject({ started: true });
+  expect(await finishRebuild(server, f.paseo, connectionKey)).toMatchObject({ status: "completed", total: 0 });
+  expect((await new StateStore(store.directory).read()).connections[connectionKey].rebuildGeneration).toBe(1);
+  await expect(stat(store.runDetailsDirectory(connectionKey))).rejects.toMatchObject({ code: "ENOENT" });
+});
+
 it("rebuild waits for in-flight synchronization, reports failures and restarts cleanup from the beginning", async () => {
   const f = await fixture();
   await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);

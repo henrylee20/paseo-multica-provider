@@ -12,6 +12,7 @@ import type { RunSynchronizer } from "./runs.js";
 import { StateStore, connectionState } from "./state.js";
 import type { SidebarSynchronizer } from "./sync.js";
 import { workspaces as readWorkspaces, type RemoteWorkspace } from "./multica-api.js";
+import { removePlaceholderTree } from "./mapped-objects.js";
 
 async function directory<T>(page: (cursor?: string) => Promise<{ entries: T[]; pageInfo: { hasMore: boolean; nextCursor?: string | null } }>): Promise<T[]> {
   const entries: T[] = [], seen = new Set<string>();
@@ -107,10 +108,11 @@ export class DataRebuild {
     for (const issue of Object.values(local?.issues ?? {})) if (issue.projectId && !candidates.has(issue.projectId)) {
       candidates.set(issue.projectId, local?.projects[issue.remoteWorkspaceId]?.cwd ?? resolve(issue.cwd, ".."));
     }
-    const projects = (await host.listProjects()).projects.filter(project => project.projectKind === "non_git" &&
-      (project.projectRootPath.startsWith(prefix) || candidates.get(project.projectId) === project.projectRootPath))
-      .filter(project => !active.some(workspace => workspace.projectId === project.projectId && !workspaceIds.has(workspace.id)));
-    return { agents, addresses: [...discussions.values()].map(({ address }) => address), workspaceIds, projects };
+    const ownedProjects = (await host.listProjects()).projects.filter(project => project.projectKind === "non_git" &&
+      (project.projectRootPath.startsWith(prefix) || candidates.get(project.projectId) === project.projectRootPath));
+    const projects = ownedProjects.filter(project => !active.some(workspace => workspace.projectId === project.projectId && !workspaceIds.has(workspace.id)));
+    return { agents, addresses: [...discussions.values()].map(({ address }) => address), workspaceIds, projects,
+      retainedProjects: ownedProjects.filter(project => !projects.includes(project)) };
   }
   async preflight(connectionKey: string, paseo: PaseoApi) {
     const connection = await this.current(connectionKey);
@@ -152,11 +154,15 @@ export class DataRebuild {
           if (result.error) throw new Error(result.error);
         }
         progress.step = "删除 Paseo 项目";
+        const preserved = found.retainedProjects.map(project => project.projectRootPath);
         for (const project of found.projects) {
           // Recheck after archive: a user may have created a workspace meanwhile.
           const active = await directory(cursor => host.fetchWorkspaces({ filter: { includeBackground: true, includeInternal: true }, page: { limit: 100, cursor } }));
           if (!active.some(workspace => workspace.projectId === project.projectId)) await host.removeProject(project.projectId);
+          else preserved.push(project.projectRootPath);
         }
+        progress.step = "清理本地占位目录";
+        await removePlaceholderTree(join(this.store.directory, "placeholders", connectionKey.slice(0, 20)), preserved);
         progress.step = "清空本地状态";
         await this.store.removeRunDetails(connectionKey);
         await this.store.update(state => {

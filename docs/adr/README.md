@@ -15,4 +15,4 @@
 | [0009](./0009-composer-mention-picker.md) | 输入框提及选择器使用 composer item 并镜像讨论身份 | Paseo `0.16+` 注册 `multica-mention` 插入带 ID 的规范引用，由 daemon 将讨论标签镜像至 `metadata` |
 | [0010](./0010-clear-local-data-on-profile-switch.md) | 切换 CLI profile 时清空本机插件数据 | 以持久归属 `state.owner.profile` 驱动切换清理，清空旧 profile 本机数据且保留含用户自建工作区的 Project |
 | [0011](./0011-run-as-provider-subagent.md) | 将每个 Run 呈现为所属讨论下的 provider subagent | 以 `session.subsession` 投影只读 Run 子代理与静态位置徽章，取代旧自定义执行段行与按需读取 RPC |
-| [0012](./0012-data-rebuild.md) | 通过设置页数据重建清理并重新导入当前连接数据 | 串行执行 `deleteAgent` → `archiveWorkspace` → `removeProject` 并递增 `rebuildGeneration`，保留筛选规则重导 |
+| [0012](./0012-data-rebuild.md) | 通过设置页数据重建清理并重新导入当前连接数据 | 串行执行 `deleteAgent` → `archiveWorkspace` → `removeProject` → 清理占位目录，并递增 `rebuildGeneration`，保留筛选规则重导 |
