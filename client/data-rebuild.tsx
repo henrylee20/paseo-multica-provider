@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Text, View } from "react-native";
 import { useRpc, type PluginSurfaceProps } from "@getpaseo/plugin/client";
-import { Modal, SettingsAction, SettingsCard } from "@getpaseo/plugin/client/ui";
+import { Modal, SettingsAction, SettingsCard, SettingsSection } from "@getpaseo/plugin/client/ui";
 import { rebuildPreflight, rebuildStart, rebuildStatus, type RebuildBlocker, type RebuildProgress } from "../shared/rebuild.js";
 import { RuleButton } from "./ui-kit.js";
 import { runStatusLabel } from "./format.js";
@@ -53,7 +53,7 @@ export function DataRebuild({ connectionKey, ready, disabledReason, theme, onRef
   }
   const text = { color: theme.colors.foreground };
   const canForce = !!confirmation?.blockers.length && confirmation.blockers.every(group => group.runs.every(run => run.verification === "unconfirmable"));
-  return <>
+  return <SettingsSection title="本地数据">
     <SettingsCard><SettingsAction label="重建数据" actionLabel={running ? "查看重建进度" : busy ? "正在预检…" : "重建数据"} disabled={!ready || busy}
       hint={!ready ? disabledReason ?? "仅连接就绪时可重建数据，请先恢复 CLI 连接。" : "清理当前连接的 Paseo 数据并按保留的筛选规则重新导入。"} error={error} onPress={() => { void inspect(); }} /></SettingsCard>
     {confirmation ? <Modal open title="确认重建数据" onOpenChange={open => { if (!open && !busy) setConfirmation(null); }}>
@@ -86,5 +86,5 @@ export function DataRebuild({ connectionKey, ready, disabledReason, theme, onRef
           <View style={{ flexDirection: "row", justifyContent: "flex-end" }}><RuleButton theme={theme} onPress={() => { setVisible(false); onRefresh(); }}>关闭</RuleButton></View></>}
       </Modal.Content>
     </Modal> : null}
-  </>;
+  </SettingsSection>;
 }

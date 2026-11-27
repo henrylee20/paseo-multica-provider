@@ -653,6 +653,7 @@ it("switches attachments with a new RPC and discards a late response for the pre
 async function settingsHarness(answer: Answer, host: { composerItems?: boolean } = {}) {
   const tree = componentTree();
   const calls: Array<{ name: string; input: unknown }> = [];
+  const sections: string[] = [];
   const actions: Array<{ label: string; hint?: string; actionLabel: string; disabled?: boolean; onPress(): unknown }> = [];
   const switches: Array<{ label: string; value: boolean; disabled?: boolean; onValueChange(value: boolean): unknown }> = [];
   const selects: Array<{ label: string; value: string; options: { label: string; value: string }[]; disabled?: boolean; hint?: string; error?: string; onValueChange(value: string): unknown }> = [];
@@ -683,7 +684,7 @@ async function settingsHarness(answer: Answer, host: { composerItems?: boolean }
     },
     "@getpaseo/plugin/client/ui": {
       Markdown: ({ children }: { children: string }) => children, Icon: () => null, ExternalLink: ({ children }: { children: unknown }) => children,
-      SettingsSection: passthrough, SettingsCard: passthrough, SettingsRow: passthrough,
+      SettingsSection: (props: Record<string, unknown>) => { sections.push(String(props.title ?? "")); return passthrough(props); }, SettingsCard: passthrough, SettingsRow: passthrough,
       SettingsAction: (props: typeof actions[number] & { error?: string }) => { actions.push(props); return [props.label, props.hint, props.error, props.actionLabel]; },
       SettingsSwitch: (props: typeof switches[number] & { hint?: string; error?: string }) => { switches.push(props); return [props.label, props.hint, props.error]; },
       SettingsSelect: (props: typeof selects[number]) => { selects.push(props); return [props.label, props.hint, props.error]; },
@@ -703,11 +704,11 @@ async function settingsHarness(answer: Answer, host: { composerItems?: boolean }
     ...(host.composerItems ? { addComposerItem: (entry: { id: string }) => { composerItems.push(entry.id); return () => {}; } } : {}) });
   const colors = { surface0: "base", surface1: "raised", surface2: "control", border: "border", accent: "accent", accentForeground: "on-accent", foreground: "fg", foregroundMuted: "muted", statusDanger: "danger", statusWarning: "warning", statusSuccess: "success" };
   return {
-    calls, actions, switches, selects, pressables, inputs, modals, modalContents, copied, opened, navigation, scrolls, composerItems,
+    calls, sections, actions, switches, selects, pressables, inputs, modals, modalContents, copied, opened, navigation, scrolls, composerItems,
     settings, settingsSave, settingsReload, settingsReset,
     setProfile(value: string) { profile = value; },
     render(screen: "settings" = "settings", props: Record<string, unknown> = {}) {
-      actions.length = 0; switches.length = 0; selects.length = 0; pressables.length = 0; scrolls.length = 0; inputs.length = 0; modals.length = 0; modalContents.length = 0;
+      sections.length = 0; actions.length = 0; switches.length = 0; selects.length = 0; pressables.length = 0; scrolls.length = 0; inputs.length = 0; modals.length = 0; modalContents.length = 0;
       return tree.render(createElement(screens[screen], { host: { id: "host", label: "Host" }, theme: { colors }, layout: { compact: false, platform: "web" },
         navigation: { openAgent: (input: unknown) => navigation.push(input) }, ...props }));
     },
@@ -1835,6 +1836,7 @@ it.each(["offline", "missing_config"])("disables data rebuild with a reason whil
   const h = await settingsHarness(name => name === "connection.status" ? { ...readyStatus, status } : name === "rebuild.status" ? { status: "idle" } : name === "profile.list" ? { profiles: [] } : { workspaces: [] });
   try {
     await vi.waitFor(() => { h.render(); expect(h.action("重建数据").disabled).toBe(true); });
+    expect(h.sections).toContain("本地数据");
     expect(h.render()).toContain("仅连接就绪时可重建数据");
     expect(h.calls.some(call => call.name === "rebuild.preflight")).toBe(false);
   } finally { h.dispose(); }
