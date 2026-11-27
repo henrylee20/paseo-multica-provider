@@ -14,7 +14,7 @@ export function DeliveryStatus({ agentId, item, theme, layout, client }: PluginT
   const agent = useAgent(agentId, value => ({ workspaceId: value.workspaceId, connectionKey: value.labels[discussionKeys.connection], issueId: value.labels[discussionKeys.issue] }));
   const data = item.data;
   return <View style={{ gap: 4 }}>
-    {data.threadCreated !== false ? <Text style={{ color: theme.colors.foregroundMuted }}>新 Thread 已建立，可在侧边栏打开。</Text> : null}
+    {data.threadCreated !== false ? <Text style={{ color: theme.colors.foregroundMuted }}>{data.threadTitle ? `已新建 Thread「${data.threadTitle}」` : "已新建 Thread。"}</Text> : null}
     {data.attachments?.map(attachment => {
       const label = <Text style={{ color: theme.colors.foreground }}>{attachment.name} · {attachment.mimeType} · {formatSize(attachment.size)}</Text>;
       if (agent?.workspaceId && agent.connectionKey && agent.issueId) {

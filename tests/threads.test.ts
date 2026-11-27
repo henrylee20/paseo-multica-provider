@@ -481,16 +481,38 @@ it("preserves the first obtainable snapshot and appends stable edit and deletion
 });
 
 
-it("keeps issue-level system changes in the main discussion without creating discussion tabs", async () => {
+it.each([
+  { type: "status_change", id: "issue-status", text: "Issue completed" },
+  { type: "comment", id: "runtime-unusable", text: "运行时当前不可用，任务已排队等待其恢复。" },
+])("keeps a top-level $id system comment in the main discussion without creating discussion tabs", async ({ type, id, text }) => {
   const f = await fixture();
-  f.comments.push({ ...comment("issue-status", null, "Issue completed", "system", "system"), type: "status_change" });
+  f.comments.push({ ...comment(id, null, text, "system", "system"), type });
   await resync(f.server, f.paseo, "remote-workspace");
   expect(f.native.agents.map(agent => agent.labels["multica.discussion"])).toEqual(["main", "root"]);
   const main = f.native.agents[0];
   const { connectionKey, issueId } = JSON.parse(main.handle.slice(7)).data;
   expect(await f.server.rpc(threadOpen, { connectionKey, issueId, rootId: "main" }, f.paseo)).toEqual({ status: "ready" });
-  expect(conversationRows(f.timelines.get(main.id))?.at(-1)).toMatchObject({ type: "plugin", kind: "comment-event", data: { category: "system", text: "Issue completed" } });
+  expect(conversationRows(f.timelines.get(main.id))?.at(-1)).toMatchObject({ type: "plugin", kind: "comment-event", data: { category: "system", text } });
   expect(conversationRows(f.timelines.get(main.id))?.some(row => row.type === "user_message" || row.type === "assistant_message")).toBe(false);
+});
+
+it("uses the same brief Thread description when opening and listing sessions", async () => {
+  const f = await fixture();
+  const thread = f.native.agents[1];
+  expect(f.providerEvents).toContainEqual(expect.objectContaining({ type: "session.opened", sessionId: thread.id, description: "Thread · Task" }));
+  await (await f.connect()).send({ type: "sessions", requestId: "thread-descriptions", cwd: thread.cwd });
+  expect(f.providerEvents).toContainEqual(expect.objectContaining({ type: "sessions", requestId: "thread-descriptions", sessions: expect.arrayContaining([
+    expect.objectContaining({ title: "**Root**", description: "Thread · Task" }),
+  ]) }));
+});
+
+it("names unavailable and unmapped main discussion history without calling it a Thread", async () => {
+  const f = await fixture();
+  const main = f.native.agents[0];
+  const address = { ...JSON.parse(main.handle.slice(7)).data, rootId: "main" };
+  expect(await f.server.rpc(threadOpen, { ...address, issueId: "missing" }, f.paseo)).toEqual({ status: "unavailable", message: "此主讨论尚未映射。" });
+  await f.identity("another-user");
+  expect(await f.server.rpc(threadOpen, address, f.paseo)).toMatchObject({ message: "无法完整读取主讨论；保留已读的本地历史。" });
 });
 
 it("retains cached messages when a cursorless response explicitly reports truncation", async () => {

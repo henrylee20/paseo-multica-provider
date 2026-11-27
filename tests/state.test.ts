@@ -2,7 +2,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
-import { StateStore, connectionState, type LocalState } from "../server/state.js";
+import { StateStore, connectionState, issueSchema, type LocalState } from "../server/state.js";
 
 it("shares the first validated state in memory and persists queued updates across restart", async () => {
   const directory = await mkdtemp(join(tmpdir(), "multica-state-"));
@@ -71,10 +71,22 @@ it("reads old state while stripping removed fields without migration", async () 
     expect(state.connections.old).not.toHaveProperty("identity");
     expect(state.connections.old.issues.task).not.toHaveProperty("runDetails");
     expect(state.connections.old.issues.task.title).toBe("Task");
+    expect(state.connections.old.issues.task.overview).toBeUndefined();
     expect(state.connections.old.issues.task).not.toHaveProperty("stopEpochs");
     expect(state.connections.old.issues.task).not.toHaveProperty("stopRecords");
     expect(state.connections.old.issues.task).not.toHaveProperty("deliveries");
     expect(state.connections.old.issues.task).not.toHaveProperty("access");
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+it.each([{ url: "invalid-url" }, { dueDate: "2026-02-30" }])("loads an issue and its description when the saved overview is invalid: %j", async overview => {
+  const directory = await mkdtemp(join(tmpdir(), "multica-state-"));
+  try {
+    const issue = { remoteWorkspaceId: "remote", workspaceId: "native", cwd: directory, title: "Task", description: "Retained description", overview };
+    await writeFile(join(directory, "state.json"), JSON.stringify({ version: 1, connections: { old: { rules: {}, projects: {}, issues: { task: issue } } } }));
+    const state = await new StateStore(directory).read();
+    expect(state.connections.old.issues.task).toMatchObject({ title: "Task", description: "Retained description" });
+    expect(state.connections.old.issues.task.overview).toBeUndefined();
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -86,7 +98,10 @@ it("does not create a file or notify for empty updates and skips unchanged queue
     store.subscribe(state => snapshots.push(state));
     await store.update(() => {});
     await expect(readFile(join(directory, "state.json"))).rejects.toMatchObject({ code: "ENOENT" });
-    await store.update(state => { connectionState(state, "one"); });
+    await store.update(state => { connectionState(state, "one").issues.task = issueSchema.parse({
+      remoteWorkspaceId: "remote", workspaceId: "native", cwd: directory, title: "Task", description: "Goal",
+      overview: { statusKey: "todo", statusName: "待接手", assigneeType: "member", assigneeId: "user", assigneeName: "Lin", labels: ["界面"] },
+    }); });
     const snapshot = await store.read();
     // A no-op must not even attempt to write the atomic temporary file.
     await mkdir(join(directory, "state.json.next"));

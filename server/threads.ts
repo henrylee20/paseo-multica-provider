@@ -208,7 +208,7 @@ export class ThreadSynchronizer {
   async open(address: Address): Promise<{ status: "ready" | "cached" | "unavailable"; message?: string }> {
     const issue = (await this.store.read()).connections[address.connectionKey]?.issues[address.issueId];
     const thread = issue ? projectionHistory(issue, address.rootId) : undefined;
-    if (!issue || !thread) return { status: "unavailable", message: "此 Thread 尚未映射。" };
+    if (!issue || !thread) return { status: "unavailable", message: address.rootId === "main" ? "此主讨论尚未映射。" : "此 Thread 尚未映射。" };
     this.opened.add(key(address));
     try {
         const connection = await this.connection();
@@ -216,7 +216,8 @@ export class ThreadSynchronizer {
       const workspace = cachedWorkspace(await this.store.read(), address.connectionKey, issue);
       await this.refresh(connection, workspace, address);
       return { status: "ready" };
-    } catch { return { status: thread.historyLoaded ? "cached" : "unavailable", message: "无法完整读取远端 Thread；保留已读的本地历史。" }; }
+    } catch { return { status: thread.historyLoaded ? "cached" : "unavailable", message: address.rootId === "main"
+      ? "无法完整读取主讨论；保留已读的本地历史。" : "无法完整读取远端 Thread；保留已读的本地历史。" }; }
   }
   private refresh(connection: AuthenticatedConnection, workspace: RemoteWorkspace, address: Address, discoverCards = true) {
     const id = key(address);

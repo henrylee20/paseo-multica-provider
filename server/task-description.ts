@@ -1,9 +1,17 @@
-import type { StateStore } from "./state.js";
+import type { IssueMapping, StateStore } from "./state.js";
 import { textRevision, textSlice } from "./chunked-text.js";
 
-export function taskDescriptionData(connectionKey: string, issueId: string, description: string) {
+export function taskDescriptionData(connectionKey: string, issueId: string, description: string, overview?: IssueMapping["overview"]) {
   const preview = textSlice(description, 0, 4096);
-  return { connectionKey, issueId, revision: textRevision(description), preview, truncated: preview.length < description.length };
+  return { connectionKey, issueId, revision: textRevision(description), preview, truncated: preview.length < description.length,
+    ...(overview ? { overview: Object.fromEntries(Object.entries(overview).filter((entry): entry is [string, string | string[]] => entry[1] !== undefined)) } : {}) };
+}
+
+export function taskDescriptionSummary(description: string) {
+  const lines = description.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  const line = lines.find(line => !/^#{1,6}(?:\s|$)/.test(line)) ?? lines[0]?.replace(/^#{1,6}(?:\s+|$)/, "") ?? "";
+  const characters = Array.from(line);
+  return characters.length > 120 ? characters.slice(0, 120).join("") + "…" : line;
 }
 
 /** Cached observation is independent of the current CLI connection. */
@@ -19,7 +27,7 @@ export class TaskDescriptions {
   async observe({ connectionKey, issueId }: { connectionKey: string; issueId: string }) {
     const issue = (await this.store.read()).connections[connectionKey]?.issues[issueId];
     if (!issue) throw new Error("Task description unavailable");
-    const data = taskDescriptionData(connectionKey, issueId, issue.description);
+    const data = taskDescriptionData(connectionKey, issueId, issue.description, issue.overview);
     for (const listener of this.listeners.get(JSON.stringify([connectionKey, issueId])) ?? []) listener(data);
     return data;
   }
