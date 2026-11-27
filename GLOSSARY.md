@@ -40,6 +40,10 @@ _Avoid_: Multica 任务、本地主讨论、执行过程
 每个 Issue 在 Paseo 中承载任务概览、任务描述、Multica 平台生成的顶层系统评论和无评论关联 Run 的本地会话，本身不对应远端 Multica Thread。
 _Avoid_: Multica Thread、任务的全部讨论
 
+**讨论会话（Discussion session）**：
+一个讨论（任务讨论串或本地主讨论）在 Paseo 中被打开后的 provider 会话，负责该讨论时间线的发出顺序、可写性守卫与活动 turn 生命周期；关闭会话只释放本地状态，不影响远端 Run。
+_Avoid_: Paseo 工作区、agent tab、Run 子代理
+
 **评论（Comment）**：
 讨论中的一条有作者的发言，在 Paseo 中呈现为原生对话消息。
 _Avoid_: 工具调用、执行过程、评论更正记录
