@@ -94,6 +94,7 @@ export class RunSynchronizer {
       return author?.type === "member" && author.id !== connection.userId;
     }) ? await workspaceMembers(connection, workspace) : [];
 
+    const settledRoots = new Set<string>();
     await this.store.update(state => {
       const issue = state.connections[connection.connectionKey].issues[issueId];
       for (const run of records) {
@@ -101,6 +102,7 @@ export class RunSynchronizer {
         // A Run ID is one execution: a stale read must not reopen its terminal cycle.
         const staleActive = previous && !isActiveRun(previous.status) && isActiveRun(run.status);
         const generatedCommentIds = generated.get(run.id) ?? [];
+        if (previous?.ownerRootId && isActiveRun(previous.status) && !isActiveRun(run.status)) settledRoots.add(previous.ownerRootId);
         issue.runs[run.id] = { agentId: run.agent_id, agentName: agents.find(agent => agent.id === run.agent_id)?.name ?? `Agent ${run.agent_id}`,
           markerProjected: previous?.markerProjected,
           status: staleActive ? previous.status : run.status,
@@ -120,6 +122,7 @@ export class RunSynchronizer {
     });
     const issue = (await this.store.read()).connections[connection.connectionKey].issues[issueId];
     for (const rootId of ["main", ...Object.keys(issue.threads)]) await this.observe({ connectionKey: connection.connectionKey, issueId, rootId });
+    return settledRoots;
   }
   async observe(address: RunAddress): Promise<void> {
     const issue = (await this.store.read()).connections[address.connectionKey]?.issues[address.issueId];

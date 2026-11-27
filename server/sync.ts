@@ -64,6 +64,7 @@ export class SidebarSynchronizer {
   private ruleVersion = 0;
   private syncDirty = false;
   private host?: NativeHost;
+  private connectingHost?: Promise<NativeHost>;
   private syncPending?: Promise<void>;
   private syncState: SyncStatus = { status: "idle", stage: "idle", completedWorkspaces: 0, enabledWorkspaces: 0 };
   status(): SyncStatus { return { ...this.syncState }; }
@@ -157,10 +158,34 @@ export class SidebarSynchronizer {
       if (this.previews.get(workspaceId) === controller) this.previews.delete(workspaceId);
     }
   }
-  private async assertOwningDaemon(paseo?: PaseoApi) {
-    const serverId = (await (paseo ? paseo.hosts.list() : this.host!.listHosts())).self.serverId;
+  private async assertOwningDaemon(paseo?: PaseoApi, host = this.host) {
+    const serverId = (await (paseo ? paseo.hosts.list() : host!.listHosts())).self.serverId;
     if (this.expectedServerId && this.expectedServerId !== serverId) throw new Error("Native host is not the owning daemon");
-    this.expectedServerId = serverId;
+    if (paseo) this.expectedServerId = serverId;
+  }
+  private async discardHost(host: NativeHost) {
+    if (this.host !== host) return;
+    this.host = undefined;
+    await host.close().catch(() => {});
+  }
+  private async nativeHost(): Promise<NativeHost> {
+    if (this.closed) throw new Error("Native host closed");
+    const host = this.host ?? await (this.connectingHost ??= this.options.connectHost().then(host => {
+      this.host = host; return host;
+    }).finally(() => { this.connectingHost = undefined; }));
+    try {
+      if (this.closed) throw new Error("Native host closed");
+      await this.assertOwningDaemon(undefined, host);
+      return host;
+    } catch (error) { await this.discardHost(host); throw error; }
+  }
+  /** Native registration may be waiting inside sync's queue. Reads must not
+   * join that queue, but share its connection, identity check and shutdown. */
+  async readNativeHost<T>(read: (host: NativeHost) => Promise<T>): Promise<T> {
+    await this.assertNoPurge();
+    const host = await this.nativeHost();
+    try { return await read(host); }
+    catch (error) { await this.discardHost(host); throw error; }
   }
   private startTimer() {
     if (!this.closed && !this.timer) {
@@ -232,10 +257,9 @@ export class SidebarSynchronizer {
   withNativeHost(paseo: PaseoApi, operation: (host: NativeHost) => Promise<void>): Promise<void> {
     return this.serialize(async () => {
       await this.assertOwningDaemon(paseo);
-      if (!this.host) this.host = await this.options.connectHost();
-      await this.assertOwningDaemon();
+      const host = await this.nativeHost();
       await this.assertNoPurge();
-      await operation(this.host);
+      await operation(host);
     });
   }
   /** Let the current sync yield at its next rule-version boundary, then run alone. */
@@ -388,9 +412,7 @@ export class SidebarSynchronizer {
         Object.entries(conn.issues).flatMap(([issueId, issue]) => ["main", ...Object.keys(issue.threads)].map(rootId => ({ connectionKey, issueId, rootId }))))));
       await this.options.drain();
       state = await this.options.store.read();
-      if (!this.host) this.host = await this.options.connectHost();
-      await this.assertOwningDaemon();
-      const host = this.host;
+      const host = await this.nativeHost();
       const root = resolve(this.options.store.directory, "placeholders");
       const found = await discoverMappedObjects(host, state.connections, root);
       const retained = await teardownMappedObjects(host, this.options.lifecycle, found, { reset: async () => {
@@ -409,11 +431,10 @@ export class SidebarSynchronizer {
     if (!dirtyWorkspaces) this.syncState.failedWorkspaces = undefined;
     if (rebuild) await this.assertNoPurge();
     else await this.purge();
-    if (!this.host) this.host = await this.options.connectHost();
-    await this.assertOwningDaemon();
+    const host = await this.nativeHost();
     if (stopped()) return;
     this.syncState.stage = "history";
-    await this.options.onCached?.(this.host);
+    await this.options.onCached?.(host);
     this.syncState.stage = "connection";
     const connection = await this.options.connection();
     if (rebuild && rebuild.connectionKey !== connection.connectionKey) throw new Error("Connection identity changed");
@@ -464,7 +485,6 @@ export class SidebarSynchronizer {
     if (stopped()) return;
     if (!dirtyWorkspaces) await this.removeDisabledProjects(connection.connectionKey, version);
     let activeWorkspaceIds: Promise<Set<string>> | undefined;
-    const host = this.host;
     let nextWorkspace = 0, readingWorkspaces = 0;
     const worker = async () => {
       while (!stopped()) {
@@ -647,6 +667,8 @@ export class SidebarSynchronizer {
     this.events.close();
     for (const controller of this.previews.values()) controller.abort();
     this.previews.clear();
-    return Promise.all([this.mutationPending, this.pending]).then(async () => { await this.host?.close(); });
+    return Promise.all([this.mutationPending, this.pending, this.connectingHost?.catch(() => {})]).then(async () => {
+      if (this.host) await this.discardHost(this.host);
+    });
   }
 }

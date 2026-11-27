@@ -30,6 +30,7 @@ import { attachmentPreview } from "../shared/attachments.js";
 import { previewAttachment } from "./attachments.js";
 import { AskUsers } from "./askuser.js";
 import { AskuserWakeups } from "./askuser-wakeup.js";
+import { RunWakeups } from "./run-wakeup.js";
 import { askuserObserve, askuserRead, askuserReopen, askuserSkip } from "../shared/askuser.js";
 
 export interface ServerDependencies extends ConnectionDependencies {
@@ -118,6 +119,7 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     const metadata = new DiscussionMetadata(store);
     const threads = new ThreadSynchronizer(store, connection, metadata, askusers);
     const wakeups = new AskuserWakeups(store, askusers, lifecycle, dependencies.now);
+    const runWakeups = new RunWakeups(store, lifecycle, dependencies.now);
     server.handle(askuserReopen, async (input, context) => {
       await synchronizer.assertNoPurge();
       const card = await askusers.reopen(input, lifecycle);
@@ -142,7 +144,11 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     server.handle(attachmentPreview, input => previewAttachment(store, connection, input));
     const descriptions = new TaskDescriptions(store);
     server.registerProvider(createMulticaProvider(store, threads, runs, stops, deliveries, descriptions, lifecycle, askusers, runDetails,
-      () => { void synchronizer.reconcile().catch(() => {}); }));
+      () => { void synchronizer.reconcile().catch(() => {}); }, agentId => synchronizer.readNativeHost(async host => {
+        const result = await host.listCommands(agentId);
+        if (result?.error) throw new Error(result.error);
+        return host;
+      })));
     server.handle(readTaskDescription, async input => {
       // The host authenticates this RPC. Cached history belongs to its persisted
       // connection, even while the CLI is offline, logged out, or using another account.
@@ -187,15 +193,17 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
         await runDetails.reset();
         await threads.reset();
         await wakeups.reset();
+        await runWakeups.reset();
         await askusers.reset();
       },
       onCached: host => threads.reconcile(host),
       onIssue: async (connection, workspace, issueId, host) => {
         await descriptions.observe({ connectionKey: connection.connectionKey, issueId });
         await threads.discover(connection, workspace, issueId, host);
-        await runs.discover(connection, workspace, issueId);
+        const settled = await runs.discover(connection, workspace, issueId);
         await runDetails.refreshOpened();
         await wakeups.discover(connection, issueId, host);
+        await runWakeups.discover(connection, issueId, host, settled);
       },
       connectHost: () => (dependencies.connectHost ?? connectNativeHost)(owningHome), intervalMs: dependencies.syncIntervalMs ?? 15_000, eventDebounceMs: dependencies.eventDebounceMs });
     let observedProfile: string | undefined;
@@ -274,6 +282,7 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       await threads.close();
       await askusers.close();
       await runDetails.close();
+      await runWakeups.reset();
       runs.close();
       descriptions.close();
     };

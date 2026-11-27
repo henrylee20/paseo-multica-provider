@@ -111,6 +111,8 @@ async function fixture(options: { askuser?: boolean; empty?: boolean; respectVis
   let nextProject = 0, nextAgent = 0;
   const host = {
     listHosts: async () => ({ self: { serverId: "daemon" } }),
+    listCommands: async (agentId: string) => ({ agentId, commands: [], error: null, requestId: "commands" }),
+    listProviderSubagents: async (parentAgentId: string) => ({ parentAgentId, subagents: [], error: null }),
     listProjects: vi.fn(async () => ({ projects })),
     addProject: async (cwd: string) => {
       let project = projects.find(value => value.cwd === cwd);
@@ -645,5 +647,5 @@ it("rejects rebuild during profile purge, retains its owner, and keeps Run polli
   const parent = f.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
   await f.server.rpc(threadOpen, f.address(), f.paseo);
   f.messages.push({ task_id: "run", issue_id: "issue", seq: 1, type: "text", content: "New profile periodic output" });
-  await expect.poll(() => f.events.some(event => event.type === "timeline.item" && event.sessionId === `${parent.id}:run:run` && event.item.type === "assistant_message" && event.item.text === "New profile periodic output"), { timeout: 4000 }).toBe(true);
+  await expect.poll(() => f.events.some(event => event.type === "timeline.item" && event.sessionId === "multica:run:run" && event.item.type === "assistant_message" && event.item.text === "New profile periodic output"), { timeout: 4000 }).toBe(true);
 });

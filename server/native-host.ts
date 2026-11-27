@@ -10,7 +10,8 @@ import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
 /** These are the real low-level SDK methods, including explicit project placement. */
 export type NativeHost = Pick<DaemonClient, "listHosts" | "addProject" | "renameProject" | "listProjects" | "removeProject" | "fetchWorkspaces" |
   "createWorkspace" | "setWorkspaceTitle" | "fetchAgents" | "importAgent" | "updateAgent" | "close" |
-  "archiveWorkspace" | "restoreWorkspace" | "fetchAgent" | "archiveAgent" | "deleteAgent" | "refreshAgent" | "fetchAgentTimeline" | "listCommands">;
+  "archiveWorkspace" | "restoreWorkspace" | "fetchAgent" | "archiveAgent" | "deleteAgent" | "refreshAgent" | "fetchAgentTimeline" | "listCommands" |
+  "listProviderSubagents" | "fetchProviderSubagentTimeline">;
 
 type DirectoryPage<T> = (cursor?: string) => Promise<{ entries: T[]; pageInfo: { hasMore: boolean; nextCursor?: string | null } }>;
 

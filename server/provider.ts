@@ -10,12 +10,13 @@ import type { AskUsers } from "./askuser.js";
 import { taskDescriptionSummary, type TaskDescriptions } from "./task-description.js";
 import { mainPersistence, providerId, threadPersistence } from "./discussion-identity.js";
 import { DiscussionSession, persistenceSchema } from "./discussion-session.js";
+import type { NativeHost } from "./native-host.js";
 
 const supported = ["prompt.message", "prompt.image", "prompt.steer", "session.persistence", "session.subsession", "session.list", "timeline.plugin", "session.archive", "session.unarchive", "permission"];
 
 /** A Multica discussion projection, never a local code execution engine. */
-export function createMulticaProvider(store: StateStore, threads: ThreadSynchronizer, runs: RunSynchronizer, stops: StopCoordinator, deliveries: CommentDelivery, descriptions: TaskDescriptions, lifecycle: DiscussionLifecycle, askusers: AskUsers, runDetails: RunDetails, onUnarchive?: () => void): ProviderRegistration {
-  const deps = { store, threads, runs, stops, deliveries, descriptions, lifecycle, askusers, runDetails };
+export function createMulticaProvider(store: StateStore, threads: ThreadSynchronizer, runs: RunSynchronizer, stops: StopCoordinator, deliveries: CommentDelivery, descriptions: TaskDescriptions, lifecycle: DiscussionLifecycle, askusers: AskUsers, runDetails: RunDetails, onUnarchive?: () => void, registeredHost?: (agentId: string) => Promise<NativeHost>): ProviderRegistration {
+  const deps = { store, threads, runs, stops, deliveries, descriptions, lifecycle, askusers, runDetails, registeredHost };
   return {
     id: providerId, label: "Multica", description: "Multica 任务讨论（目录仅为本地占位目录）",
     status: async () => ({ available: true }),
@@ -70,6 +71,7 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
           }
           if (input.type === "session.close") {
             releaseSession(input.sessionId);
+            for (const session of sessions.values()) if (session.closeChild(input.sessionId)) break;
             emit({ type: "session.closed", sessionId: input.sessionId });
             emit({ type: "request.completed", requestId: input.requestId });
             return;
