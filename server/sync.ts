@@ -396,7 +396,7 @@ export class SidebarSynchronizer {
         let cursor: string | undefined;
         const cursors = new Set<string>();
         for (;;) {
-          const page = await host.fetchAgents({ filter: { labels: { [discussionKeys.connection]: connectionKey }, includeArchived: true }, page: { limit: 100, cursor } });
+          const page = await host.fetchAgents({ filter: { labels: { [discussionKeys.connection]: connectionKey }, includeArchived: true, includeBackground: true, includeInternal: true }, page: { limit: 100, cursor } });
           for (const { agent } of page.entries) {
             if (agent.provider !== providerId || agent.labels[discussionKeys.connection] !== connectionKey) continue;
             discussions.add(agent.id);
@@ -428,7 +428,7 @@ export class SidebarSynchronizer {
       let cursor: string | undefined;
       const cursors = new Set<string>();
       for (;;) {
-        const page = await host.fetchWorkspaces({ page: { limit: 100, cursor } });
+        const page = await host.fetchWorkspaces({ filter: { includeBackground: true, includeInternal: true }, page: { limit: 100, cursor } });
         active.push(...page.entries);
         if (!page.pageInfo.hasMore) break;
         const next = page.pageInfo.nextCursor;

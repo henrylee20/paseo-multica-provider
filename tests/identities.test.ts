@@ -30,7 +30,7 @@ const pause = () => {
   return { release, waiting, handler: async () => { reached(); await blocked; } };
 };
 
-async function fixture(options: { askuser?: boolean; empty?: boolean } = {}) {
+async function fixture(options: { askuser?: boolean; empty?: boolean; respectVisibility?: boolean } = {}) {
   const home = await mkdtemp(join(tmpdir(), "multica-identities-"));
   cleanup.push(() => rm(home, { recursive: true, force: true }));
   // Ephemeral opaque fixture credentials are compared only as booleans, never
@@ -91,8 +91,12 @@ async function fixture(options: { askuser?: boolean; empty?: boolean } = {}) {
   await login(0);
   const events: ProviderEvent[] = [];
   const projects: Array<{ projectId: string; cwd: string; projectRootPath: string; projectKind: string }> = [];
-  const workspaces: Array<{ id: string; projectId: string; archived?: boolean }> = [];
-  const agents: Array<{ provider: string; id: string; workspaceId: string; cwd: string; labels: Record<string, string>; archivedAt?: string }> = [];
+  const workspaces: Array<{ id: string; projectId: string; archived?: boolean; background?: boolean; internal?: boolean }> = [];
+  const agents: Array<{ provider: string; id: string; workspaceId: string; cwd: string; labels: Record<string, string>; archivedAt?: string; internal?: boolean }> = [];
+  const visibleInDirectory = (entry: { background?: boolean; internal?: boolean }, input?: unknown) => {
+    const filter = (input as { filter?: { includeBackground?: boolean; includeInternal?: boolean } } | undefined)?.filter;
+    return !options.respectVisibility || ((!entry.background || filter?.includeBackground === true) && (!entry.internal || filter?.includeInternal === true));
+  };
   let provider: ProviderConnection | undefined;
   let server = new FakeServer();
   const connect = async () => {
@@ -121,13 +125,13 @@ async function fixture(options: { askuser?: boolean; empty?: boolean } = {}) {
       for (const workspace of workspaces) if (workspace.projectId === id) workspace.archived = true;
     }),
     archiveWorkspace: vi.fn(async (id: string) => { workspaces.find(workspace => workspace.id === id)!.archived = true; return { error: null as string | null }; }),
-    renameProject: async () => {}, fetchWorkspaces: vi.fn(async (_input?: unknown) => ({ entries: workspaces.filter(workspace => !workspace.archived), pageInfo: { hasMore: false, nextCursor: undefined as string | undefined } })),
+    renameProject: async () => {}, fetchWorkspaces: vi.fn(async (input?: unknown) => ({ entries: workspaces.filter(workspace => !workspace.archived && visibleInDirectory(workspace, input)), pageInfo: { hasMore: false, nextCursor: undefined as string | undefined } })),
     createWorkspace: async (input: { workspaceId: string; source: { projectId: string } }) => {
       const workspace = { id: input.workspaceId, projectId: input.source.projectId };
       workspaces.push(workspace);
       return { workspace };
     }, setWorkspaceTitle: async () => {},
-    fetchAgents: vi.fn(async (_input?: unknown) => ({ entries: agents.map(agent => ({ agent })), pageInfo: { hasMore: false, nextCursor: undefined as string | undefined } })),
+    fetchAgents: vi.fn(async (input?: unknown) => ({ entries: agents.filter(agent => visibleInDirectory(agent, input) && visibleInDirectory(workspaces.find(workspace => workspace.id === agent.workspaceId) ?? {}, input)).map(agent => ({ agent })), pageInfo: { hasMore: false, nextCursor: undefined as string | undefined } })),
     deleteAgent: vi.fn(async (id: string) => { const index = agents.findIndex(agent => agent.id === id); if (index >= 0) agents.splice(index, 1); }),
     fetchAgent: vi.fn(async (id: string) => ({ agent: agents.find(agent => agent.id === id) })),
     fetchAgentTimeline: async (agentId: string) => ({ agentId, epoch: "epoch", entries: [], hasOlder: false, hasNewer: false }),
@@ -281,6 +285,34 @@ it("retains Projects with user-created active workspaces, archives plugin worksp
   expect(await f.server.rpc(connectionStatus, {}, f.paseo)).toMatchObject({
     sync: { status: "ready", retainedProjects: [{ name: "Product", cwd: project.cwd }] }, localData: { projects: 0, issues: 0, discussions: 0 },
   });
+});
+
+it.each(["background", "internal"] as const)("profile purge retains Paseo projects with %s user-created active workspaces", async visibility => {
+  const f = await fixture({ respectVisibility: true });
+  const project = f.projects[0], pluginWorkspace = f.workspaces[0];
+  const userWorkspace = { id: "user-workspace", projectId: project.projectId, [visibility]: true };
+  f.workspaces.push(userWorkspace);
+  expect((await f.host.fetchWorkspaces()).entries.map(workspace => workspace.id)).not.toContain(userWorkspace.id);
+  await f.login(1, f.primary.apiUrl, "office");
+  f.server.setSettings(multicaSettings.id, { profile: "office" });
+  expect((await waitForSync(f.server, f.paseo)).status).toBe("ready");
+  expect(f.host.removeProject).not.toHaveBeenCalled();
+  expect(f.projects).toContainEqual(project);
+  expect(f.host.archiveWorkspace).toHaveBeenCalledExactlyOnceWith(pluginWorkspace.id);
+  expect(f.workspaces.find(workspace => workspace.id === userWorkspace.id)?.archived).toBeUndefined();
+});
+
+it("profile purge deletes uncached internal Multica discussions tagged with the connection", async () => {
+  const f = await fixture({ respectVisibility: true });
+  const internalDiscussion = { ...f.agents[0], id: "internal-discussion", internal: true,
+    labels: { ...f.agents[0].labels, "multica.discussion": "internal-thread" } };
+  f.agents.push(internalDiscussion);
+  expect((await f.host.fetchAgents()).entries.map(({ agent }) => agent.id)).not.toContain(internalDiscussion.id);
+  await f.login(1, f.primary.apiUrl, "office");
+  f.server.setSettings(multicaSettings.id, { profile: "office" });
+  expect((await waitForSync(f.server, f.paseo)).status).toBe("ready");
+  expect(f.host.deleteAgent).toHaveBeenCalledWith(internalDiscussion.id);
+  expect(f.agents).toEqual([]);
 });
 
 it("a failed partial purge preserves its owner, blocks synchronization, restores and rule writes, then resumes on bootstrap", async () => {
