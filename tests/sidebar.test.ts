@@ -2038,6 +2038,59 @@ it("rebuild terminal writeback preserves a terminal result written while its rem
   } finally { f.remote.holdRunReads = false; for (const reply of f.heldRunReads.splice(0)) reply(); await checking; runs.close(); }
 });
 
+it.each([
+  { rootId: "main", discovery: "omitted from the directory" },
+  { rootId: "rebuild-thread", discovery: "omitted from the directory" },
+  { rootId: "main", discovery: "missing labels" },
+  { rootId: "rebuild-thread", discovery: "missing labels" },
+])("rebuild counts, holds and deletes cached $rootId discussions when $discovery", async ({ rootId, discovery }) => {
+  const f = await fixture(60_000); f.remote.acknowledgeEvents = false;
+  f.comments.push({ id: "rebuild-thread", issue_id: "issue-one", content: "重建讨论" });
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const connectionKey = (await f.server.rpc(connectionStatus, {}, f.paseo)).connectionKey!;
+  const cached = f.native.agents.find(agent => agent.labels["multica.issue"] === "issue-one" && agent.labels["multica.discussion"] === rootId)!;
+  const cwd = cached.cwd;
+  await f.dispose();
+  const store = new StateStore(join(f.home, "multica-provider"));
+  await store.update(state => {
+    const local = state.connections[connectionKey];
+    local.rules["remote-workspace"].enabled = false;
+    local.issues["issue-one"].threads.duplicate = { ...local.issues["issue-one"].threads["rebuild-thread"], agentId: cached.id };
+  });
+  // The recovered agent's workspace is absent from the cache and has no plugin directory prefix.
+  const recoveredWorkspace = { ...f.native.workspaces[0], id: "recovered-workspace", cwd: "/legacy-workspace" };
+  f.native.workspaces.push(recoveredWorkspace);
+  cached.workspaceId = recoveredWorkspace.id;
+  if (discovery === "missing labels") cached.labels = {};
+  else {
+    cached.cwd = "/legacy-discussion";
+    cached.labels = { ...cached.labels, "multica.issue": "stale-issue", "multica.discussion": "stale-root" };
+  }
+  const list = f.host.fetchAgents.bind(f.host);
+  vi.spyOn(f.host, "fetchAgents").mockImplementation(async input => {
+    const page = await list(input);
+    const entries = page.entries.filter(({ agent }) => discovery === "missing labels" || agent.id !== cached.id);
+    return { ...page, entries };
+  });
+  const { server } = f.start();
+  const provider = await server.providers.get("multica")!.connect({ versions: [1], capabilities: [] });
+  cleanup.push(() => provider.close());
+  const events: ProviderEvent[] = []; provider.onEvent(event => events.push(event));
+  const remove = f.host.deleteAgent.bind(f.host);
+  vi.spyOn(f.host, "deleteAgent").mockImplementation(async id => {
+    if (id === cached.id) await provider.send({ type: "session.open", requestId: "rebuild-racing-open", sessionId: "rebuild-racing-open", history: "replay",
+      persistence: JSON.parse(cached.handle.slice(7)), config: { cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
+    return remove(id);
+  });
+  expect(await server.rpc(rebuildPreflight, { connectionKey }, f.paseo)).toMatchObject({ projects: 1, workspaces: 3, discussions: 3, blockers: [] });
+  expect(await server.rpc(rebuildStart, { connectionKey }, f.paseo)).toMatchObject({ started: true });
+  expect(await finishRebuild(server, f.paseo, connectionKey)).toMatchObject({ status: "completed", total: 0 });
+  expect(f.effects.filter(effect => effect === `deleteAgent:${cached.id}`)).toHaveLength(1);
+  expect(f.native.agents.some(agent => agent.id === cached.id)).toBe(false);
+  expect(events).toContainEqual(expect.objectContaining({ type: "request.failed", requestId: "rebuild-racing-open", error: expect.objectContaining({ code: "discussion_unavailable" }) }));
+  expect(f.effects).toContain(`archiveWorkspace:${recoveredWorkspace.id}`);
+});
+
 it("rebuild deletes discussions including archived orphans before workspaces and projects, preserves rules and only resets its connection", async () => {
   const f = await fixture();
   await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);

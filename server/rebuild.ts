@@ -81,8 +81,22 @@ export class DataRebuild {
   }
   private async discover(host: NativeHost, connectionKey: string) {
     const local = (await this.store.read()).connections[connectionKey];
-    const agents = (await directory(cursor => host.fetchAgents({ filter: { includeArchived: true, includeBackground: true, includeInternal: true, labels: { [discussionKeys.connection]: connectionKey } }, page: { limit: 100, cursor } })))
+    const listed = (await directory(cursor => host.fetchAgents({ filter: { includeArchived: true, includeBackground: true, includeInternal: true, labels: { [discussionKeys.connection]: connectionKey } }, page: { limit: 100, cursor } })))
       .map(entry => entry.agent).filter(agent => agent.provider === providerId && agent.labels[discussionKeys.connection] === connectionKey && agent.labels[discussionKeys.issue] && agent.labels[discussionKeys.discussion]);
+    const discussions = new Map(listed.map(agent => [agent.id, { agent,
+      address: { connectionKey, issueId: agent.labels[discussionKeys.issue], rootId: agent.labels[discussionKeys.discussion] } }]));
+    for (const [issueId, issue] of Object.entries(local?.issues ?? {})) {
+      const mapped = [{ rootId: "main", agentId: issue.mainAgentId },
+        ...Object.entries(issue.threads).map(([rootId, thread]) => ({ rootId, agentId: thread.agentId }))];
+      for (const { rootId, agentId } of mapped) {
+        if (!agentId || discussions.has(agentId)) continue;
+        const agent = (await host.fetchAgent(agentId))?.agent;
+        if (agent?.provider === providerId && (agent.labels[discussionKeys.connection] === connectionKey || agent.cwd === issue.cwd)) {
+          discussions.set(agentId, { agent, address: { connectionKey, issueId, rootId } });
+        }
+      }
+    }
+    const agents = [...discussions.values()].map(({ agent }) => agent);
     const active = await directory(cursor => host.fetchWorkspaces({ filter: { includeBackground: true, includeInternal: true }, page: { limit: 100, cursor } }));
     const knownWorkspaceIds = new Set(agents.flatMap(agent => agent.workspaceId ? [agent.workspaceId] : []));
     for (const issue of Object.values(local?.issues ?? {})) knownWorkspaceIds.add(issue.workspaceId);
@@ -91,7 +105,7 @@ export class DataRebuild {
     const projects = (await host.listProjects()).projects.filter(project => project.projectKind === "non_git" &&
       (project.projectRootPath.startsWith(prefix) || Object.values(local?.projects ?? {}).some(cached => cached.projectId === project.projectId && cached.cwd === project.projectRootPath)))
       .filter(project => !active.some(workspace => workspace.projectId === project.projectId && !workspaceIds.has(workspace.id)));
-    return { agents, workspaceIds, projects };
+    return { agents, addresses: [...discussions.values()].map(({ address }) => address), workspaceIds, projects };
   }
   async preflight(connectionKey: string, paseo: PaseoApi) {
     const connection = await this.current(connectionKey);
@@ -124,7 +138,7 @@ export class DataRebuild {
         await this.details.pause();
         progress.step = "发现插件记录";
         const found = await this.discover(host, connectionKey);
-        release = await this.lifecycle.hold(found.agents.map(agent => ({ connectionKey, issueId: agent.labels[discussionKeys.issue], rootId: agent.labels[discussionKeys.discussion] })));
+        release = await this.lifecycle.hold(found.addresses);
         progress.step = "删除插件讨论";
         for (const agent of found.agents) await host.deleteAgent(agent.id);
         progress.step = "归档 Paseo 工作区";
