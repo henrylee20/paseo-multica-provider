@@ -15,17 +15,233 @@ function fixture() {
   return { issue, events, projection, details };
 }
 
+it("compacts terminal Run tools in source order while preserving text, reasoning, errors and metadata", () => {
+  const { issue, events, projection, details } = fixture();
+  const source = { task_id: "run", issue_id: "issue" };
+  const timestamp = "2026-11-28T01:02:03Z";
+  issue.runs.run.metadata = { error: "Failure", failure_reason: "Reason", work_dir: "/remote", relative_work_dir: "src" };
+  details.run = { finalized: true, messages: [
+    { ...source, seq: 0, type: "text", content: "Before" },
+    { ...source, seq: 1, type: "thinking", content: "Plan" },
+    { ...source, seq: 2, type: "tool_result", call_id: "a", output: "Early result", created_at: timestamp },
+    { ...source, seq: 3, type: "tool_use", call_id: "a", tool: "read", input: { path: "private.txt" } },
+    { ...source, seq: 4, type: "tool_result", call_id: "a", output: "Large output" },
+    { ...source, seq: 5, type: "tool_use", call_id: "b" },
+    { ...source, seq: 6, type: "tool_result" },
+    { ...source, seq: 7, type: "tool_result", call_id: "orphan" },
+    { ...source, seq: 8, type: "tool_use" },
+    { ...source, seq: 9, type: "tool_result", call_id: "b" },
+    { ...source, seq: 10, type: "text", content: "After" },
+    { ...source, seq: 11, type: "error", content: "Source error" },
+    { ...source, seq: 12, type: "tool_use", call_id: "last" },
+    { ...source, seq: 13, type: "tool_result", call_id: "last" },
+  ] };
+  projection.project(issue);
+  const rows = events.flatMap(event => event.type === "timeline.item" && event.sessionId === "multica:run:run" ? [event] : []);
+  expect(rows).toMatchObject([
+    { item: { type: "assistant_message", text: "Before", messageId: "run-text:run:0" } },
+    { item: { type: "reasoning", text: "Plan" } },
+    { timestamp, item: { type: "notification", id: "run-tools:run:2", level: "info", message: "进行了 5 次工具调用" } },
+    { item: { type: "assistant_message", text: "After", messageId: "run-text:run:10" } },
+    { item: { type: "error", message: "Source error" } },
+    { item: { type: "notification", id: "run-tools:run:12", level: "info", message: "进行了 1 次工具调用" } },
+    { item: { type: "error", message: "任务错误：Failure" } },
+    { item: { type: "error", message: "失败原因：Reason" } },
+    { item: { type: "notification", message: "远端目录：/remote" } },
+    { item: { type: "notification", message: "远端相对目录：src" } },
+  ]);
+  const count = events.length;
+  projection.project(issue);
+  expect(events).toHaveLength(count);
+});
+
+it("splits compact tool segments at each reasoning, text and error message", () => {
+  const { issue, events, projection, details } = fixture();
+  const source = { task_id: "run", issue_id: "issue" };
+  details.run = { finalized: true, messages: [
+    { ...source, seq: 0, type: "tool_use", call_id: "a" },
+    { ...source, seq: 1, type: "thinking", content: "Plan" },
+    { ...source, seq: 2, type: "tool_result", call_id: "a" },
+    { ...source, seq: 3, type: "text", content: "Progress" },
+    { ...source, seq: 4, type: "tool_use", call_id: "b" },
+    { ...source, seq: 5, type: "error", content: "Error" },
+    { ...source, seq: 6, type: "tool_result", call_id: "b" },
+    { ...source, seq: 7, type: "thinking", content: "Retry" },
+    { ...source, seq: 8, type: "tool_use", call_id: "c" },
+    { ...source, seq: 9, type: "thinking", content: "Done" },
+  ] };
+  projection.project(issue);
+  expect(events.flatMap(event => event.type === "timeline.item" && event.sessionId === "multica:run:run" ? [event.item] : [])).toMatchObject([
+    { type: "notification", id: "run-tools:run:0", message: "进行了 1 次工具调用" },
+    { type: "reasoning", text: "Plan" },
+    { type: "notification", id: "run-tools:run:2", message: "进行了 1 次工具调用" },
+    { type: "assistant_message", text: "Progress" },
+    { type: "notification", id: "run-tools:run:4", message: "进行了 1 次工具调用" },
+    { type: "error", message: "Error" },
+    { type: "notification", id: "run-tools:run:6", message: "进行了 1 次工具调用" },
+    { type: "reasoning", text: "Retry" },
+    { type: "notification", id: "run-tools:run:8", message: "进行了 1 次工具调用" },
+    { type: "reasoning", text: "Done" },
+  ]);
+});
+
+it("emits broken tool segments before a gap and waits across reads for the trailing segment to finalize", () => {
+  const { issue, events, projection, details } = fixture();
+  const source = { task_id: "run", issue_id: "issue" };
+  const timestamp = "2026-11-28T01:02:03Z";
+  details.run = { messages: [
+    { ...source, seq: 0, type: "text", content: "Before" },
+    { ...source, seq: 1, type: "tool_use", call_id: "a" },
+    { ...source, seq: 2, type: "thinking", content: "Boundary" },
+    { ...source, seq: 3, type: "tool_result", call_id: "a", created_at: timestamp },
+    { ...source, seq: 5, type: "tool_use", call_id: "b" },
+  ] };
+  projection.project(issue);
+  expect(events.filter(event => event.type === "timeline.item" && event.sessionId === "multica:run:run")).toMatchObject([
+    { item: { type: "assistant_message", text: "Before" } },
+    { item: { type: "notification", id: "run-tools:run:1", message: "进行了 1 次工具调用" } },
+    { item: { type: "reasoning", text: "Boundary" } },
+  ]);
+  const count = events.length;
+  details.run.messages.splice(4, 0, { ...source, seq: 4, type: "tool_use", call_id: "b" });
+  details.run.messages.push({ ...source, seq: 6, type: "tool_result", call_id: "b" });
+  projection.project(issue);
+  projection.project(issue);
+  expect(events).toHaveLength(count);
+  details.run.finalized = true;
+  projection.project(issue);
+  expect(events.slice(count)).toEqual([{ type: "timeline.item", sessionId: "multica:run:run", timestamp,
+    item: { type: "notification", id: "run-tools:run:3", level: "info", message: "进行了 3 次工具调用" } }]);
+  projection.project(issue);
+  expect(events).toHaveLength(count + 1);
+});
+
+it.each(["queued", "dispatched", "running", "waiting_local_directory", "deferred"] as const)("keeps a Run first projected as %s in full mode after it ends", status => {
+  const { issue, events, projection, details } = fixture();
+  const source = { task_id: "run", issue_id: "issue" };
+  issue.runs.run.status = status;
+  details.run = { messages: [{ ...source, seq: 1, type: "tool_use", call_id: "a", tool: "read", input: { path: "code.ts" } }] };
+  projection.project(issue);
+  issue.runs.run.status = "completed";
+  details.run.finalized = true;
+  details.run.messages.push({ ...source, seq: 2, type: "tool_result", call_id: "a", output: "Result" });
+  projection.project(issue);
+  expect(events.flatMap(event => event.type === "timeline.item" && event.sessionId === "multica:run:run" ? [event.item] : [])).toMatchObject([
+    { type: "notification" },
+    { type: "tool_call", callId: "run-message:run:1:0", detail: { text: expect.stringContaining("code.ts") } },
+    { type: "tool_call", callId: "run-message:run:2:0", detail: { text: "Result" } },
+  ]);
+  expect(events.some(event => event.type === "timeline.item" && event.item.id.startsWith("run-tools:"))).toBe(false);
+  expect(events.filter(event => event.type === "session.turn")).toMatchObject([{ state: "started" }, { state: "completed" }]);
+});
+
+it("keeps a retained full native Run timeline in full mode when terminal details arrive later", async () => {
+  const { issue, events, projection, details } = fixture();
+  issue.runs.run.markerProjected = true;
+  delete details.run;
+  const host = {
+    listProviderSubagents: async () => ({ parentAgentId: "native", subagents: [{ id: "multica:run:run" }] }),
+    fetchProviderSubagentTimeline: async () => ({ parentAgentId: "native", subagentId: "multica:run:run", hasOlder: false,
+      rows: [{ item: { type: "tool_call", callId: "run-message:run:0:0" } }] }),
+  } as unknown as NativeHost;
+  await projection.restore(host, "native", issue);
+  projection.project(issue, false);
+  expect(events.filter(event => event.type === "timeline.item")).toEqual([]);
+  const source = { task_id: "run", issue_id: "issue" };
+  details.run = { finalized: true, messages: [
+    { ...source, seq: 0, type: "tool_use", call_id: "a", tool: "read", input: {} },
+    { ...source, seq: 1, type: "tool_result", call_id: "a", output: "Result" },
+    { ...source, seq: 2, type: "text", content: "Done" },
+  ] };
+  projection.project(issue, false);
+  expect(events.filter(event => event.type === "timeline.item")).toMatchObject([
+    { item: { type: "tool_call", callId: "run-message:run:1:0", detail: { text: "Result" } } },
+    { item: { type: "assistant_message", text: "Done" } },
+  ]);
+  details.run.messages.push({ ...source, seq: 3, type: "tool_result", output: "Late output" });
+  projection.project(issue, false);
+  expect(events.at(-1)).toMatchObject({ type: "timeline.item", item: { type: "tool_call", detail: { text: "Late output" } } });
+});
+
+it.each([true, false])("reconciles retained compact Run summaries by content counts, cache finalized: %s", async finalized => {
+  const { issue, events, projection, details } = fixture();
+  issue.runs.run.markerProjected = true;
+  const source = { task_id: "run", issue_id: "issue" };
+  details.run = { finalized, messages: [
+    { ...source, seq: 1, type: "tool_use", call_id: "a" },
+    { ...source, seq: 2, type: "text", content: "Boundary" },
+    { ...source, seq: 3, type: "tool_use", call_id: "b" },
+  ] };
+  const host = {
+    listProviderSubagents: async () => ({ parentAgentId: "native", subagents: [{ id: "multica:run:run" }] }),
+    fetchProviderSubagentTimeline: async () => ({ parentAgentId: "native", subagentId: "multica:run:run", hasOlder: false, rows: [
+      { item: { type: "notification", level: "info", message: "进行了 1 次工具调用" } },
+      { item: { type: "assistant_message", messageId: "run-text:run:2", text: "Boundary" } },
+      { item: { type: "notification", level: "info", message: "进行了 1 次工具调用" } },
+    ] }),
+  } as unknown as NativeHost;
+  await projection.restore(host, "native", issue);
+  projection.project(issue, false);
+  expect(events.filter(event => event.type === "timeline.item")).toEqual([]);
+  details.run.finalized = true;
+  projection.project(issue, false);
+  expect(events.filter(event => event.type === "timeline.item")).toEqual([]);
+  details.run.messages.push({ ...source, seq: 4, type: "thinking", content: "New" }, { ...source, seq: 5, type: "tool_result", call_id: "b" });
+  projection.project(issue, false);
+  expect(events.filter(event => event.type === "timeline.item")).toMatchObject([
+    { item: { type: "reasoning", text: "New" } },
+    { item: { type: "notification", id: "run-tools:run:5", message: "进行了 1 次工具调用" } },
+  ]);
+});
+
+it.each(["missing", "empty", "unrelated tools", "unreadable"])("uses compact projection when native Run history is %s", async baseline => {
+  const { issue, events, projection, details } = fixture();
+  issue.runs.run.markerProjected = true;
+  const source = { task_id: "run", issue_id: "issue" };
+  details.run = { finalized: true, messages: [
+    { ...source, seq: 1, type: "text", content: "Before" },
+    { ...source, seq: 2, type: "tool_use", call_id: "a" },
+    { ...source, seq: 3, type: "tool_result", call_id: "a" },
+    { ...source, seq: 4, type: "text", content: "After" },
+  ] };
+  const timeline = vi.fn(async () => {
+    if (baseline === "unreadable") throw new Error("Offline");
+    return { parentAgentId: "native", subagentId: "multica:run:run", hasOlder: false,
+      rows: baseline === "unrelated tools" ? [{ item: { type: "tool_call", callId: "other-tool" } }] : [] };
+  });
+  const host = {
+    listProviderSubagents: async () => ({ parentAgentId: "native", subagents: baseline === "missing" ? [] : [{ id: "multica:run:run" }] }),
+    fetchProviderSubagentTimeline: timeline,
+  } as unknown as NativeHost;
+  await projection.restore(host, "native", issue);
+  projection.project(issue, false);
+  expect(timeline).toHaveBeenCalledTimes(baseline === "missing" ? 0 : 1);
+  const rows = () => events.filter(event => event.type === "timeline.item");
+  expect(rows()).toMatchObject(baseline === "unreadable" ? [] : [
+    { item: { type: "assistant_message", text: "Before" } },
+    { item: { type: "notification", id: "run-tools:run:2", message: "进行了 1 次工具调用" } },
+    { item: { type: "assistant_message", text: "After" } },
+  ]);
+  const count = events.length;
+  details.run.messages.push({ ...source, seq: 5, type: "tool_result", output: "New" });
+  projection.project(issue, false);
+  expect(events.slice(count)).toMatchObject([
+    { type: "timeline.item", item: { type: "notification", id: "run-tools:run:5", message: "进行了 1 次工具调用" } },
+  ]);
+  expect(events.filter(event => event.type === "session.turn")).toMatchObject([{ state: "completed" }]);
+});
+
 it("ends a terminal child immediately and appends finalized output after an irrecoverable sequence gap", () => {
   const { issue, events, projection, details } = fixture();
   projection.project(issue);
   expect(events.filter(event => event.type === "timeline.item" && event.item.type === "assistant_message")).toMatchObject([{ item: { text: "First available" } }]);
-  expect(events.filter(event => event.type === "session.turn")).toMatchObject([{ state: "started" }, { state: "completed" }]);
+  expect(events.filter(event => event.type === "session.turn")).toMatchObject([{ state: "completed" }]);
   details.run.finalized = true;
   projection.project(issue, false);
   expect(events.filter(event => event.type === "timeline.item" && event.item.type === "assistant_message")).toMatchObject([{ item: { text: "First available" } }, { item: { text: "Last available" } }]);
   expect(events.flatMap(event => event.type === "timeline.item" && event.item.type === "assistant_message" ? [event.item.messageId] : [])).toEqual(["run-text:run:0", "run-text:run:2"]);
   expect(events.at(-1)).toMatchObject({ type: "timeline.item", item: { type: "assistant_message", text: "Last available" } });
-  expect(events.filter(event => event.type === "session.turn")).toMatchObject([{ state: "started" }, { state: "completed" }]);
+  expect(events.filter(event => event.type === "session.turn")).toMatchObject([{ state: "completed" }]);
   expect(events).toContainEqual(expect.objectContaining({ type: "session.opened", description: "由关联评论触发" }));
 });
 
@@ -220,7 +436,7 @@ it.each(["completed", "failed", "cancelled"] as const)("a cached %s Run ends eve
     else delete details.run;
     projection.project(issue);
     expect(events.some(event => event.type === "timeline.item" && event.item.type === "assistant_message")).toBe(false);
-    expect(events.filter(event => event.type === "session.turn")).toMatchObject([{ state: "started" }, { state: status === "cancelled" ? "canceled" : status }]);
+    expect(events.filter(event => event.type === "session.turn")).toMatchObject([{ state: status === "cancelled" ? "canceled" : status }]);
     const count = events.length;
     projection.project(issue);
     expect(events).toHaveLength(count);

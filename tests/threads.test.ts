@@ -832,7 +832,7 @@ it("negotiates read-only Run children and static completed markers, appending gr
   expect([...f.timelines.values()].flat().some(row => row.id.startsWith("multica:run:"))).toBe(false);
 });
 
-it("pushes ordered text, reasoning, tool input/results and full failure/remote metadata only into the Run child", async () => {
+it.each(["running", "failed"] as const)("pushes ordered Run output and full failure/remote metadata only into the child, first projected as %s", async status => {
   const input = { task_id: "detail", issue_id: "issue" };
   const huge = "结果😀".repeat(30000);
   const messages: RunMessage[] = [
@@ -842,13 +842,22 @@ it("pushes ordered text, reasoning, tool input/results and full failure/remote m
     { ...input, seq: 4, type: "tool_result", call_id: "call", output: huge, output_truncated: true },
     { ...input, seq: 5, type: "error", content: "Source error" },
   ];
-  const f = await fixture([{ id: "detail", issue_id: "issue", agent_id: "owned-agent", status: "failed", trigger_comment_id: "root", error: "Pre-stream error", failure_reason: "directory_error", work_dir: "/remote/path", relative_work_dir: "../code" }], true, messages);
+  const f = await fixture([{ id: "detail", issue_id: "issue", agent_id: "owned-agent", status, trigger_comment_id: "root", error: "Pre-stream error", failure_reason: "directory_error", work_dir: "/remote/path", relative_work_dir: "../code" }], true, messages);
   await loadDiscussion(f);
+  if (status === "running") { f.runs[0].status = "failed"; await resync(f.server, f.paseo, "remote-workspace"); }
   const parent = f.native.agents[1].id, child = "multica:run:detail";
   const rows = f.timelines.get(child)!;
   const messagesOnly = rows.filter(row => row.id.startsWith("run-message:"));
-  expect(messagesOnly.slice(0, 4)).toMatchObject([{ type: "assistant_message", text: "Starting" }, { type: "reasoning", text: "Plan" }, { type: "tool_call", name: "read", detail: { text: expect.stringContaining("code.ts") } }, { type: "tool_call", detail: { label: "工具结果" } }]);
-  expect(rows.filter(row => row.type === "tool_call" && row.detail.type === "plain_text" && row.detail.label === "工具结果").map(row => row.type === "tool_call" && row.detail.type === "plain_text" ? row.detail.text : "").join("")).toBe(huge + "\n源端已截断：缺失内容无法恢复。");
+  if (status === "running") {
+    expect(messagesOnly.slice(0, 4)).toMatchObject([{ type: "assistant_message", text: "Starting" }, { type: "reasoning", text: "Plan" }, { type: "tool_call", name: "read", detail: { text: expect.stringContaining("code.ts") } }, { type: "tool_call", detail: { label: "工具结果" } }]);
+    expect(rows.filter(row => row.type === "tool_call" && row.detail.type === "plain_text" && row.detail.label === "工具结果").map(row => row.type === "tool_call" && row.detail.type === "plain_text" ? row.detail.text : "").join("")).toBe(huge + "\n源端已截断：缺失内容无法恢复。");
+  } else {
+    expect(rows.filter(row => row.id.startsWith("run-message:") || row.id.startsWith("run-tools:"))).toMatchObject([
+      { type: "assistant_message", text: "Starting" }, { type: "reasoning", text: "Plan" },
+      { type: "notification", id: "run-tools:detail:3", message: "进行了 1 次工具调用" }, { type: "error", message: "Source error" },
+    ]);
+    expect(rows.some(row => row.type === "tool_call")).toBe(false);
+  }
   expect(rows).toContainEqual(expect.objectContaining({ type: "error", message: "Source error" }));
   expect(rows).toContainEqual(expect.objectContaining({ type: "error", message: "任务错误：Pre-stream error" }));
   expect(rows).toContainEqual(expect.objectContaining({ type: "notification", message: "远端目录：/remote/path" }));
@@ -1063,7 +1072,7 @@ it("shows a historical Run's terminal state when its execution messages cannot b
   await provider.send({ type: "session.open", requestId: "offline-open", sessionId: parent.id, history: "skip", persistence: JSON.parse(parent.handle.slice(7)), config: { cwd: parent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
   await loadDiscussion(f);
   await expect.poll(() => f.requests.some(request => request.url.includes("/tasks/offline/messages"))).toBe(true);
-  expect(f.providerEvents.filter(event => event.type === "session.turn" && event.sessionId === "multica:run:offline")).toMatchObject([{ state: "started" }, { state: "completed" }]);
+  expect(f.providerEvents.filter(event => event.type === "session.turn" && event.sessionId === "multica:run:offline")).toMatchObject([{ state: "completed" }]);
 });
 
 it("places dividers only between native comments during live import and replay, preserving exact originals", async () => {
