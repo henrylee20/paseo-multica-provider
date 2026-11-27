@@ -116,11 +116,17 @@ PNG、JPEG、GIF、WebP 图片上限 10 MiB，等比完整显示；文本、JSON
 
 每个 Run ID 通过父会话协商的 `session.subsession` 呈现为只读子会话 `session.opened{parentSessionId, toolCallId, restoration: "parent"}`（[ADR 0011](./adr/0011-run-as-provider-subagent.md)）：
 
-- 标题为执行 agent 名称，描述为输入触发来源与创建时间（Run 自身生成的评论不当作触发输入，无输入关联时显示「任务级执行」）；重跑的新 Run ID 生成新子代理。
+- 子会话 ID 固定为 `multica:run:<runId>`，不包含每次重开的父会话 ID；标题为执行 agent 名称，描述为输入触发来源与创建时间（Run 自身生成的评论不当作触发输入，无输入关联时显示「任务级执行」）。同一 Run 在热重载后恢复同一子代理与已打开的子面板，重跑的新 Run ID 生成新子代理。
 - 同一段连续文本流投影为同一原生助手消息块，工具等边界照实际顺序分隔。
 - 父讨论时间线按输入来源评论与创建时间排定一次静态 `sub_agent` 位置标记（状态固定 `completed`，子会话 `toolCallId` 指向该标记）：标记等待其输入锚点行（优先本讨论触发评论，否则最早输入关联评论，生成评论不作输入锚点）发出后，排在首条来源时间严格较晚的后续评论及其分隔线之前（同时间按 Run ID 排序）；无输入锚点的 Run 等完整评论快照可用后按纳秒时间参与排序；若存在输入来源却无对应行，须等开始等待后才发起的一次讨论刷新投递完成才认定锚点缺失。`markerProjected` 仅在标记实际发出后持久化，`history:skip` 只补发未发出的新标记，已有标记的 Run 立即恢复子会话。宿主按首次到达顺序固定条目位置，已错位的旧时间线需通过「重建数据」重排。
 - 父讨论内所有处于 `queued`、`dispatched`、`running`、`waiting_local_directory`、`deferred` 的归属 Run 共同维持一个原生活动 turn（每次新活动周期分配全新 UUID）；子会话将这五类状态映射为 `running` 并在细分状态变化时追加简短说明，`completed` / `failed` / `cancelled` 映射为 `completed` / `failed` / `canceled`。
-- 讨论在宿主打开（含导入）时，先按上述顺序发出 Run 标记，再同步打开对应子会话、推送已缓存内容并立即按已知终态结算，离线或明细拉取失败不阻塞终态展示；执行明细按连接分目录、每个 Run 单独原子落盘，仅消息或终态标记变化时写入，不进入 `state.json`；打开讨论时仅加载所属 Run 明细到内存，离线可重放这些文件。旧版 `state.json` 内嵌的 `runDetails` 直接丢弃，打开讨论后从远端重新补读，不迁移。归档与人工隐藏保留明细，切换 profile 清理与数据重建删除对应连接明细目录。仅本进程实际打开过的讨论补读远端执行明细（活跃期每 2 秒刷新，终态成功拉取后标记 `finalized` 停止；`finalized` 前不越过消息序号缺口，完成后按可得源顺序展示运行文本、思考、工具调用及结果、任务 `error` / `failure_reason` 与标明远端的 `work_dir` / `relative_work_dir`）。父会话纯关闭时仅清理本地子会话映射，不发子会话 `session.closed`。
+- 首次导入（本地尚无讨论 `agentId`）在 `session.ready` 前按上述顺序发出 Run 标记、子会话与缓存内容，供宿主收集导入历史；已有讨论重开时，`ready` 前不打开 Run 子会话，等待无中断 `listCommands(agentId)` 返回确认原生注册完成后，再 live 激活父聚合 turn 与子会话。用户主动打开同样执行该确认；没有原生确认回调的独立调用保留原投影回退。live 恢复只补发 `markerProjected` 尚未为真的新标记，不重复旧标记；已到达宿主的评论位置不能回移，恢复后补发的新标记可能追加在既有评论之后。
+- live 恢复先调用 `listProviderSubagents`；宿主已无该稳定子代理时从缓存全量投影，仍保留时完整分页读回 `fetchProviderSubagentTimeline`，按文本段 `messageId` 与连续文本前缀、思考文本、工具身份及错误／通知内容核对，只续传缺失部分并恢复最新状态／终态。目录或子时间线读取失败、分页不完整时仍恢复状态，跳过首次缓存批次以避免重复刷屏，后续新输出继续增量投影；该降级可能暂缺读取失败期间的既有日志，后续成功重开可重新核对。离线或明细拉取失败不阻塞已知终态展示。
+- 执行明细按连接分目录、每个 Run 单独原子落盘，仅消息或终态标记变化时写入，不进入 `state.json`；打开讨论时仅加载所属 Run 明细到内存，离线可重放这些文件。旧版 `state.json` 内嵌的 `runDetails` 直接丢弃，打开讨论后从远端重新补读，不迁移。归档与人工隐藏保留明细，切换 profile 清理与数据重建删除对应连接明细目录。仅本进程实际打开过的讨论补读远端执行明细（活跃期每 2 秒刷新，终态成功拉取后标记 `finalized` 停止；`finalized` 前不越过消息序号缺口，完成后按可得源顺序展示运行文本、思考、工具调用及结果、任务 `error` / `failure_reason` 与标明远端的 `work_dir` / `relative_work_dir`）。父会话纯关闭时仅清理本地子会话映射，不发子会话 `session.closed`；宿主显式关闭子会话时正常确认并释放该子映射，允许同连接再次投影。
+
+后台同步在发现活跃 Run，或本次概要读取刚将本地原活跃 Run 更新为终态时，对其固定归属的主讨论或 Thread 执行无中断自动唤醒。仅允许启用规则内、无 `archiveReason`、已创建 Paseo 工作区、工作区及讨论均未人工隐藏、未持有 `hold`、原生工作区与 agent 活跃且 provider／cwd／身份 labels 匹配的讨论；唤醒前再次执行 `assertCurrent` 与本地守卫。只调用不带 `purpose: "history"` 的 `listCommands(agentId)`，按讨论去重并节流 60 秒；失败不阻塞其他讨论，刚结算终态的候选保留至重试成功，已加载讨论直接接收概要更新。全程不调用 `refreshAgent` 或 `session.interrupt`。
+
+热重载瞬间的短暂 `failed`、父时间线中的 `Provider connection closed` 与前端本地合成的 `Subagent failed` 属于宿主关闭 runtime 的行为，插件无法阻止或删除；插件负责后续同步恢复状态和日志连接。上述热重载恢复已覆盖隔离／模拟自动化回归，真实 Paseo 宿主 UI 与 Multica 服务实机验收待执行。旧版本以父会话 ID 命名的遗留子代理无法通过公开 API 改名或删除，首次升级可能仍保留旧项，daemon 重启清空内存子代理后使用新稳定 ID。
 
 原生 **Stop** 与关闭运行中 tab 触发 `session.interrupt`：固定操作开始时归属该讨论的活跃 Run 集合并逐项调用取消接口，不扩大到其他 tab 或随后新发现的 Run；跨 Thread 的同一 Run 只能整体取消，取消与完成竞态保留服务端实际终态。集合全部确认终结后完成捕获的原生 turn，若期间已有后来 Run 仍在活动则立即以新 UUID 开启下一周期；任一项取消失败直接返回 `request.failed`，由用户再次点击 Stop（[ADR 0004](./adr/0004-native-interrupt-stops-remote-run.md)）。整工作区归档、筛选退出、客户端断开与单纯 `session.close` 不取消远端 Run；插件卸载清理等待已接收的 Stop 请求完成。
 

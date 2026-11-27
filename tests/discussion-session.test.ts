@@ -17,6 +17,7 @@ import { StopCoordinator } from "../server/stops.js";
 import { TaskDescriptions } from "../server/task-description.js";
 import type { StoredRow } from "../server/thread-state.js";
 import { ThreadSynchronizer } from "../server/threads.js";
+import type { NativeHost } from "../server/native-host.js";
 
 const cleanup: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const dispose of cleanup.splice(0).reverse()) await dispose(); });
@@ -32,7 +33,7 @@ const run = (overrides: Partial<StoredRun> = {}): StoredRun => storedRunSchema.p
   coalescedCommentIds: [], supplementCommentIds: [], createdAt: later, ...overrides,
 });
 
-async function fixture(seed: (issue: IssueMapping) => void) {
+async function fixture(seed: (issue: IssueMapping) => void, registeredHost?: (agentId: string) => Promise<NativeHost>, history: "replay" | "skip" = "replay") {
   const directory = await mkdtemp(join(tmpdir(), "multica-discussion-session-"));
   cleanup.push(() => rm(directory, { recursive: true, force: true }));
   const store = new StateStore(directory);
@@ -48,12 +49,12 @@ async function fixture(seed: (issue: IssueMapping) => void) {
   const runs = new RunSynchronizer(store), runDetails = new RunDetails(store, unavailable);
   const deliveries = new CommentDelivery(store, unavailable, unavailable, lifecycle);
   const stops = new StopCoordinator(store, unavailable, runs), descriptions = new TaskDescriptions(store);
-  const deps = { store, threads, runs, runDetails, deliveries, stops, lifecycle, descriptions, askusers };
+  const deps = { store, threads, runs, runDetails, deliveries, stops, lifecycle, descriptions, askusers, registeredHost };
   const events: ProviderEvent[] = [];
   const persistence = threadPersistence(address.connectionKey, address.issueId, address.rootId);
   const saved = (await store.read()).connections[address.connectionKey].issues[address.issueId];
   const session = new DiscussionSession(deps, event => { events.push(event); }, ["session.subsession"], {
-    type: "session.open", requestId: "open", sessionId: "session", history: "replay", persistence,
+    type: "session.open", requestId: "open", sessionId: "session", history, persistence,
     config: { cwd: directory, env: {}, mcpServers: {}, settings: {}, persist: true },
   }, address, saved, persistence, { remove: () => session.release() });
   cleanup.push(async () => {
@@ -66,6 +67,7 @@ async function fixture(seed: (issue: IssueMapping) => void) {
   await session.open();
   await store.read();
   return {
+    events, session, runs,
     order: () => events.flatMap(event => event.type === "timeline.item" && event.sessionId === "session" && /^multica:(comment:|run-marker:|askuser:)/.test(event.item.id)
       ? [event.item.id.replace("multica:", "")] : []),
     update: async (change: (issue: IssueMapping) => void) => {
@@ -84,6 +86,53 @@ it("orders mixed missing and invalid Run creation times by ID ahead of dated Run
     };
   });
   expect(f.order()).toEqual(["comment:root", "run-marker:a-missing", "run-marker:b-invalid", "run-marker:m-missing", "run-marker:z-invalid", "run-marker:dated", "comment:next"]);
+});
+
+it("collects children before ready for initial import even when native registration support exists", async () => {
+  const f = await fixture(issue => { issue.runs.run = run(); }, async () => { throw new Error("Import has no registered agent ID yet"); });
+  const child = f.events.findIndex(e => e.type === "session.opened" && e.parentSessionId);
+  expect(child).toBeGreaterThan(0);
+  expect(child).toBeLessThan(f.events.findIndex(e => e.type === "session.ready" && e.sessionId === "session"));
+  expect(f.session.closeChild("multica:run:run")).toBe(true);
+  await f.update(issue => { issue.runs.run.metadata = { work_dir: "/remote" }; });
+  expect(f.order().filter(id => id === "run-marker:run")).toHaveLength(1);
+});
+
+it.each(["replay", "skip"] as const)("defers persisted %s children and aggregate activity until native registration, without replaying markers", async history => {
+  let acknowledge!: (host: NativeHost) => void;
+  const registered = new Promise<NativeHost>(resolve => { acknowledge = resolve; });
+  const requested: string[] = [];
+  const f = await fixture(issue => {
+    issue.threads.root.agentId = "native";
+    if (history === "skip") issue.threads.root.rows = [];
+    issue.runs.old = run({ status: "running", markerProjected: true });
+  }, async agentId => { requested.push(agentId); return registered; }, history);
+  await expect.poll(() => requested).toEqual(["native"]);
+  const ready = f.events.findIndex(e => e.type === "session.ready" && e.sessionId === "session");
+  expect(ready).toBeGreaterThan(0);
+  expect(f.events.filter(e => e.type === "session.turn" || e.type === "session.opened" && e.parentSessionId)).toEqual([]);
+  // Store notifications while registration is blocked must also stay deferred.
+  await f.update(issue => { issue.runs.new = run({ status: "running", triggerCommentId: undefined }); });
+  expect(f.order().some(id => id.startsWith("run-marker:"))).toBe(false);
+  acknowledge({ listProviderSubagents: async () => ({ parentAgentId: "native", subagents: [], error: null }) } as unknown as NativeHost);
+  await expect.poll(() => f.events.filter(e => e.type === "session.opened" && e.parentSessionId).length).toBe(2);
+  expect(f.events.slice(0, ready).some(e => e.type === "session.turn")).toBe(false);
+  expect(f.events.filter(e => e.type === "session.turn" && e.sessionId === "session")).toMatchObject([{ state: "started" }]);
+  expect(f.order().filter(id => id.startsWith("run-marker:"))).toEqual(["run-marker:new"]);
+  await f.update(issue => { issue.runs.old.status = "completed"; issue.runs.new.status = "completed"; });
+  await f.runs.observe(address);
+  expect(f.events.filter(e => e.type === "session.turn" && e.sessionId === "session")).toMatchObject([{ state: "started" }, { state: "completed" }]);
+  expect(f.order().filter(id => id.startsWith("run-marker:"))).toEqual(["run-marker:new"]);
+});
+
+it("does not activate a persisted discussion released while native registration is pending", async () => {
+  let acknowledge!: (host: NativeHost) => void;
+  const registered = new Promise<NativeHost>(resolve => { acknowledge = resolve; });
+  const f = await fixture(issue => { issue.threads.root.agentId = "native"; issue.runs.old = run({ status: "running", markerProjected: true }); }, () => registered);
+  f.session.release(); const count = f.events.length;
+  acknowledge({} as NativeHost);
+  await new Promise(resolve => setImmediate(resolve));
+  expect(f.events).toHaveLength(count);
 });
 
 it("waits for its own complete history when a Run trigger belongs to another discussion", async () => {

@@ -18,6 +18,7 @@ import type { StopCoordinator } from "./stops.js";
 import type { RunAddress } from "./runs.js";
 import type { CommentDelivery } from "./delivery.js";
 import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
+import type { NativeHost } from "./native-host.js";
 
 export const persistenceSchema = z.object({ version: z.literal(1), data: z.object({
   connectionKey: z.string(), issueId: z.string(),
@@ -34,6 +35,7 @@ type Dependencies = {
   stops: StopCoordinator;
   lifecycle: DiscussionLifecycle;
   descriptions: TaskDescriptions;
+  registeredHost?: (agentId: string) => Promise<NativeHost>;
 };
 
 type DiscussionState = {
@@ -65,7 +67,12 @@ class DiscussionOrder {
   private readonly releasedRuns = new Set<string>();
   private completedRefresh = 0;
   private issue: IssueMapping;
-  constructor(private readonly session: DiscussionState, private readonly projection: RunProjection) { this.issue = session.issue; }
+  private replayMarkers: boolean;
+  constructor(private readonly session: DiscussionState, private readonly projection: RunProjection, private enabled = true) {
+    this.issue = session.issue; this.replayMarkers = enabled && session.input.history === "replay";
+  }
+  activate() { this.enabled = true; this.flush(undefined, true); }
+  finishReplay() { this.replayMarkers = false; }
   update(issue: IssueMapping) {
     this.issue = issue;
     for (const [id, run] of Object.entries(issue.runs)) {
@@ -80,7 +87,7 @@ class DiscussionOrder {
         })[0];
       if (!this.waitingRuns.has(id) || this.waitingRuns.get(id)!.anchor !== anchor)
         this.waitingRuns.set(id, { anchor, waitingAt: this.session.deps.threads.refreshSequence(this.session.address) });
-      if (this.session.input.history !== "replay" && run.markerProjected) this.releasedRuns.add(id);
+      if (!this.replayMarkers && run.markerProjected) this.releasedRuns.add(id);
     }
     this.flush(undefined, true);
   }
@@ -119,9 +126,9 @@ class DiscussionOrder {
     this.session.emit({ type: "timeline.item", sessionId: this.session.input.sessionId, item });
   }
   private projectRuns(latest: IssueMapping, runIds: Iterable<string>) {
-    const { deps: { store }, capabilities, input, address } = this.session;
-    if (!capabilities.includes("session.subsession")) return;
-    const markers = this.projection.project(latest, input.history === "replay", runIds);
+    const { deps: { store }, capabilities, address } = this.session;
+    if (!this.enabled || !capabilities.includes("session.subsession")) return;
+    const markers = this.projection.project(latest, this.replayMarkers, runIds);
     if (!markers.some(runId => !latest.runs[runId].markerProjected)) return;
     void store.update(state => {
       const saved = state.connections[address.connectionKey]?.issues[address.issueId];
@@ -134,6 +141,8 @@ class DiscussionOrder {
 export class DiscussionSession {
   private readonly state: DiscussionState;
   private released = false;
+  private projection?: RunProjection;
+  closeChild(sessionId: string) { return this.projection?.closeChild(sessionId) ?? false; }
 
   static async admit(deps: Pick<Dependencies, "store" | "lifecycle" | "runDetails"> & {
     capabilities: readonly string[]; has: (sessionId: string) => boolean;
@@ -171,7 +180,13 @@ export class DiscussionSession {
       restoration: "core", persistence: this.persistence, cwd: issue.cwd, title: issue.title,
       description: address.rootId === "main" ? taskDescriptionSummary(issue.description) : `Thread · ${issue.title}` });
     const projection = new RunProjection(input.sessionId, address.rootId, emit, runId => runDetails.get(address, runId));
-    const order = new DiscussionOrder(session, projection);
+    this.projection = projection;
+    const agentId = address.rootId === "main" ? issue.mainAgentId : issue.threads[address.rootId]?.agentId;
+    // Imports need child events in their collected history. Persisted agents
+    // instead need live events after the manager has subscribed to the parent.
+    const deferred = !!agentId && !!session.deps.registeredHost;
+    let live = !deferred, ready = false, activating: Promise<void> | undefined;
+    const order = new DiscussionOrder(session, projection, !deferred);
     session.order = order;
     order.update(issue);
     session.subscriptions.push(store.subscribe(state => {
@@ -261,7 +276,7 @@ export class DiscussionSession {
     let currentRuns: typeof issue.runs = {};
     const projectRuns = (owned: typeof issue.runs, activity = true) => {
       currentRuns = owned;
-      if (!activity) return;
+      if (!activity || !live) return;
       const active = Object.values(owned).some(run => isActiveRun(run.status));
       if (active && !session.turnId) {
         session.turnId = `multica:aggregate:${randomUUID()}`;
@@ -281,10 +296,31 @@ export class DiscussionSession {
       session.turnId = undefined;
       projectRuns(currentRuns);
     };
-    session.subscriptions.push(runs.subscribe(address, owned => projectRuns(owned)));
+    const activate = () => {
+      if (!ready || live || !this.isValid(true)) return;
+      if (!Object.keys(currentRuns).length) return;
+      if (activating) return;
+      activating = (async () => {
+        const host = await session.deps.registeredHost!(agentId!);
+        if (!this.isValid(true)) return;
+        let latest = (await store.read()).connections[address.connectionKey]?.issues[address.issueId];
+        if (!latest) return;
+        if (capabilities.includes("session.subsession")) await projection.restore(host, agentId!, latest);
+        if (!this.isValid(true)) return;
+        latest = (await store.read()).connections[address.connectionKey]?.issues[address.issueId];
+        if (!latest) return;
+        live = true; order.update(latest); order.activate();
+        await runs.observe(address);
+      })().catch(() => {}).finally(() => { activating = undefined; });
+    };
+    session.subscriptions.push(runs.subscribe(address, owned => {
+      projectRuns(owned);
+      if (!live) activate();
+    }));
     emit({ type: "session.ready", requestId: input.requestId, sessionId: input.sessionId });
-    opening = false;
-    // Native registration completes after session.ready / importAgent returns.
+    opening = false; ready = true; order.finishReplay();
+    // Never await a listCommands request inside session.open: it waits for
+    // this open to finish registering. Direct unit callers retain the fallback.
     setImmediate(() => { if (this.isValid()) void runs.observe(address).catch(() => {}); });
   }
 

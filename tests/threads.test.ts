@@ -150,6 +150,8 @@ async function fixture(initialRuns: Run[] = [], openOnImport = true, initialMess
   }
   const host = {
     listHosts: async () => ({ self: { serverId: "owning-daemon" } }),
+    listCommands: async (agentId: string) => ({ agentId, commands: [], error: null, requestId: "commands" }),
+    listProviderSubagents: async (parentAgentId: string) => ({ parentAgentId, subagents: [], error: null }),
     listProjects: async () => ({ projects: [] }),
     addProject: async () => ({ project: { projectId: "project", projectKind: "non_git" } }), renameProject: async () => {},
     fetchWorkspaces: async () => ({ entries: [], pageInfo: { hasMore: false } }),
@@ -270,7 +272,7 @@ it("lists only cached visible Threads by activity and title, with ownership flag
   } finally { remote.mockRestore(); }
 });
 
-it.each(["empty", "cached"])("interleaves cached Run markers and children with %s comment history on replay", async cache => {
+it.each(["empty", "cached"])("restores cached Run children live after persisted %s comment history", async cache => {
   const f = await fixture([
     { id: "b", issue_id: "issue", agent_id: "owned-agent", status: "completed", trigger_comment_id: "grandchild", created_at: "2026-11-24T10:00:02.5Z" },
     { id: "a", issue_id: "issue", agent_id: "owned-agent", status: "completed", trigger_comment_id: "child", created_at: "2026-11-24T10:00:01.5Z" },
@@ -288,14 +290,15 @@ it.each(["empty", "cached"])("interleaves cached Run markers and children with %
     expect(discussionOrder(f.timelines.get(sessionId))).toEqual([]);
     await f.server.rpc(threadOpen, address, f.paseo);
   }
-  expect(discussionOrder(f.timelines.get(sessionId))).toEqual([
-    "comment:root", "divider:child", "comment:child", "run-marker:a", "divider:grandchild", "comment:grandchild", "run-marker:b",
+  await expect.poll(() => discussionOrder(f.timelines.get(sessionId))).toEqual([
+    "comment:root", "divider:child", "comment:child", ...(cache === "empty" ? ["run-marker:a"] : []),
+    "divider:grandchild", "comment:grandchild", ...(cache === "cached" ? ["run-marker:a"] : []), "run-marker:b",
   ]);
-  await expect.poll(() => f.timelines.get(`${sessionId}:run:a`)?.some(row => row.type === "assistant_message" && row.text === "Cached execution")).toBe(true);
+  await expect.poll(() => f.timelines.get("multica:run:a")?.some(row => row.type === "assistant_message" && row.text === "Cached execution")).toBe(true);
   const marker = f.providerEvents.findIndex(event => event.type === "timeline.item" && event.sessionId === sessionId && event.item.id === "multica:run-marker:a");
-  const child = f.providerEvents.findIndex(event => event.type === "session.opened" && event.sessionId === `${sessionId}:run:a`);
+  const child = f.providerEvents.findIndex(event => event.type === "session.opened" && event.sessionId === "multica:run:a");
   expect(marker).toBeLessThan(child);
-  expect(f.providerEvents).toContainEqual({ type: "session.turn", sessionId: `${sessionId}:run:a`, turnId: "a", state: "completed" });
+  expect(f.providerEvents).toContainEqual({ type: "session.turn", sessionId: "multica:run:a", turnId: "a", state: "completed" });
 });
 
 it("orders Runs sharing a trigger by nanosecond creation time then ID and places a later rerun after intervening comments", async () => {
@@ -365,7 +368,7 @@ it("anchors an untriggered Run to the earliest input association in its fixed di
   expect(discussionOrder(f.timelines.get(parent.id))).toEqual(["comment:root", "divider:child", "comment:child", "run-marker:associated", "divider:grandchild", "comment:grandchild"]);
 });
 
-it.each([true, false])("ignores a trigger in another discussion and uses local inputs when available: %s", async associated => {
+it.each([true, false])("restores a fixed child despite a trigger in another discussion, with local inputs: %s", async associated => {
   const f = await fixture([{ id: "cross-thread", issue_id: "issue", agent_id: "owned-agent", status: "completed", trigger_comment_id: "root", created_at: "2026-11-24T10:00:00.5Z" }], false);
   f.comments[1].created_at = "2026-11-24T10:00:01Z"; f.comments[2].created_at = "2026-11-24T10:00:02Z";
   f.comments.push(comment("other", null, "Other discussion"));
@@ -376,9 +379,9 @@ it.each([true, false])("ignores a trigger in another discussion and uses local i
   const parent = f.native.agents[1], reads = f.requests.filter(request => request.url.includes("thread=")).length;
   await (await f.connect()).send({ type: "session.open", requestId: "cross-thread", sessionId: parent.id, history: "replay", persistence: JSON.parse(parent.handle.slice(7)), config: { cwd: parent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
   expect(f.requests.filter(request => request.url.includes("thread="))).toHaveLength(reads);
-  expect(discussionOrder(f.timelines.get(parent.id))).toEqual(associated
-    ? ["comment:root", "divider:child", "comment:child", "run-marker:cross-thread", "divider:grandchild", "comment:grandchild"]
-    : ["comment:root", "run-marker:cross-thread", "divider:child", "comment:child", "divider:grandchild", "comment:grandchild"]);
+  await expect.poll(() => discussionOrder(f.timelines.get(parent.id))).toEqual([
+    "comment:root", "divider:child", "comment:child", "divider:grandchild", "comment:grandchild", "run-marker:cross-thread",
+  ]);
 });
 
 it("defers a newly discovered skip marker until its trigger is confirmed and restores existing children immediately", async () => {
@@ -390,7 +393,7 @@ it("defers a newly discovered skip marker until its trigger is confirmed and res
   f.runs.push({ id: "new", issue_id: "issue", agent_id: "owned-agent", status: "completed", trigger_comment_id: "new-input" });
   await resync(f.server, f.paseo, "remote-workspace");
   await provider.send({ type: "session.open", requestId: "skip", sessionId: "skip", history: "skip", persistence: JSON.parse(parent.handle.slice(7)), config: { cwd: parent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
-  expect(f.providerEvents).toContainEqual(expect.objectContaining({ type: "session.opened", sessionId: "skip:run:old" }));
+  expect(f.providerEvents).toContainEqual(expect.objectContaining({ type: "session.opened", sessionId: "multica:run:old" }));
   expect(discussionOrder(f.timelines.get("skip"))).toEqual([]);
   await resync(f.server, f.paseo, "remote-workspace");
   const order = discussionOrder(f.timelines.get("skip"));
@@ -713,10 +716,11 @@ it("fixes first ownership across cross-Thread coalescing, later associations and
     await provider.send({ type: "session.open", requestId: `replay-${agent.id}`, sessionId: agent.id, history: "replay", persistence: JSON.parse(agent.handle.slice(7)), config: { cwd: agent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
     await restarted.server.rpc(threadOpen, { ...JSON.parse(agent.handle.slice(7)).data, rootId: agent.labels["multica.discussion"] }, f.paseo);
   }
-  const owners = (runId: string) => replay.flatMap(event => event.type === "timeline.item" && event.item.id === `multica:run-marker:${runId}` ? [f.native.agents.find(agent => agent.id === event.sessionId)!.labels["multica.discussion"]] : []);
-  expect(owners("earliest")).toEqual(["z-earliest"]);
-  expect(owners("unanchored")).toEqual(["main"]);
-  expect(owners("trigger")).toEqual(["a-later"]);
+  const owners = (runId: string) => replay.flatMap(event => event.type === "session.opened" && event.sessionId === `multica:run:${runId}` ? [f.native.agents.find(agent => agent.id === event.parentSessionId)!.labels["multica.discussion"]] : []);
+  await expect.poll(() => owners("earliest")).toEqual(["z-earliest"]);
+  await expect.poll(() => owners("unanchored")).toEqual(["main"]);
+  await expect.poll(() => owners("trigger")).toEqual(["a-later"]);
+  expect(replay.some(event => event.type === "timeline.item" && event.item.id.startsWith("multica:run-marker:"))).toBe(false);
   await provider.close();
 });
 
@@ -807,7 +811,7 @@ it("shares agent and member reads across an opened Thread and Run summaries in o
 it("negotiates read-only Run children and static completed markers, appending granular active states", async () => {
   const f = await fixture([{ id: "one", issue_id: "issue", agent_id: "owned-agent", status: "queued", trigger_comment_id: "child" }]);
   await loadDiscussion(f);
-  const parent = f.native.agents[1].id, child = `${parent}:run:one`;
+  const parent = f.native.agents[1].id, child = "multica:run:one";
   expect((await f.connect()).capabilities).toContain("session.subsession");
   expect(f.providerEvents).toContainEqual(expect.objectContaining({ type: "session.opened", sessionId: child, parentSessionId: parent, toolCallId: "multica:run-marker:one", restoration: "parent", title: "Lin Agent", description: "由 River 的评论触发", capabilities: [] }));
   const marker = f.timelines.get(parent)!.find(row => row.id === "multica:run-marker:one");
@@ -819,7 +823,7 @@ it("negotiates read-only Run children and static completed markers, appending gr
   expect(f.providerEvents.filter(event => event.type === "timeline.item" && event.sessionId === parent && event.item.id === marker!.id)).toHaveLength(1);
   expect(f.providerEvents.filter(event => event.type === "session.turn" && event.sessionId === child)).toMatchObject([{ state: "started" }, { state: "completed" }]);
   f.runs.push({ ...f.runs[0], id: "rerun", status: "running" }); await resync(f.server, f.paseo, "remote-workspace");
-  expect(f.providerEvents).toContainEqual(expect.objectContaining({ type: "session.opened", sessionId: `${parent}:run:rerun` }));
+  expect(f.providerEvents).toContainEqual(expect.objectContaining({ type: "session.opened", sessionId: "multica:run:rerun" }));
   const connection = await f.connect();
   await connection.send({ type: "session.prompt", sessionId: child, prompt: { clientMessageId: "readonly", delivery: "auto", input: { type: "message", content: [{ type: "text", text: "No" }] } } });
   expect(f.providerEvents).toContainEqual(expect.objectContaining({ type: "session.prompt_result", sessionId: child, result: expect.objectContaining({ type: "failed" }) }));
@@ -840,7 +844,7 @@ it("pushes ordered text, reasoning, tool input/results and full failure/remote m
   ];
   const f = await fixture([{ id: "detail", issue_id: "issue", agent_id: "owned-agent", status: "failed", trigger_comment_id: "root", error: "Pre-stream error", failure_reason: "directory_error", work_dir: "/remote/path", relative_work_dir: "../code" }], true, messages);
   await loadDiscussion(f);
-  const parent = f.native.agents[1].id, child = `${parent}:run:detail`;
+  const parent = f.native.agents[1].id, child = "multica:run:detail";
   const rows = f.timelines.get(child)!;
   const messagesOnly = rows.filter(row => row.id.startsWith("run-message:"));
   expect(messagesOnly.slice(0, 4)).toMatchObject([{ type: "assistant_message", text: "Starting" }, { type: "reasoning", text: "Plan" }, { type: "tool_call", name: "read", detail: { text: expect.stringContaining("code.ts") } }, { type: "tool_call", detail: { label: "工具结果" } }]);
@@ -912,7 +916,7 @@ it("reads details only for discussions opened in this process, refreshes active 
   await loadDiscussion(f);
   await expect.poll(() => f.requests.filter(request => request.url.includes("/tasks/live/messages")).length).toBe(1);
   f.messages.push({ task_id: "live", issue_id: "issue", seq: 1, type: "text", content: "Periodic output" });
-  await expect.poll(() => f.timelines.get(`${agent.id}:run:live`)?.some(row => row.type === "assistant_message" && row.text === "Periodic output"), { timeout: 4000 }).toBe(true);
+  await expect.poll(() => f.timelines.get("multica:run:live")?.some(row => row.type === "assistant_message" && row.text === "Periodic output"), { timeout: 4000 }).toBe(true);
   expect(f.requests.some(request => request.url.includes("/tasks/unopened/messages"))).toBe(false);
   f.runs[0].status = "completed";
   await resync(f.server, f.paseo, "remote-workspace");
@@ -921,7 +925,7 @@ it("reads details only for discussions opened in this process, refreshes active 
   expect(f.requests.filter(request => request.url.includes("/tasks/live/messages"))).toHaveLength(count);
   await provider.send({ type: "session.close", requestId: "close", sessionId: agent.id });
   await provider.send({ type: "session.open", requestId: "reopen", sessionId: "again", history: "skip", persistence: JSON.parse(agent.handle.slice(7)), config: { cwd: agent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
-  expect(f.timelines.get("again:run:live")).toContainEqual(expect.objectContaining({ type: "assistant_message", text: "Periodic output" }));
+  expect(f.timelines.get("multica:run:live")).toContainEqual(expect.objectContaining({ type: "assistant_message", text: "Periodic output" }));
   expect(f.timelines.get("again")?.some(row => row.id.startsWith("multica:run-marker:"))).toBe(false);
 }, 10_000);
 
@@ -931,7 +935,7 @@ it("fills delayed source gaps without reordering projected messages and retains 
   const base = { task_id: "gap", issue_id: "issue" };
   f.messages.push({ ...base, seq: 3, type: "text", content: "Third" }, { ...base, seq: 1, type: "text", content: "First" });
   await resync(f.server, f.paseo, "remote-workspace");
-  const child = `${f.native.agents[1].id}:run:gap`;
+  const child = "multica:run:gap";
   expect(f.timelines.get(child)!.filter(row => row.type === "assistant_message").map(row => row.text)).toEqual(["First"]);
   f.messages.push({ ...base, seq: 2, type: "text", content: "Second" });
   await resync(f.server, f.paseo, "remote-workspace");
@@ -963,14 +967,14 @@ it("rejects cross-Issue execution messages and keeps previously cached child con
   await loadDiscussion(f);
   f.messages.push({ task_id: "safe", issue_id: "other-issue", seq: 2, type: "text", content: "Wrong Issue" });
   await resync(f.server, f.paseo, "remote-workspace");
-  const rows = f.timelines.get(`${f.native.agents[1].id}:run:safe`)!;
+  const rows = f.timelines.get("multica:run:safe")!;
   expect(rows.filter(row => row.type === "assistant_message").map(row => row.text)).toEqual(["Authorized"]);
 });
 
 it("does not render null or empty Run metadata as errors or paths", async () => {
   const f = await fixture([{ id: "healthy", issue_id: "issue", agent_id: "owned-agent", status: "completed", trigger_comment_id: "root", error: null, failure_reason: null, work_dir: null, relative_work_dir: "" }]);
   await loadDiscussion(f);
-  const rows = f.timelines.get(`${f.native.agents[1].id}:run:healthy`)!;
+  const rows = f.timelines.get("multica:run:healthy")!;
   expect(rows.filter(row => row.id.startsWith("run-metadata:"))).toEqual([]);
   expect(rows.filter(row => row.type === "error")).toEqual([]);
 });
@@ -978,7 +982,7 @@ it("does not render null or empty Run metadata as errors or paths", async () => 
 it("leaves running child teardown to the host when its parent closes", async () => {
   const f = await fixture([{ id: "live-close", issue_id: "issue", agent_id: "owned-agent", status: "running", trigger_comment_id: "root" }]);
   await loadDiscussion(f);
-  const parent = f.native.agents[1].id, child = `${parent}:run:live-close`;
+  const parent = f.native.agents[1].id, child = "multica:run:live-close";
   const start = f.providerEvents.length;
   await (await f.connect()).send({ type: "session.close", requestId: "close-parent", sessionId: parent });
   expect(f.providerEvents.slice(start)).toContainEqual({ type: "session.closed", sessionId: parent });
@@ -1018,7 +1022,7 @@ it("ends a terminal child immediately while deferring messages behind a missing 
   const base = { task_id: "gap-end", issue_id: "issue" };
   const f = await fixture([{ id: "gap-end", issue_id: "issue", agent_id: "owned-agent", status: "running", trigger_comment_id: "root" }], true, [{ ...base, seq: 3, type: "text", content: "Third" }]);
   await loadDiscussion(f);
-  const child = `${f.native.agents[1].id}:run:gap-end`;
+  const child = "multica:run:gap-end";
   expect(f.timelines.get(child)!.some(row => row.type === "assistant_message")).toBe(false);
   let release!: () => void, entered!: () => void;
   const blocked = new Promise<void>(resolve => { release = resolve; }), arrived = new Promise<void>(resolve => { entered = resolve; });
@@ -1059,7 +1063,7 @@ it("shows a historical Run's terminal state when its execution messages cannot b
   await provider.send({ type: "session.open", requestId: "offline-open", sessionId: parent.id, history: "skip", persistence: JSON.parse(parent.handle.slice(7)), config: { cwd: parent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
   await loadDiscussion(f);
   await expect.poll(() => f.requests.some(request => request.url.includes("/tasks/offline/messages"))).toBe(true);
-  expect(f.providerEvents.filter(event => event.type === "session.turn" && event.sessionId === `${parent.id}:run:offline`)).toMatchObject([{ state: "started" }, { state: "completed" }]);
+  expect(f.providerEvents.filter(event => event.type === "session.turn" && event.sessionId === "multica:run:offline")).toMatchObject([{ state: "started" }, { state: "completed" }]);
 });
 
 it("places dividers only between native comments during live import and replay, preserving exact originals", async () => {

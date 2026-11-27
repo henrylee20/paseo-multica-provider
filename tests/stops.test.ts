@@ -131,6 +131,8 @@ async function fixture(initialRuns: Run[] = []) {
   }
   const host = {
     listHosts: async () => ({ self: { serverId: "owning-daemon" } }),
+    listCommands: async (agentId: string) => ({ agentId, commands: [], error: null, requestId: "commands" }),
+    listProviderSubagents: async (parentAgentId: string) => ({ parentAgentId, subagents: [], error: null }),
     listProjects: async () => ({ projects: [] }),
     addProject: async () => ({ project: { projectId: "project", projectKind: "non_git" } }), renameProject: async () => {},
     fetchWorkspaces: async () => ({ entries: [], pageInfo: { hasMore: false } }),
@@ -222,8 +224,8 @@ it("reads actual terminal race outcomes without tracking cleanup evidence", asyn
   const thread = f.native.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
   await (await f.connect()).send({ type: "session.interrupt", requestId: "stop", sessionId: thread.id });
   expect(f.providerEvents).toContainEqual({ type: "request.completed", requestId: "stop" });
-  expect(f.providerEvents).toContainEqual(expect.objectContaining({ type: "session.turn", sessionId: `${thread.id}:run:finished`, state: "completed" }));
-  expect(f.providerEvents).toContainEqual(expect.objectContaining({ type: "session.turn", sessionId: `${thread.id}:run:failed`, state: "failed" }));
+  expect(f.providerEvents).toContainEqual(expect.objectContaining({ type: "session.turn", sessionId: "multica:run:finished", state: "completed" }));
+  expect(f.providerEvents).toContainEqual(expect.objectContaining({ type: "session.turn", sessionId: "multica:run:failed", state: "failed" }));
 });
 
 it("keeps available failure metadata from a per-Run Stop receipt when execution messages are unavailable", async () => {
@@ -233,7 +235,7 @@ it("keeps available failure metadata from a per-Run Stop receipt when execution 
   f.cancel(async () => ({ body: { ...f.runs[0], status: "failed", ...metadata } }));
   const thread = f.native.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
   await (await f.connect()).send({ type: "session.interrupt", requestId: "failed-receipt", sessionId: thread.id });
-  const rows = f.timelines.get(`${thread.id}:run:failed-during-stop`)!;
+  const rows = f.timelines.get("multica:run:failed-during-stop")!;
   expect(rows).toContainEqual(expect.objectContaining({ type: "error", message: "任务错误：Runtime failed before streaming" }));
   expect(rows).toContainEqual(expect.objectContaining({ type: "notification", message: "远端目录：/remote/original" }));
 });
@@ -366,6 +368,6 @@ it("does not reactivate a cancelled run when an older in-flight snapshot finishe
   const thread = f.native.agents.find(agent => agent.labels["multica.discussion"] === "root")!;
   await (await f.connect()).send({ type: "session.interrupt", requestId: "stop", sessionId: thread.id });
   release(); await staleSnapshot;
-  expect(f.providerEvents).toContainEqual(expect.objectContaining({ type: "session.turn", sessionId: `${thread.id}:run:active`, state: "canceled" }));
+  expect(f.providerEvents).toContainEqual(expect.objectContaining({ type: "session.turn", sessionId: "multica:run:active", state: "canceled" }));
   expect(f.providerEvents.filter(event => event.type === "session.turn" && event.sessionId === thread.id).map(event => event.type === "session.turn" ? event.state : null)).toEqual(["started", "completed"]);
 });
