@@ -188,7 +188,7 @@ it("the client renders the task description as visible Markdown and removes its 
   const renderers: PluginTimelineRendererContribution[] = [];
   const setup = await bundledContribution("../index.client.tsx", {
     "react": { useEffect: () => {}, useState: (value: unknown) => [value, () => {}] },
-    "@getpaseo/plugin/client": { useRpc: () => async () => ({}) },
+    "@getpaseo/plugin/client": { useAgent: () => null, useRpc: () => async () => ({}) },
     "@getpaseo/plugin/client/ui": { Markdown: ({ children }: { children: string }) => children },
     "react-native": { View: "View", Text: "Text" },
   });
@@ -225,7 +225,7 @@ it("a reader can explicitly load every page of a long description from its visib
       if (!(index in state)) state[index] = initial;
       return [state[index], (value: unknown) => { state[index] = typeof value === "function" ? (value as (previous: unknown) => unknown)(state[index]) : value; }];
     } },
-    "@getpaseo/plugin/client": { useRpc: (contract: { name: string }) => async (input: { offset: number }) => {
+    "@getpaseo/plugin/client": { useAgent: () => null, useRpc: (contract: { name: string }) => async (input: { offset: number }) => {
       calls.push({ name: contract.name, input });
       return input.offset === 0 ? { text: "## 完整目标\n\n", nextOffset: 10 } : { text: "最后一段。", nextOffset: null };
     } },
@@ -294,7 +294,7 @@ it.each(["task-description"])("the compiled %s reader stops stalled cursors and 
         });
       },
     },
-    "@getpaseo/plugin/client": { useRpc: (contract: { name: string }) => {
+    "@getpaseo/plugin/client": { useAgent: () => null, useRpc: (contract: { name: string }) => {
       if (!rpcs.has(contract.name)) rpcs.set(contract.name, async input => {
         if (!contract.name.endsWith(".read")) return data;
         calls.push(input.offset);
@@ -499,6 +499,151 @@ function componentTree() {
 
 type Answer = (name: string, input: unknown) => unknown;
 
+async function discussionHarness(answer: (input: { workspaceId: string }) => unknown = () => ({ identifier: "PRD-1", threads: [], hiddenCount: 0 })) {
+  const tree = componentTree();
+  const updates = vi.fn(), read = vi.fn(async (input: { workspaceId: string }) => answer(input));
+  const buttons: Array<{ accessibilityLabel: string; onPress(): void; style?: (state: { pressed: boolean }) => unknown }> = [];
+  const texts: Array<{ children: unknown; numberOfLines?: number; style: Record<string, unknown> }> = [];
+  const views: Array<{ style: Record<string, unknown>; children?: unknown }> = [];
+  const icons: Array<{ name: string; color: string }> = [];
+  const links: string[] = [];
+  let agent: { workspaceId: string; labels: Record<string, string> } | null = { workspaceId: "native-workspace", labels: {} };
+  const setup = await bundledContribution("../index.client.tsx", {
+    react: { ...tree.react, useState(initial: unknown) {
+      const [value, set] = tree.react.useState(initial);
+      return [value, (next: unknown) => { updates(next); (set as (next: unknown) => void)(next); }];
+    } },
+    "@getpaseo/plugin/client": { useAgent: (_id: string, select: (agent: unknown) => unknown) => agent && select(agent),
+      useRpc: (contract: { name: string }) => contract.name === "discussion.list" ? read : async () => ({}) },
+    "@getpaseo/plugin/client/ui": { Icon: (props: typeof icons[number]) => { icons.push(props); return null; }, Loading: () => "正在加载",
+      Markdown: ({ children }: any) => children, ScrollView: ({ children }: any) => children,
+      ExternalLink: ({ href, children }: any) => { links.push(href); return children; } },
+    "react-native": { View: (props: typeof views[number]) => { views.push(props); return props.children; },
+      Text: (props: typeof texts[number]) => { texts.push(props); return props.children; },
+      Pressable: (props: typeof buttons[number] & { children: unknown }) => { buttons.push(props); return props.children; } },
+  });
+  const panels: Array<{ id: string; Component: FunctionComponent<any> }> = [];
+  const renderers: Array<{ kind: string; schema: zod.ZodType; Component: FunctionComponent<any> }> = [];
+  const openPanel = vi.fn(), openAgent = vi.fn();
+  const dispose = setup({ rpc: async () => ({}), openPanel,
+    addWorkspacePanel: (entry: typeof panels[number]) => { panels.push(entry); return () => { panels.splice(panels.indexOf(entry), 1); }; },
+    addSettingsScreen: () => () => {}, addSidebarHeaderItem: () => () => {},
+    addTimelineRenderer: (entry: typeof renderers[number]) => { renderers.push(entry); return () => {}; },
+  });
+  const colors = { surface0: "theme-surface", surface1: "theme-card", surface2: "theme-pill", border: "theme-border", foreground: "theme-fg", foregroundMuted: "theme-muted",
+    statusSuccess: "theme-success", statusWarning: "theme-warning", statusDanger: "theme-danger" };
+  const props = { agentId: "agent", workspaceId: "native-workspace", revision: 0, navigation: { openAgent }, theme: { colors }, layout: { compact: false, platform: "web" } };
+  function render(Component: FunctionComponent<any>, extra: Record<string, unknown>) {
+    buttons.length = 0; texts.length = 0; views.length = 0; icons.length = 0; links.length = 0;
+    return tree.render(createElement(Component, { ...props, ...extra }));
+  }
+  function row(kind: string, data: unknown, compact: boolean) {
+    const renderer = renderers.find(renderer => renderer.kind === kind)!;
+    return render(renderer.Component, { item: { data: renderer.schema.parse(data) }, layout: { ...props.layout, compact } });
+  }
+  return { read, updates, buttons, texts, views, icons, links, openPanel, openAgent, colors,
+    panel(extra: Record<string, unknown> = {}) { return render(panels.find(panel => panel.id === "discussion-list")!.Component, extra); },
+    description(compact = false, url?: string) { return row("task-description", { connectionKey: "connection", issueId: "issue", revision: "v1", preview: "正文", truncated: false, ...(url ? { overview: { url } } : {}) }, compact); },
+    delivery(compact = false, data: unknown = {}) { return row("comment-delivery", data, compact); },
+    setAgent(value: typeof agent) { agent = value; },
+    unmount() { tree.unmount(); },
+    dispose() { tree.unmount(); dispose(); },
+  };
+}
+
+it("the discussion panel renders status flags and opens only mapped Thread agents through host navigation", async () => {
+  const year = new Date().getFullYear();
+  const h = await discussionHarness(() => ({ identifier: "PRD-1", hiddenCount: 2, threads: [
+    { rootId: "one", title: "有映射的 Thread", agentId: "thread-agent", lastActivityAt: `${year}-11-24T09:30:00`, running: true, pendingAskuser: true },
+    { rootId: "two", title: "暂未映射的 Thread", running: false, pendingAskuser: false },
+  ] }));
+  try {
+    expect(h.panel()).toBe("正在加载");
+    await vi.waitFor(() => expect(h.panel()).toContain("PRD-1 · 2 个 Thread"));
+    const text = h.panel();
+    expect(text).toContain("11-24 09:30执行中待回答");
+    expect(text).toContain("另有 2 个已隐藏讨论，可在 Multica 设置页恢复。");
+    expect(text).not.toMatch(/主讨论|· 当前/);
+    expect(h.texts.filter(text => text.numberOfLines === 2).map(text => text.children)).toEqual(["有映射的 Thread", "暂未映射的 Thread"]);
+    expect(h.icons.map(icon => icon.name)).toEqual(["MessageSquare", "MessageSquare"]);
+    expect(h.texts.find(text => text.children === "执行中")?.style.color).toBe(h.colors.statusSuccess);
+    expect(h.texts.find(text => text.children === "待回答")?.style.color).toBe(h.colors.statusWarning);
+    expect(h.views.some(view => view.style.width === 6 && view.style.backgroundColor === h.colors.statusSuccess)).toBe(true);
+    expect(h.buttons.map(button => button.accessibilityLabel)).toEqual(["有映射的 Thread"]);
+    expect(h.buttons[0].style?.({ pressed: true })).toContainEqual({ backgroundColor: h.colors.surface2 });
+    h.buttons[0].onPress();
+    expect(h.openAgent).toHaveBeenCalledExactlyOnceWith({ agentId: "thread-agent" });
+    expect(h.panel({ navigation: undefined })).toContain("当前 Paseo 版本不支持从面板打开，请在侧边栏打开对应讨论。");
+    expect(h.buttons).toEqual([]);
+  } finally { h.dispose(); }
+});
+
+it.each([null, { threads: [], hiddenCount: 0 }])("the discussion panel distinguishes an unknown workspace from an empty task: %j", async result => {
+  const h = await discussionHarness(() => result);
+  try {
+    h.panel();
+    await vi.waitFor(() => expect(h.panel()).toContain(result ? "此任务暂无 Thread。" : "此 Paseo 工作区不是 Multica 任务"));
+    expect(h.panel()).not.toContain(result ? "不是 Multica 任务" : "此任务暂无 Thread。");
+    expect(h.buttons).toEqual([]);
+  } finally { h.dispose(); }
+});
+
+it("the discussion panel polls every five seconds, refreshes revisions immediately, and discards stale or unmounted results", async () => {
+  vi.useFakeTimers();
+  const replies: Array<(value: unknown) => void> = [];
+  const h = await discussionHarness(() => new Promise(resolve => { replies.push(resolve); }));
+  const response = (identifier: string) => ({ identifier, threads: [], hiddenCount: 0 });
+  try {
+    h.panel(); h.panel();
+    expect(h.read).toHaveBeenCalledExactlyOnceWith({ workspaceId: "native-workspace" });
+    await vi.advanceTimersByTimeAsync(4999);
+    expect(h.read).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(h.read).toHaveBeenCalledTimes(2);
+    replies[1](response("Newer")); await vi.advanceTimersByTimeAsync(0);
+    replies[0](response("Older")); await vi.advanceTimersByTimeAsync(0);
+    expect(h.panel()).toContain("Newer");
+    h.panel({ revision: 1 });
+    expect(h.read).toHaveBeenCalledTimes(3);
+    h.panel({ workspaceId: "another-workspace", revision: 1 });
+    expect(h.read).toHaveBeenLastCalledWith({ workspaceId: "another-workspace" });
+    replies[2](response("Previous revision")); await vi.advanceTimersByTimeAsync(0);
+    expect(h.panel({ workspaceId: "another-workspace", revision: 1 })).toBe("正在加载");
+    const writes = h.updates.mock.calls.length;
+    h.unmount();
+    replies[3](response("After unmount")); await vi.advanceTimersByTimeAsync(15_000);
+    expect(h.updates).toHaveBeenCalledTimes(writes);
+    expect(h.read).toHaveBeenCalledTimes(4);
+  } finally { h.dispose(); vi.useRealTimers(); }
+});
+
+it.each([false, true])("overview and new-Thread actions open the discussion panel in the correct location with compact=%s", async compact => {
+  const h = await discussionHarness();
+  try {
+    h.description(compact);
+    expect(h.buttons.map(button => button.accessibilityLabel)).toEqual(["讨论列表"]);
+    expect(h.views.filter(view => view.style.height === 1)).toHaveLength(1);
+    h.buttons[0].onPress();
+    expect(h.openPanel).toHaveBeenLastCalledWith("discussion-list", { workspaceId: "native-workspace", location: compact ? "workspace" : "explorer" });
+    h.description(compact, "https://multica.example/issue");
+    expect(h.icons.map(icon => icon.name)).toEqual(["PanelRight", "ExternalLink"]);
+    expect(h.links).toEqual(["https://multica.example/issue"]);
+    expect(h.delivery(compact)).toContain("已新建 Thread。在讨论列表中查看");
+    h.buttons[0].onPress();
+    expect(h.openPanel).toHaveBeenLastCalledWith("discussion-list", { workspaceId: "native-workspace", location: compact ? "workspace" : "explorer" });
+    expect(h.delivery(compact, { threadCreated: false })).toBe("");
+    expect(h.buttons).toEqual([]);
+    h.setAgent(null);
+    expect(h.description(compact)).toBe("任务描述正文");
+    expect(h.views.filter(view => view.style.height === 1)).toHaveLength(0);
+    expect(h.buttons).toEqual([]);
+    h.description(compact, "https://multica.example/issue");
+    expect(h.links).toHaveLength(1); expect(h.buttons).toEqual([]);
+    expect(h.delivery(compact)).toBe("已新建 Thread。");
+    expect(h.buttons).toEqual([]);
+  } finally { h.dispose(); }
+});
+
 it("the version 1 overview card uses theme colors, collapses through the first body paragraph and keeps legacy descriptions readable", async () => {
   const tree = componentTree();
   const buttons: Array<{ accessibilityLabel: string; onPress(): void }> = [];
@@ -509,7 +654,7 @@ it("the version 1 overview card uses theme colors, collapses through the first b
   const markdown: string[] = [];
   const renderers: Array<{ kind: string; version: number; schema: zod.ZodType; Component: any }> = [];
   const setup = await bundledContribution("../index.client.tsx", {
-    react: tree.react, "@getpaseo/plugin/client": { useRpc: () => async () => ({}) },
+    react: tree.react, "@getpaseo/plugin/client": { useAgent: () => null, useRpc: () => async () => ({}) },
     "@getpaseo/plugin/client/ui": { Icon: (props: any) => { icons.push(props); return null; }, Markdown: ({ children }: any) => { markdown.push(children); return children; },
       ExternalLink: (props: any) => { links.push(props); return props.children; } },
     "react-native": { View: (props: any) => { views.push(props); return props.children; }, Text: (props: any) => { texts.push(props); return props.children; },
@@ -542,7 +687,7 @@ it("the version 1 overview card uses theme colors, collapses through the first b
     expect(links[0].children.props.style).toMatchObject({ flexDirection: "row", alignItems: "center", gap: 4 });
     expect(icons).toContainEqual({ name: "ExternalLink", size: 14, color: colors.foregroundMuted });
     expect(texts.find(text => text.children === "在 Multica 打开")?.style).toMatchObject({ color: colors.foregroundMuted, fontSize: 13 });
-    expect(views.find(view => isValidElement<{ href?: string }>(view.children) && view.children.props.href === links[0].href)?.style)
+    expect(views.find(view => [view.children].flat().some(child => isValidElement<{ href?: string }>(child) && child.props.href === links[0].href))?.style)
       .toMatchObject({ flexDirection: "row", alignItems: "center" });
     const dividers = () => views.filter(view => view.style.height === 1 && view.style.backgroundColor === colors.border);
     expect(dividers()).toHaveLength(2);
@@ -649,9 +794,12 @@ async function attachmentHarness(answer: (input: any) => unknown = () => ({ kind
   };
 }
 
-it("registers both attachment panel locations and removes the panel on disposal", async () => {
+it("registers attachment and discussion panels in both locations and removes them on disposal", async () => {
   const h = await attachmentHarness();
-  expect(h.panels).toMatchObject([{ id: "attachment-preview", title: "Multica 附件", icon: "Paperclip", locations: ["explorer", "workspace"] }]);
+  expect(h.panels).toMatchObject([
+    { id: "attachment-preview", title: "Multica 附件", icon: "Paperclip", locations: ["explorer", "workspace"] },
+    { id: "discussion-list", title: "讨论列表", icon: "PanelRight", locations: ["explorer", "workspace"] },
+  ]);
   h.dispose();
   expect(h.panels).toEqual([]);
 });

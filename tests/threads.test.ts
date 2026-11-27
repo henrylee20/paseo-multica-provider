@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
-import { mkdtemp, mkdir, writeFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
@@ -9,7 +9,9 @@ import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { ProviderConnection, ProviderEvent, ProviderTimelineItem } from "@getpaseo/plugin/server/provider";
 import { workspaceEnable, syncBootstrap } from "../shared/contracts.js";
 import { createServerContribution } from "../server/contribute.js";
-import { threadOpen, commentEventDetail } from "../shared/threads.js";
+import { threadOpen, commentEventDetail, discussionList } from "../shared/threads.js";
+import { StateStore, connectionState, issueSchema } from "../server/state.js";
+import { runStatusSchema } from "../shared/runs.js";
 import { FakeServer, resync } from "./support/fake-server.js";
 import { metadataHost } from "./support/metadata-host.js";
 import { readTaskDescription } from "../shared/description.js";
@@ -215,6 +217,57 @@ async function loadDiscussion(f: Awaited<ReturnType<typeof fixture>>, rootId = "
   const parent = f.native.agents.find(agent => agent.labels["multica.discussion"] === rootId)!;
   return f.server.rpc(threadOpen, { ...JSON.parse(parent.handle.slice(7)).data, rootId }, f.paseo);
 }
+
+it("lists only cached visible Threads by activity and title, with ownership flags, even without a CLI connection", async () => {
+  const home = await mkdtemp(join(tmpdir(), "multica-discussions-"));
+  cleanup.push(() => rm(home, { recursive: true, force: true }));
+  const directory = join(home, "state"), store = new StateStore(directory);
+  const statuses = runStatusSchema.options;
+  await store.update(state => {
+    state.owner = { profile: "" };
+    const saved = connectionState(state, "cached-account");
+    saved.issues.issue = issueSchema.parse({ remoteWorkspaceId: "remote", workspaceId: "native", cwd: home, title: "Task", description: "Goal",
+      overview: { identifier: "PRD-1" }, mainAgentId: "main-agent", manualHidden: { workspace: false, discussions: ["main", "hidden", "not-mapped"] },
+      threads: { main: { title: "主讨论" }, hidden: { title: "Hidden", agentId: "hidden-agent" }, newest: { title: "Z latest", agentId: "newest-agent" },
+        beta: { title: "Beta", agentId: "beta-agent" }, alpha: { title: "Alpha", agentId: "alpha-agent" }, missingB: { title: "Delta" }, missingA: { title: "Charlie" },
+        ...Object.fromEntries(statuses.map(status => [status, { title: `Run ${status}` }])),
+      },
+      commentRoots: { first: "newest", last: "newest", beta: "beta", alpha: "alpha", hidden: "hidden", invalid: "missingB", main: "main" },
+      commentCreatedAt: { first: stamp, last: "2026-11-24T10:00:00.100000002Z", beta: "2026-11-24T10:00:00.100000001Z", alpha: "2026-11-24T10:00:00.100000001Z",
+        hidden: "2027-01-01T00:00:00Z", invalid: "not-a-time", main: "2028-01-01T00:00:00Z", unrelated: "2029-01-01T00:00:00Z" },
+      runs: Object.fromEntries([...statuses.map(status => [status, { agentId: "remote-agent", agentName: "Agent", status, ownerRootId: status,
+        coalescedCommentIds: [], supplementCommentIds: [] }]), ["latest", { agentId: "remote-agent", agentName: "Agent", status: "queued", ownerRootId: "newest",
+        coalescedCommentIds: ["alpha"], supplementCommentIds: [] }]]),
+      askuserCards: { pending: { commentId: "card", attachmentId: "file", rootId: "beta", status: "pending", collapsed: true },
+        deleted: { commentId: "deleted", attachmentId: "file", rootId: "alpha", status: "pending", deleted: true },
+        answered: { commentId: "answered", attachmentId: "file", rootId: "alpha", status: "answered" },
+        main: { commentId: "main-card", attachmentId: "file", rootId: "main", status: "pending" } },
+    });
+    connectionState(state, "another-account").issues.issue = issueSchema.parse({ remoteWorkspaceId: "remote", workspaceId: "other-native", cwd: home, title: "Other", description: "" });
+  });
+  const server = new FakeServer(), connectHost = vi.fn();
+  const dispose = createServerContribution({ homeDirectory: home, workingDirectory: home, stateDirectory: directory, environment: {}, connectHost })(server.context);
+  cleanup.push(dispose);
+  const remote = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Cached RPC must not read Multica"));
+  try {
+    const before = await stat(join(directory, "state.json")), contents = await readFile(join(directory, "state.json"), "utf8");
+    const result = await server.rpc(discussionList, { workspaceId: "native" }, {} as PaseoApi);
+    expect(result).toMatchObject({ identifier: "PRD-1", hiddenCount: 2 });
+    expect(result!.threads.slice(0, 5).map(thread => thread.rootId)).toEqual(["newest", "alpha", "beta", "missingA", "missingB"]);
+    expect(result!.threads[0]).toMatchObject({ agentId: "newest-agent", lastActivityAt: "2026-11-24T10:00:00.100000002Z", running: true, pendingAskuser: false });
+    expect(result!.threads.find(thread => thread.rootId === "alpha")).toMatchObject({ running: false, pendingAskuser: false });
+    expect(result!.threads.find(thread => thread.rootId === "beta")).toMatchObject({ running: false, pendingAskuser: true });
+    expect(result!.threads.find(thread => thread.rootId === "missingA")?.agentId).toBeUndefined();
+    expect(result!.threads.find(thread => thread.rootId === "missingB")?.lastActivityAt).toBeUndefined();
+    expect(result!.threads.some(thread => ["main", "hidden"].includes(thread.rootId))).toBe(false);
+    for (const status of statuses) expect(result!.threads.find(thread => thread.rootId === status)?.running).toBe(!["completed", "failed", "cancelled"].includes(status));
+    expect(await server.rpc(discussionList, { workspaceId: "other-native" }, {} as PaseoApi)).toMatchObject({ threads: [], hiddenCount: 0 });
+    expect(await server.rpc(discussionList, { workspaceId: "unknown" }, {} as PaseoApi)).toBeNull();
+    expect(remote).not.toHaveBeenCalled(); expect(connectHost).not.toHaveBeenCalled();
+    expect((await stat(join(directory, "state.json"))).ino).toBe(before.ino);
+    expect(await readFile(join(directory, "state.json"), "utf8")).toBe(contents);
+  } finally { remote.mockRestore(); }
+});
 
 it.each(["empty", "cached"])("interleaves cached Run markers and children with %s comment history on replay", async cache => {
   const f = await fixture([

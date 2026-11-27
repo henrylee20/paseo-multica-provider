@@ -20,7 +20,7 @@
 
 每个 Issue 另有本地主讨论，展示任务概览卡、Multica 平台生成的顶层系统评论（如运行时不可用通知）与首次展示时完全无评论关联的 Run。状态、负责人、优先级等变化记录在 Multica activity 中，不作为主讨论系统事件展示；概览在同步后反映最新任务信息。主讨论本身不是远端 Thread：在此发送消息会创建新的顶层评论及远端 Thread；在真实 Thread 内发送则回复其根评论。
 
-概览卡沿用 `task-description` 版本 1 与稳定 ID，新增可选 `overview`，旧行无概览或概览校验失败时仅展示描述部分，坏概览不影响状态加载或描述行解析。卡片使用带边框、12px 圆角的 `surface1` 容器：首行依次显示任务 identifier、按类别着色的状态（进行中使用 accent 底色与 accentForeground 文字，已完成使用 statusSuccess 文字，已关闭及其他使用 foregroundMuted 文字）、优先级（`none` 隐藏）及截止日期（当年 `MM-DD`，跨年带年份）；下方显示有名称的负责人、Multica 项目与逐个 pill 呈现的非空标签列表，分隔线后显示「任务描述」。描述默认按空行切段，保留开头标题行直到并包含首个非标题段；有后续段或预览截断时提供「展开全文 / 收起」，展开且截断时可「读取完整描述」。空描述显示「（此任务暂无描述）」。当前连接配置 `appUrl` 且有 Multica 工作区 slug 时，底部在分隔线后的横向页脚行提供宿主外链「在 Multica 打开」（外链图标与 13 号 foregroundMuted 文字行内排列），地址使用 identifier（缺失时用 Issue ID）；无链接时页脚行与其分隔线均不显示。主讨论的会话简介优先取首个非空且非 Markdown 标题的正文行，无正文行时退回首个标题行并去掉标题前缀，最多 120 个字符，超出加「…」。Thread 的会话简介在打开与列表中均为 `Thread · <任务标题>`。
+概览卡沿用 `task-description` 版本 1 与稳定 ID，新增可选 `overview`，旧行无概览或概览校验失败时仅展示描述部分，坏概览不影响状态加载或描述行解析。卡片使用带边框、12px 圆角的 `surface1` 容器：首行依次显示任务 identifier、按类别着色的状态（进行中使用 accent 底色与 accentForeground 文字，已完成使用 statusSuccess 文字，已关闭及其他使用 foregroundMuted 文字）、优先级（`none` 隐藏）及截止日期（当年 `MM-DD`，跨年带年份）；下方显示有名称的负责人、Multica 项目与逐个 pill 呈现的非空标签列表，分隔线后显示「任务描述」。描述默认按空行切段，保留开头标题行直到并包含首个非标题段；有后续段或预览截断时提供「展开全文 / 收起」，展开且截断时可「读取完整描述」。空描述显示「（此任务暂无描述）」。当前连接配置 `appUrl` 且有 Multica 工作区 slug 时，底部在分隔线后的横向页脚行提供宿主外链「在 Multica 打开」（外链图标与 13 号 foregroundMuted 文字行内排列），地址使用 identifier（缺失时用 Issue ID）；有 Paseo 工作区 ID 时同一页脚还提供「讨论列表」；无链接且无法取得 Paseo 工作区 ID 时页脚行与其分隔线均不显示。主讨论的会话简介优先取首个非空且非 Markdown 标题的正文行，无正文行时退回首个标题行并去掉标题前缀，最多 120 个字符，超出加「…」。Thread 的会话简介在打开与列表中均为 `Thread · <任务标题>`。
 
 概览字段逐项容错，格式不正确时视为缺失，不阻断工作区同步。负责人、Multica 项目及内置状态的名称目录仅在该快照有需要时请求，按工作区在快照内复用；目录失败时同 ID（负责人同时核对类型）保留旧名称，否则省略负责人／项目名称。状态名优先使用非空 `status_name`，再查含归档状态的目录，失败或无匹配时回退为类别名称（未开始／进行中／已完成／已关闭），最后显示原状态 key。概览变化原位更新同一行，描述分页仍以描述原文 revision 校验。
 
@@ -80,6 +80,16 @@ CLI 配置文件原子替换、重新登录和登出会触发重读；每次远�
 Paseo `0.16.0+` 的讨论输入框注册 `multica-mention` 选择器（「提及 Agent」），搜索当前任务所属工作区的智能体并插入 `[@名称](mention://agent/<id>)` 规范引用（显示 ID 以区分同名 agent）；`0.15.x` 宿主不显示该选择器，宿主内置 `@` 文件候选保持不变。运行中普通发送通过 `prompt.steer` 接收输入并发表普通评论，交由 Multica 路由合并或排队，不强制远端中断；显式 `interrupt` 与客户端 `queue` 遵循宿主协议，插件不自建发送队列。
 
 本人评论按连接用户 ID 与作者类型判定（本人名下的 agent 发言仍为 `assistant`）。相邻原生评论之间插入独立的 `comment-divider` 细线（首尾不加线，恢复与回声不重复加线）。原生消息保留首次读取正文，远端编辑、删除与 Multica 平台系统评论追加独立的 `comment-event` 条目（超长事件经 `thread.event` 按需读取全文）；事件行隐去评论 ID，标题为「<类别> · MM-DD HH:mm」（非当年带年份），使用本地时间。系统评论取来源创建时间，更正／删除取来源更新时间（缺失时取创建时间）；无效时间仅显示类别，不再另列发言时间或来源更新时间。Thread 内同样适用。已有 Markdown 与附件链接原样保留，编辑/删除评论、新建 Issue 与修改任务状态仍在 Multica 完成。
+
+### 讨论列表
+
+概览卡页脚在「在 Multica 打开」之前提供「讨论列表」入口；主讨论的新 Thread 投递提示后提供「在讨论列表中查看」，回复附件行不提供该入口。两者经 `useAgent` 取得 Paseo 工作区 ID 后调用 `openPanel("discussion-list", { workspaceId, location })`，普通布局使用右侧边栏 `explorer`，紧凑布局使用工作区 tab。概览卡有 Multica 链接或可取得 Paseo 工作区 ID 时显示页脚行与其分隔线，二者均无时隐藏。
+
+工作区面板 `discussion-list`（标题「讨论列表」）只列 Thread，不列主讨论或「当前」标记。`discussion.list` RPC 仅按 Paseo 工作区 ID 查找本地缓存，独立于当前 CLI 连接，不请求 Multica、不写状态；未知工作区返回空结果，面板提示「此 Paseo 工作区不是 Multica 任务」。列表显示任务 identifier（若有）及 Thread 数量；人工隐藏的讨论不列出，除 `main` 外的隐藏记录计入底部「另有 N 个已隐藏讨论，可在 Multica 设置页恢复。」。无 Thread 时显示「此任务暂无 Thread。」。
+
+每项包含标题、可选原生 agent ID 与活动时间、执行中和待回答标记。活动时间取 `commentRoots` 归属该 Thread 的评论中最大的 `commentCreatedAt`，按时间倒序排列，有时间的项在前，相同时间或均无时间时按标题排序；显示本地 `MM-DD HH:mm`（非当年带年份）。存在 `ownerRootId` 属于该 Thread 的活跃 Run 时以 statusSuccess 色圆点与「执行中」提示，存在该 Thread 下未删除且 `pending` 的 AskUser 卡片时以 statusWarning 色显示「待回答」。标题最多两行。
+
+面板挂载期间每 5 秒轮询本地 RPC，`revision` 变化立即刷新，卸载清理定时器并忽略在途结果。仅有 agent ID 且宿主提供 `navigation` 时，行可调用 `navigation.openAgent({ agentId })` 打开或聚焦讨论。旧宿主缺少 `navigation` 时，列表只读，顶部显示「当前 Paseo 版本不支持从面板打开，请在侧边栏打开对应讨论。」。插件不从时间线直接导航，不读取当前活跃 tab 或实时原生 agent 状态；对已归档 agent 的打开行为尚未核实。
 
 ### 附件预览
 
@@ -152,7 +162,7 @@ PNG、JPEG、GIF、WebP 图片上限 10 MiB，等比完整显示；文本、JSON
 
 ## 客户端入口与工程验证
 
-客户端仅注册四类公开扩展点：设置页 `multica`、侧边栏顶部快捷入口 `multica`（点击直接打开设置页）、`0.16.0+` 输入框 `multica-mention` 选择器，以及 6 个时间线 renderer（`task-description`、`thread`、`comment-divider`、`comment-event`、`askuser`、`comment-delivery`）。manifest 声明 `requirements.paseo = ">=0.15.3"`。
+客户端注册五类公开扩展点：设置页 `multica`、侧边栏顶部快捷入口 `multica`（点击直接打开设置页）、`0.16.0+` 输入框 `multica-mention` 选择器、支持 `explorer` 与 `workspace` 两个位置的工作区面板（附件预览 `attachment-preview`、讨论列表 `discussion-list`），以及 6 个时间线 renderer（`task-description`、`thread`、`comment-divider`、`comment-event`、`askuser`、`comment-delivery`）。manifest 声明 `requirements.paseo = ">=0.15.3"`。
 
 自动化测试通过临时 CLI 配置、可控时钟、隔离 HTTP/WebSocket 与编译后 bundle，在公开贡献、provider、RPC 与 renderer 边界验证行为；静态源码核查与隔离测试不替代真实 Paseo 宿主和真实 Multica 服务的端到端验收。
 

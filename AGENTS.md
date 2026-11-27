@@ -27,6 +27,7 @@ Paseo 源码插件（插件 ID：`multica`），将 Multica 工作区、Issue、
   - `connection-screen.tsx`、`workspace-list.tsx`、`workspace-rule.tsx`、`data-rebuild.tsx`、`hidden-objects.tsx`、`sync-status.ts`：设置页（连接与 CLI profile 切换确认、工作区筛选与只读预览、数据重建、人工隐藏恢复）；侧边栏顶部快捷入口在 `index.client.tsx` 通过 `addSidebarHeaderItem` 打开同一设置页。
   - `mention-picker.tsx`：Paseo `0.16+` 输入框 `multica-mention` 选择器，读取 agent `metadata` 中的连接与任务标识并插入带 ID 的 canonical 引用。
   - `attachment-preview.tsx`：按 Paseo 工作区传递当前投递附件选择，以面板 `tab.state` 恢复，提供右侧边栏与工作区 tab 预览；`delivery-status.tsx` 提供入口。
+  - `discussion-list.tsx`：按 Paseo 工作区只读轮询本地 Thread 列表，通过面板 `navigation.openAgent` 打开讨论；入口位于概览卡与主讨论投递行。
   - `task-description.tsx`、`thread-events.tsx`、`askuser-card.tsx`、`delivery-status.tsx`、`chunked-text.ts`：注册 6 类时间线 renderer（`task-description`、`thread`、`comment-divider`、`comment-event`、`askuser`、`comment-delivery`）。
 - **服务端（`server/*`）**
   - `attachments.ts`：仅预览本任务已记录的投递附件，核对当前连接、限量流式读取，允许一次无凭据重定向并拒绝 HTTPS 降级。

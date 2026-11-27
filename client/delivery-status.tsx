@@ -14,7 +14,10 @@ export function DeliveryStatus({ agentId, item, theme, layout, client }: PluginT
   const agent = useAgent(agentId, value => ({ workspaceId: value.workspaceId, connectionKey: value.labels[discussionKeys.connection], issueId: value.labels[discussionKeys.issue] }));
   const data = item.data;
   return <View style={{ gap: 4 }}>
-    {data.threadCreated !== false ? <Text style={{ color: theme.colors.foregroundMuted }}>{data.threadTitle ? `已新建 Thread「${data.threadTitle}」` : "已新建 Thread。"}</Text> : null}
+    {data.threadCreated !== false ? <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 10 }}>
+      <Text style={{ color: theme.colors.foregroundMuted }}>{data.threadTitle ? `已新建 Thread「${data.threadTitle}」` : "已新建 Thread。"}</Text>
+      {agent?.workspaceId ? <HeaderAction theme={theme} label="在讨论列表中查看" icon="PanelRight" onPress={() => client.openPanel("discussion-list", { workspaceId: agent.workspaceId!, location: layout.compact ? "workspace" : "explorer" })} /> : null}
+    </View> : null}
     {data.attachments?.map(attachment => {
       const label = <Text style={{ color: theme.colors.foreground }}>{attachment.name} · {attachment.mimeType} · {formatSize(attachment.size)}</Text>;
       if (agent?.workspaceId && agent.connectionKey && agent.issueId) {

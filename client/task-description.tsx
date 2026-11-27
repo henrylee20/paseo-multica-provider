@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { useRpc, type PluginTimelineItemProps } from "@getpaseo/plugin/client";
+import { useAgent, useRpc, type PluginClientContext, type PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import { ExternalLink, Icon, Markdown, SettingsAction } from "@getpaseo/plugin/client/ui";
 import { Text, View } from "react-native";
 import type { z } from "zod";
@@ -8,7 +8,7 @@ import { collectText } from "./chunked-text.js";
 import { formatDate } from "./format.js";
 import { HeaderAction } from "./ui-kit.js";
 
-type DescriptionProps = PluginTimelineItemProps<z.output<typeof taskDescriptionSchema>>;
+type DescriptionProps = PluginTimelineItemProps<z.output<typeof taskDescriptionSchema>> & { client: PluginClientContext };
 
 function Pill({ theme, color = theme.colors.foregroundMuted, backgroundColor = theme.colors.surface2, children }: { theme: DescriptionProps["theme"]; color?: string; backgroundColor?: string; children: ReactNode }) {
   return <View style={{ paddingHorizontal: 8, paddingVertical: 2, borderRadius: 10, backgroundColor }}>
@@ -28,8 +28,9 @@ export function TaskDescription(props: DescriptionProps) {
   return <TaskDescriptionBody key={`${connectionKey}:${issueId}:${revision}`} {...props} />;
 }
 
-function TaskDescriptionBody({ item, theme }: DescriptionProps) {
+function TaskDescriptionBody({ agentId, item, theme, layout, client }: DescriptionProps) {
   const read = useRpc(readTaskDescription);
+  const workspaceId = useAgent(agentId, agent => agent.workspaceId);
   const [fullDescription, setFullDescription] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -83,15 +84,16 @@ function TaskDescriptionBody({ item, theme }: DescriptionProps) {
       {expanded && item.data.truncated && fullDescription === null ? <SettingsAction label="描述较长，当前仅显示预览。"
         actionLabel={loading ? "正在读取…" : "读取完整描述"} disabled={loading} onPress={() => { void load(); }} /> : null}
     </View>
-    {overview?.url ? <>
+    {overview?.url || workspaceId ? <>
       <View style={{ height: 1, backgroundColor: theme.colors.border }} />
       <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 18 }}>
-        <ExternalLink href={overview.url} onError={() => setError("无法打开 Multica 链接，请重试。")}>
+        {workspaceId ? <HeaderAction theme={theme} label="讨论列表" icon="PanelRight" onPress={() => client.openPanel("discussion-list", { workspaceId, location: layout.compact ? "workspace" : "explorer" })} /> : null}
+        {overview?.url ? <ExternalLink href={overview.url} onError={() => setError("无法打开 Multica 链接，请重试。")}>
           <View style={{ flexDirection: "row", alignItems: "center", gap: 4, marginRight: 4 }}>
             <Icon name="ExternalLink" size={14} color={theme.colors.foregroundMuted} />
             <Text style={{ color: theme.colors.foregroundMuted, fontSize: 13 }}>在 Multica 打开</Text>
           </View>
-        </ExternalLink>
+        </ExternalLink> : null}
       </View>
     </> : null}
     {error ? <Text accessibilityRole="alert" style={{ color: theme.colors.statusDanger }}>{error}</Text> : null}
