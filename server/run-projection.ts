@@ -23,7 +23,7 @@ function chunks(text: string) {
   }
   return result.length ? result : [""];
 }
-function messageItems(runId: string, message: RunMessage): ProviderTimelineItem[] {
+function messageItems(runId: string, message: RunMessage, messageId?: string): ProviderTimelineItem[] {
   const tool = message.type === "tool_use" || message.type === "tool_result";
   const text = message.type === "tool_use" ? message.input === undefined ? "工具输入缺失" : JSON.stringify(message.input, null, 2)
     : message.type === "tool_result" ? (message.output ?? "输出缺失") + (message.output_truncated === true ? "\n源端已截断：缺失内容无法恢复。" : "")
@@ -35,13 +35,14 @@ function messageItems(runId: string, message: RunMessage): ProviderTimelineItem[
       detail: { type: "plain_text", label: message.type === "tool_use" ? "工具调用" : "工具结果", text: part },
       ...(message.call_id ? { metadata: { sourceCallId: message.call_id } } : {}) };
     if (message.type === "error") return { type: "error", id, message: part };
-    return { type: message.type === "thinking" ? "reasoning" : "assistant_message", id, text: part };
+    if (message.type === "thinking") return { type: "reasoning", id, text: part };
+    return { type: "assistant_message", id, messageId, text: part };
   });
 }
 
 /** One projection per opened parent. Children are read-only and restored by their parent. */
 export class RunProjection {
-  private readonly children = new Map<string, { sessionId: string; status: StoredRun["status"]; rows: Set<string>; messages: Set<number>; ended?: StoredRun["status"]; changes: number }>();
+  private readonly children = new Map<string, { sessionId: string; status: StoredRun["status"]; rows: Set<string>; messages: Set<number>; textSegment?: { messageId: string; lastSeq: number }; ended?: StoredRun["status"]; changes: number }>();
   constructor(private readonly parentSessionId: string, private readonly rootId: string, private readonly emit: (event: ProviderEvent) => void,
     private readonly detail: (runId: string) => RunDetail | undefined = () => undefined) {}
   project(issue: IssueMapping, replayMarkers = true, runIds: Iterable<string> = Object.keys(issue.runs)) {
@@ -81,7 +82,12 @@ export class RunProjection {
         expected++;
         if (child.messages.has(message.seq)) continue;
         child.messages.add(message.seq);
-        for (const item of messageItems(runId, message)) send(item, message.created_at);
+        // Keep incremental text identity across reads; gaps and non-text sources end the segment.
+        child.textSegment = message.type === "text" ? {
+          messageId: child.textSegment?.lastSeq === message.seq - 1 ? child.textSegment.messageId : `run-text:${runId}:${message.seq}`,
+          lastSeq: message.seq,
+        } : undefined;
+        for (const item of messageItems(runId, message, child.textSegment?.messageId)) send(item, message.created_at);
       }
       for (const [field, value] of Object.entries(run.metadata ?? {})) {
         if (value == null || value === "") continue;

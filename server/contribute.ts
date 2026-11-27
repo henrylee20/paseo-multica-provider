@@ -24,6 +24,8 @@ import { hiddenRestore } from "../shared/hiding.js";
 import { StopCoordinator } from "./stops.js";
 import { CommentDelivery } from "./delivery.js";
 import { deliveryMentions } from "../shared/delivery.js";
+import { attachmentPreview } from "../shared/attachments.js";
+import { previewAttachment } from "./attachments.js";
 import { AskUsers } from "./askuser.js";
 import { AskuserWakeups } from "./askuser-wakeup.js";
 import { askuserObserve, askuserRead, askuserReopen, askuserSkip } from "../shared/askuser.js";
@@ -135,6 +137,7 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       join(owningHome || join(dependencies.homeDirectory ?? homedir(), ".paseo"), "uploads"));
     threads.coordinateDeliveries(() => deliveries.waitForPosts());
     server.handle(deliveryMentions, async input => deliveries.mentions(input));
+    server.handle(attachmentPreview, input => previewAttachment(store, connection, input));
     const descriptions = new TaskDescriptions(store);
     server.registerProvider(createMulticaProvider(store, threads, runs, stops, deliveries, descriptions, lifecycle, askusers, runDetails,
       () => { void synchronizer.reconcile().catch(() => {}); }));

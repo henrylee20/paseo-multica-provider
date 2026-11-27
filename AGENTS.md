@@ -22,11 +22,14 @@ Paseo 源码插件（插件 ID：`multica`），将 Multica 工作区、Issue、
   - `scripts/build.mjs`：打包发布目录与归档白名单。增删根目录文件或调整 `docs/` 结构时同步更新白名单。
 - **共享契约（`shared/*`）**
   - 客户端与服务端共用的 Zod RPC 定义、设置 schema、时间线插件行 schema 与活跃 Run 分类。
+  - `attachments.ts`：投递附件预览 RPC 的身份输入、文件信息与图片／文本／Markdown／不支持结果契约。
 - **客户端（`client/*`）**
   - `connection-screen.tsx`、`workspace-list.tsx`、`workspace-rule.tsx`、`data-rebuild.tsx`、`hidden-objects.tsx`、`sync-status.ts`：设置页（连接与 CLI profile 切换确认、工作区筛选与只读预览、数据重建、人工隐藏恢复）；侧边栏顶部快捷入口在 `index.client.tsx` 通过 `addSidebarHeaderItem` 打开同一设置页。
   - `mention-picker.tsx`：Paseo `0.16+` 输入框 `multica-mention` 选择器，读取 agent `metadata` 中的连接与任务标识并插入带 ID 的 canonical 引用。
+  - `attachment-preview.tsx`：按 Paseo 工作区传递当前投递附件选择，以面板 `tab.state` 恢复，提供右侧边栏与工作区 tab 预览；`delivery-status.tsx` 提供入口。
   - `task-description.tsx`、`thread-events.tsx`、`askuser-card.tsx`、`delivery-status.tsx`、`chunked-text.ts`：注册 6 类时间线 renderer（`task-description`、`thread`、`comment-divider`、`comment-event`、`askuser`、`comment-delivery`）。
 - **服务端（`server/*`）**
+  - `attachments.ts`：仅预览本任务已记录的投递附件，核对当前连接、限量流式读取，允许一次无凭据重定向并拒绝 HTTPS 降级。
   - **鉴权与状态**：`connection.ts`（只读复用 CLI 配置与目录枚举、mtime/大小缓存、60 秒 `/api/me` 缓存、环境变量覆盖、任务上下文隔离、请求级撤销信号 `assertCurrent`）；`state.ts`（位于 `PASEO_HOME/multica-provider` 的原子落盘 `StateStore`，返回只读快照，通过 `state.owner.profile` 追踪数据归属）。
   - **原生宿主与同步生命周期**：`native-host.ts`（从 `PASEO_HOME/paseo.pid.listen` 连接并比对 `serverId` 后调用底层 `DaemonClient`，含防唤醒保护 `restoreWorkspacePreservingHidden`）；`sync.ts`（`SidebarSynchronizer`：15 秒轮询 + `workspace-events.ts` WebSocket 失效触发、独立短队列保存规则、规则版本淘汰旧快照、空 Project 移除与重建外壳迁移、切换 profile 可续跑清理）；`rebuild.ts`（`DataRebuild`：串行暂停同步并按 `deleteAgent` → `archiveWorkspace` → `removeProject` 重建当前连接数据，持久化递增 `rebuildGeneration`）；`hiding.ts`（区分 `archiveReason` 自动归档与人工隐藏 hook）；`discussion-lifecycle.ts`（本地资源 `hold` 门禁）；`discussion-metadata.ts`（首次成功前在 bootstrap 扫描补齐标签到 `metadata` 的镜像，导入与恢复单独写入）。
   - **Provider、讨论、执行与提问**：`provider.ts`（协商 `session.subsession`，`DiscussionOrder` 按来源评论与创建时间交错排定 AskUser 卡片与 Run 标记首次输出，`prompt_result` 前乐观发出 `user_message`，`history:skip` 委托 `projection-recovery.ts` 完整分页核对原生原文）；`threads.ts`、`delivery.ts`（先发现卡片再投递评论分页、相邻评论 `comment-divider`、同 `Idempotency-Key` 最多 3 次发送、成功 `clientMessageId` 回声映射）；`runs.ts`、`run-details.ts`、`run-projection.ts`、`stops.ts`（五类关联 + RFC3339Nano 首次固定 `ownerRootId`、已打开讨论按需每 2 秒补读活跃 Run 明细、只读子会话与静态 `sub_agent` 位置徽章、固定快照逐项取消与聚合 turn UUID 轮换）；`askuser*.ts`（同源 64 KiB `askuser.json` 持久缓存、完整 `timeline` 终态核对、`QuestionFormCard` 映射与全选填文本「提交确认」题、`listCommands` 无中断后台加载及原生注册完成后 live 公布新权限）。

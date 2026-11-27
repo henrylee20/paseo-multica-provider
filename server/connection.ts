@@ -206,7 +206,7 @@ export async function remoteFetch(connection: AuthenticatedConnection, path: str
   const headers = new Headers(init.headers);
   headers.set("Authorization", `Bearer ${connection.token}`);
   const signals = [AbortSignal.timeout(timeoutMs), ...(connection.signal ? [connection.signal] : []), ...(init.signal ? [init.signal] : [])];
-  const response = await fetch(`${connection.apiUrl}${path}`, { ...init, headers, redirect: "error", signal: AbortSignal.any(signals) });
+  const response = await fetch(`${connection.apiUrl}${path}`, { ...init, headers, redirect: init.redirect === "manual" ? "manual" : "error", signal: AbortSignal.any(signals) });
   if ((response.status === 401 || response.status === 403) && connection.identity) connection.identity.expiresAt = 0;
   return response;
 }
