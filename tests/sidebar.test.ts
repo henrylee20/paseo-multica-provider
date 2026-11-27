@@ -55,9 +55,10 @@ async function fixture(syncIntervalMs: number | null = 15_000, homePrefix = "mul
   const workspaceIssues = new Map([["product", issues]]);
   const scopes: Array<{ path: string; slug?: string }> = [];
   const workspaces = [{ id: "remote-workspace", name: "产品开发", slug: "product" }];
+  const heldWorkspaceReads: Array<() => void> = [];
   const heldIssueReads: Array<(() => void) & { slug?: string }> = [];
   const heldRunReads: Array<() => void> = [];
-  const remote = { acknowledgeEvents: true, workspacesStatus: 200, holdIssueReads: false, holdIssueWorkspace: "", holdRunReads: false, disconnectRuns: false, disconnect: false, authStatus: 200, issueStatus: 200, invalidIssuePage: false, nextPageFails: false, failingWorkspace: "", emptyNextPage: false };
+  const remote = { acknowledgeEvents: true, workspacesStatus: 200, holdWorkspaceReads: false, holdIssueReads: false, holdIssueWorkspace: "", holdRunReads: false, disconnectRuns: false, disconnect: false, authStatus: 200, issueStatus: 200, invalidIssuePage: false, nextPageFails: false, failingWorkspace: "", emptyNextPage: false };
   const http = createServer((request, response) => {
     requests.push(request.url!);
     scopes.push({ path: request.url!, slug: request.headers["x-workspace-slug"] as string | undefined });
@@ -91,7 +92,12 @@ async function fixture(syncIntervalMs: number | null = 15_000, homePrefix = "mul
       if (remote.holdRunReads) heldRunReads.push(reply); else reply();
       return;
     }
-    if (url.pathname === "/api/workspaces") response.statusCode = remote.workspacesStatus;
+    if (url.pathname === "/api/workspaces") {
+      response.statusCode = remote.workspacesStatus;
+      const reply = () => response.end(JSON.stringify(workspaces));
+      if (remote.holdWorkspaceReads) heldWorkspaceReads.push(reply); else reply();
+      return;
+    }
     if (url.pathname === "/api/me") response.statusCode = remote.authStatus;
     response.end(JSON.stringify(url.pathname === "/api/me" ? { id: "user-42", name: "Lin" }
       : url.pathname.endsWith("/comments") ? comments.filter(comment => comment.issue_id === decodeURIComponent(url.pathname.split("/")[3]))
@@ -213,7 +219,7 @@ async function fixture(syncIntervalMs: number | null = 15_000, homePrefix = "mul
   }
   const { server, dispose } = start();
   const paseo = { hosts: { list: async () => ({ self: { serverId: "owning-daemon" } }) } } as unknown as PaseoApi;
-  return { server, requests, paseo, native, home, issues, comments, start, dispose, host, connectHost, remote, heldIssueReads, heldRunReads, runResponses, catalogResponses, websocket, websocketRequests, signal, scopes, workspaces, workspaceIssues, runs, effects, creations };
+  return { server, requests, paseo, native, home, issues, comments, start, dispose, host, connectHost, remote, heldWorkspaceReads, heldIssueReads, heldRunReads, runResponses, catalogResponses, websocket, websocketRequests, signal, scopes, workspaces, workspaceIssues, runs, effects, creations };
 }
 
 it("client bootstrap leaves the native sidebar empty until a workspace rule is explicitly enabled", async () => {
@@ -1805,24 +1811,24 @@ it("does not subscribe a workspace disabled while its old workspace snapshot is 
   await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   await f.dispose();
   const restarted = f.start();
-  let release!: () => void;
-  const gate = new Promise<void>(resolve => { release = resolve; });
-  const workspaces = SidebarSynchronizer.prototype.workspaces;
-  const held = vi.spyOn(SidebarSynchronizer.prototype, "workspaces").mockImplementation(async function (this: SidebarSynchronizer, connection) {
-    const result = await workspaces.call(this, connection);
-    await gate;
-    return result;
-  });
+  const reads = () => f.requests.filter(path => path === "/api/workspaces").length;
+  const before = reads();
+  f.remote.holdWorkspaceReads = true;
   const reconcile = vi.spyOn(WorkspaceEvents.prototype, "reconcile");
   try {
     await restarted.server.rpc(bootstrap, {}, f.paseo);
-    await expect.poll(() => held.mock.calls.length).toBe(1);
+    await expect.poll(reads).toBe(before + 1);
     expect(await promptly(restarted.server.rpc(workspaceEnable, { workspaceId: "remote-workspace", enabled: false }, f.paseo))).toMatchObject({ status: "saved" });
-    release();
+    f.remote.holdWorkspaceReads = false;
+    for (const reply of f.heldWorkspaceReads.splice(0)) reply();
     expect(await waitForSync(restarted.server, f.paseo)).toMatchObject({ status: "ready" });
     expect(reconcile.mock.calls.length).toBeGreaterThan(0);
     expect(reconcile.mock.calls.every(([, workspaces]) => workspaces.length === 0)).toBe(true);
-  } finally { release(); held.mockRestore(); reconcile.mockRestore(); }
+  } finally {
+    f.remote.holdWorkspaceReads = false;
+    for (const reply of f.heldWorkspaceReads.splice(0)) reply();
+    reconcile.mockRestore();
+  }
 });
 
 async function finishRebuild(server: FakeServer, paseo: PaseoApi, connectionKey: string) {
@@ -2032,6 +2038,84 @@ it("rebuild terminal writeback preserves a terminal result written while its rem
   } finally { f.remote.holdRunReads = false; for (const reply of f.heldRunReads.splice(0)) reply(); await checking; runs.close(); }
 });
 
+it.each([
+  { rootId: "main", discovery: "omitted from the directory" },
+  { rootId: "rebuild-thread", discovery: "omitted from the directory" },
+  { rootId: "main", discovery: "missing labels" },
+  { rootId: "rebuild-thread", discovery: "missing labels" },
+])("rebuild counts, holds and deletes cached $rootId discussions when $discovery", async ({ rootId, discovery }) => {
+  const f = await fixture(60_000); f.remote.acknowledgeEvents = false;
+  f.comments.push({ id: "rebuild-thread", issue_id: "issue-one", content: "重建讨论" });
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const connectionKey = (await f.server.rpc(connectionStatus, {}, f.paseo)).connectionKey!;
+  const cached = f.native.agents.find(agent => agent.labels["multica.issue"] === "issue-one" && agent.labels["multica.discussion"] === rootId)!;
+  const cwd = cached.cwd;
+  await f.dispose();
+  const store = new StateStore(join(f.home, "multica-provider"));
+  await store.update(state => {
+    const local = state.connections[connectionKey];
+    local.rules["remote-workspace"].enabled = false;
+    local.issues["issue-one"].threads.duplicate = { ...local.issues["issue-one"].threads["rebuild-thread"], agentId: cached.id };
+  });
+  // The recovered agent's workspace is absent from the cache and has no plugin directory prefix.
+  const recoveredWorkspace = { ...f.native.workspaces[0], id: "recovered-workspace", cwd: "/legacy-workspace" };
+  f.native.workspaces.push(recoveredWorkspace);
+  cached.workspaceId = recoveredWorkspace.id;
+  if (discovery === "missing labels") cached.labels = {};
+  else {
+    cached.cwd = "/legacy-discussion";
+    cached.labels = { ...cached.labels, "multica.issue": "stale-issue", "multica.discussion": "stale-root" };
+  }
+  const list = f.host.fetchAgents.bind(f.host);
+  vi.spyOn(f.host, "fetchAgents").mockImplementation(async input => {
+    const page = await list(input);
+    const entries = page.entries.filter(({ agent }) => discovery === "missing labels" || agent.id !== cached.id);
+    return { ...page, entries };
+  });
+  const { server } = f.start();
+  const provider = await server.providers.get("multica")!.connect({ versions: [1], capabilities: [] });
+  cleanup.push(() => provider.close());
+  const events: ProviderEvent[] = []; provider.onEvent(event => events.push(event));
+  const remove = f.host.deleteAgent.bind(f.host);
+  vi.spyOn(f.host, "deleteAgent").mockImplementation(async id => {
+    if (id === cached.id) await provider.send({ type: "session.open", requestId: "rebuild-racing-open", sessionId: "rebuild-racing-open", history: "replay",
+      persistence: JSON.parse(cached.handle.slice(7)), config: { cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
+    return remove(id);
+  });
+  expect(await server.rpc(rebuildPreflight, { connectionKey }, f.paseo)).toMatchObject({ projects: 1, workspaces: 3, discussions: 3, blockers: [] });
+  expect(await server.rpc(rebuildStart, { connectionKey }, f.paseo)).toMatchObject({ started: true });
+  expect(await finishRebuild(server, f.paseo, connectionKey)).toMatchObject({ status: "completed", total: 0 });
+  expect(f.effects.filter(effect => effect === `deleteAgent:${cached.id}`)).toHaveLength(1);
+  expect(f.native.agents.some(agent => agent.id === cached.id)).toBe(false);
+  expect(events).toContainEqual(expect.objectContaining({ type: "request.failed", requestId: "rebuild-racing-open", error: expect.objectContaining({ code: "discussion_unavailable" }) }));
+  expect(f.effects).toContain(`archiveWorkspace:${recoveredWorkspace.id}`);
+});
+
+it.each(["multica.issue", "multica.discussion"])("rebuild deletes uncached plugin discussions and holds cached discussions missing the %s label", async missing => {
+  const f = await fixture(60_000); f.remote.acknowledgeEvents = false;
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const connectionKey = (await f.server.rpc(connectionStatus, {}, f.paseo)).connectionKey!;
+  const cached = f.native.agents[0];
+  const orphan = { ...cached, id: "orphan", handle: "orphan", labels: { ...cached.labels } };
+  delete cached.labels[missing]; delete orphan.labels[missing];
+  f.native.agents.push(orphan);
+  const provider = await f.server.providers.get("multica")!.connect({ versions: [1], capabilities: [] });
+  cleanup.push(() => provider.close());
+  const events: ProviderEvent[] = []; provider.onEvent(event => events.push(event));
+  const remove = f.host.deleteAgent.bind(f.host);
+  vi.spyOn(f.host, "deleteAgent").mockImplementation(async id => {
+    if (id === cached.id) await provider.send({ type: "session.open", requestId: "partial-label-open", sessionId: "partial-label-open", history: "replay",
+      persistence: JSON.parse(cached.handle.slice(7)), config: { cwd: cached.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
+    return remove(id);
+  });
+  expect(await f.server.rpc(rebuildPreflight, { connectionKey }, f.paseo)).toMatchObject({ projects: 1, workspaces: 2, discussions: 3, blockers: [] });
+  expect(await f.server.rpc(rebuildStart, { connectionKey }, f.paseo)).toMatchObject({ started: true });
+  expect(await finishRebuild(f.server, f.paseo, connectionKey)).toMatchObject({ status: "completed", completed: 2, total: 2 });
+  expect(f.effects.filter(effect => effect === `deleteAgent:${orphan.id}`)).toHaveLength(1);
+  expect(f.native.agents.some(agent => agent.id === orphan.id)).toBe(false);
+  expect(events).toContainEqual(expect.objectContaining({ type: "request.failed", requestId: "partial-label-open", error: expect.objectContaining({ code: "discussion_unavailable" }) }));
+});
+
 it("rebuild deletes discussions including archived orphans before workspaces and projects, preserves rules and only resets its connection", async () => {
   const f = await fixture();
   await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
@@ -2078,6 +2162,33 @@ it("rebuild deletes discussions including archived orphans before workspaces and
   expect(f.requests.every(path => !path.endsWith("/cancel"))).toBe(true);
 });
 
+it.each(["missing", "missing its ID"])("rebuild identifies Paseo projects through cached issue.projectId when the project mapping is %s", async mapping => {
+  const f = await fixture(60_000); f.remote.acknowledgeEvents = false;
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const connectionKey = (await f.server.rpc(connectionStatus, {}, f.paseo)).connectionKey!;
+  const project = f.native.projects[0];
+  project.cwd = join(f.home, "legacy-project");
+  await f.dispose();
+  const store = new StateStore(join(f.home, "multica-provider"));
+  await store.update(state => {
+    const local = state.connections[connectionKey];
+    local.rules["remote-workspace"].enabled = false;
+    if (mapping === "missing") {
+      local.projects = {};
+      for (const [issueId, issue] of Object.entries(local.issues)) issue.cwd = join(project.cwd, issueId);
+    } else {
+      delete local.projects["remote-workspace"].projectId;
+      local.projects["remote-workspace"].cwd = project.cwd;
+    }
+  });
+  const { server } = f.start();
+  expect(await server.rpc(rebuildPreflight, { connectionKey }, f.paseo)).toMatchObject({ projects: 1, workspaces: 2, discussions: 2, blockers: [] });
+  expect(await server.rpc(rebuildStart, { connectionKey }, f.paseo)).toMatchObject({ started: true });
+  expect(await finishRebuild(server, f.paseo, connectionKey)).toMatchObject({ status: "completed", total: 0 });
+  expect(f.effects.filter(effect => effect === `removeProject:${project.projectId}`)).toHaveLength(1);
+  expect(f.native.projects).toEqual([]);
+});
+
 it("rebuild preserves a project containing a user workspace and supports cleanup with zero enabled rules", async () => {
   const f = await fixture();
   await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
@@ -2096,6 +2207,97 @@ it("rebuild preserves a project containing a user workspace and supports cleanup
   expect(f.effects.some(effect => effect.startsWith("removeProject:"))).toBe(false);
   expect(f.native.workspaces.find(workspace => workspace.id === "user-workspace")!.archived).toBeUndefined();
   expect((await new StateStore(store.directory).read()).connections[connectionKey]).toMatchObject({ projects: {}, issues: {}, rules: { "remote-workspace": { enabled: false } } });
+});
+
+it("rebuild rechecks initially retained projects and removes them when their user workspace is archived before removal", async () => {
+  const f = await fixture(60_000); f.remote.acknowledgeEvents = false;
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const connectionKey = (await f.server.rpc(connectionStatus, {}, f.paseo)).connectionKey!;
+  const project = f.native.projects[0], pluginWorkspace = f.native.workspaces[0];
+  const userWorkspace = { id: "user-workspace", projectId: project.projectId, cwd: project.cwd, title: "Mine", archived: false };
+  f.native.workspaces.push(userWorkspace);
+  const marker = join(project.cwd, "removed-marker"); await writeFile(marker, "remove");
+  await f.dispose();
+  await new StateStore(join(f.home, "multica-provider")).update(state => { state.connections[connectionKey].rules["remote-workspace"].enabled = false; });
+  const archive = f.host.archiveWorkspace.bind(f.host);
+  vi.spyOn(f.host, "archiveWorkspace").mockImplementation(async id => {
+    const result = await archive(id);
+    if (id === pluginWorkspace.id) userWorkspace.archived = true;
+    return result;
+  });
+  const { server } = f.start();
+  expect(await server.rpc(rebuildPreflight, { connectionKey }, f.paseo)).toMatchObject({ projects: 0, workspaces: 2, discussions: 2, blockers: [] });
+  expect(await server.rpc(rebuildStart, { connectionKey }, f.paseo)).toMatchObject({ started: true });
+  expect(await finishRebuild(server, f.paseo, connectionKey)).toMatchObject({ status: "completed", total: 0 });
+  expect(f.effects).toContain(`removeProject:${project.projectId}`);
+  expect(f.native.projects).toEqual([]);
+  await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+it.each(["discovery", "recheck"])("rebuild removes local placeholder files while preserving projects retained during %s and other connections", async phase => {
+  const f = await fixture(60_000); f.remote.acknowledgeEvents = false;
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  await enableSecondWorkspace(f);
+  const connectionKey = (await f.server.rpc(connectionStatus, {}, f.paseo)).connectionKey!;
+  const [removedProject, retainedProject] = f.native.projects;
+  const removedMarker = join(removedProject.cwd, "removed-marker"), retainedMarker = join(retainedProject.cwd, "retained-marker");
+  const otherDirectory = join(f.home, "multica-provider/placeholders", "f".repeat(20), "other-project");
+  const otherMarker = join(otherDirectory, "other-marker");
+  await mkdir(otherDirectory, { recursive: true });
+  await writeFile(removedMarker, "remove"); await writeFile(retainedMarker, "retain"); await writeFile(otherMarker, "other");
+  const userWorkspace = { id: "user-workspace", projectId: retainedProject.projectId, cwd: retainedProject.cwd, title: "Mine" };
+  if (phase === "discovery") f.native.workspaces.push(userWorkspace);
+  else {
+    const trigger = f.native.workspaces.find(workspace => workspace.projectId === retainedProject.projectId)!.id;
+    const archive = f.host.archiveWorkspace.bind(f.host);
+    vi.spyOn(f.host, "archiveWorkspace").mockImplementation(async id => {
+      const result = await archive(id);
+      if (id === trigger) f.native.workspaces.push(userWorkspace);
+      return result;
+    });
+  }
+  expect(await f.server.rpc(rebuildPreflight, { connectionKey }, f.paseo)).toMatchObject({ projects: phase === "discovery" ? 1 : 2, workspaces: 4, discussions: 4 });
+  expect(await f.server.rpc(rebuildStart, { connectionKey }, f.paseo)).toMatchObject({ started: true });
+  expect(await finishRebuild(f.server, f.paseo, connectionKey)).toMatchObject({ status: "completed", completed: 4, total: 4 });
+  expect(f.effects).toContain(`removeProject:${removedProject.projectId}`);
+  expect(f.effects).not.toContain(`removeProject:${retainedProject.projectId}`);
+  await expect(readFile(removedMarker)).rejects.toMatchObject({ code: "ENOENT" });
+  expect((await stat(removedProject.cwd)).isDirectory()).toBe(true);
+  expect(await readFile(retainedMarker, "utf8")).toBe("retain");
+  expect(await readFile(otherMarker, "utf8")).toBe("other");
+});
+
+it("rebuild fails before resetting local state when placeholder cleanup fails and retries after the scope is repaired", async () => {
+  const f = await fixture(60_000); f.remote.acknowledgeEvents = false;
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const connectionKey = (await f.server.rpc(connectionStatus, {}, f.paseo)).connectionKey!;
+  await f.dispose();
+  const store = new StateStore(join(f.home, "multica-provider"));
+  await store.update(state => { state.connections[connectionKey].rules["remote-workspace"].enabled = false; });
+  await mkdir(store.runDetailsDirectory(connectionKey), { recursive: true });
+  const detailsMarker = join(store.runDetailsDirectory(connectionKey), "cached.json");
+  await writeFile(detailsMarker, "preserved until cleanup succeeds");
+  const scope = join(store.directory, "placeholders", connectionKey.slice(0, 20));
+  const remove = f.host.removeProject.bind(f.host);
+  const corruptScope = vi.spyOn(f.host, "removeProject").mockImplementation(async id => {
+    const result = await remove(id);
+    await rm(scope, { recursive: true, force: true });
+    await writeFile(scope, "not a directory");
+    return result;
+  });
+  const { server } = f.start();
+  expect(await server.rpc(rebuildStart, { connectionKey }, f.paseo)).toMatchObject({ started: true });
+  expect(await finishRebuild(server, f.paseo, connectionKey)).toMatchObject({ status: "failed", step: "清理本地占位目录", message: expect.stringContaining("ENOTDIR") });
+  const local = (await new StateStore(store.directory).read()).connections[connectionKey];
+  expect(local.rebuildGeneration).toBeUndefined();
+  expect(Object.keys(local.issues)).toHaveLength(2);
+  expect(await readFile(detailsMarker, "utf8")).toBe("preserved until cleanup succeeds");
+  corruptScope.mockRestore();
+  await rm(scope); await mkdir(scope);
+  expect(await server.rpc(rebuildStart, { connectionKey }, f.paseo)).toMatchObject({ started: true });
+  expect(await finishRebuild(server, f.paseo, connectionKey)).toMatchObject({ status: "completed", total: 0 });
+  expect((await new StateStore(store.directory).read()).connections[connectionKey].rebuildGeneration).toBe(1);
+  await expect(stat(store.runDetailsDirectory(connectionKey))).rejects.toMatchObject({ code: "ENOENT" });
 });
 
 it("rebuild waits for in-flight synchronization, reports failures and restarts cleanup from the beginning", async () => {

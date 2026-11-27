@@ -1,6 +1,7 @@
 import type { PaseoApi } from "@getpaseo/client";
 import { discussionKeys } from "../shared/discussion.js";
 import type { StateStore } from "./state.js";
+import { directoryEntries } from "./native-host.js";
 
 /** Backfills existing discussions once and writes metadata for individual imports. */
 export class DiscussionMetadata {
@@ -27,19 +28,10 @@ export class DiscussionMetadata {
   }
   private async sweep(paseo: PaseoApi) {
     for (const connectionKey of Object.keys((await this.store.read()).connections)) {
-      let cursor: string | undefined;
-      const cursors = new Set<string>();
-      for (;;) {
-        const page = await paseo.agents.list({ filter: { labels: { [discussionKeys.connection]: connectionKey }, includeArchived: true }, page: { limit: 100, cursor } });
-        for (const { agent } of page.entries) {
-          const issueId = agent.labels[discussionKeys.issue];
-          if (!issueId) continue;
-          await this.write(agent.id, connectionKey, issueId);
-        }
-        if (!page.pageInfo.hasMore) break;
-        const next = page.pageInfo.nextCursor;
-        if (!next || cursors.has(next)) throw new Error("Incomplete native agent pagination");
-        cursors.add(next); cursor = next;
+      for await (const { agent } of directoryEntries(cursor => paseo.agents.list({ filter: { labels: { [discussionKeys.connection]: connectionKey }, includeArchived: true }, page: { limit: 100, cursor } }), "agent")) {
+        const issueId = agent.labels[discussionKeys.issue];
+        if (!issueId) continue;
+        await this.write(agent.id, connectionKey, issueId);
       }
     }
   }

@@ -11,6 +11,7 @@ import { workspaceEnable, syncBootstrap } from "../shared/contracts.js";
 import { createServerContribution } from "../server/contribute.js";
 import { threadOpen, commentEventDetail, discussionList } from "../shared/threads.js";
 import { StateStore, connectionState, issueSchema } from "../server/state.js";
+import { RunDetails } from "../server/run-details.js";
 import { runStatusSchema } from "../shared/runs.js";
 import { FakeServer, resync } from "./support/fake-server.js";
 import { metadataHost } from "./support/metadata-host.js";
@@ -853,6 +854,54 @@ it("pushes ordered text, reasoning, tool input/results and full failure/remote m
   const count = f.requests.filter(request => request.url.includes("/messages")).length;
   await resync(f.server, f.paseo, "remote-workspace");
   expect(f.requests.filter(request => request.url.includes("/messages"))).toHaveLength(count);
+});
+
+it("rejects a concurrent duplicate discussion open without replacing the first session or leaking subscriptions", async () => {
+  const f = await fixture([], false);
+  const parent = f.native.agents[0], provider = await f.connect();
+  let release!: () => void, firstEntered!: () => void, secondEntered!: () => void;
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  const firstArrived = new Promise<void>(resolve => { firstEntered = resolve; });
+  const secondArrived = new Promise<void>(resolve => { secondEntered = resolve; });
+  const originalOpen = RunDetails.prototype.openDiscussion;
+  let opening = 0;
+  const openDiscussion = vi.spyOn(RunDetails.prototype, "openDiscussion").mockImplementation(async function (this: RunDetails, address) {
+    if (++opening === 1) firstEntered(); else secondEntered();
+    await blocked;
+    await originalOpen.call(this, address);
+  });
+  cleanup.push(() => { openDiscussion.mockRestore(); });
+  const open = (requestId: string) => provider.send({ type: "session.open", requestId, sessionId: parent.id, history: "replay", persistence: JSON.parse(parent.handle.slice(7)),
+    config: { cwd: parent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
+  const first = open("first-open");
+  await firstArrived;
+  const second = open("duplicate-open");
+  try { await secondArrived; } finally { release(); }
+  await Promise.all([first, second]);
+
+  expect(f.providerEvents).toContainEqual({ type: "request.failed", requestId: "duplicate-open", error: {
+    code: "unmapped_issue", message: "请在 Multica 设置启用任务工作区后打开已导入的主讨论。",
+  } });
+  expect(f.providerEvents.filter(event => event.type === "session.opened")).toEqual([
+    expect.objectContaining({ requestId: "first-open", sessionId: parent.id }),
+  ]);
+  expect(f.providerEvents.filter(event => event.type === "session.ready")).toEqual([
+    { type: "session.ready", requestId: "first-open", sessionId: parent.id },
+  ]);
+  f.comments.push(comment("after-open", null, "New main-discussion comment", "system", "system"));
+  await resync(f.server, f.paseo, "remote-workspace");
+  await loadDiscussion(f, "main");
+  expect(f.providerEvents.filter(event => event.type === "timeline.item" && event.item.id === "multica:comment:after-open")).toEqual([
+    expect.objectContaining({ sessionId: parent.id, item: expect.objectContaining({ type: "plugin", kind: "comment-event", data: expect.objectContaining({ text: "New main-discussion comment" }) }) }),
+  ]);
+
+  await provider.send({ type: "session.close", requestId: "close-first", sessionId: parent.id });
+  const closedAt = f.providerEvents.length;
+  f.comments.push(comment("after-close", null, "Closed main-discussion comment", "system", "system"));
+  f.runs.push({ id: "after-close", issue_id: "issue", agent_id: "owned-agent", status: "completed" });
+  await resync(f.server, f.paseo, "remote-workspace");
+  await loadDiscussion(f, "main");
+  expect(f.providerEvents.slice(closedAt)).toEqual([]);
 });
 
 it("reads details only for discussions opened in this process, refreshes active Runs periodically and stops after terminal fill", async () => {

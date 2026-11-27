@@ -8,10 +8,11 @@ import { StateStore, cachedWorkspace } from "./state.js";
 import type { IssueMapping } from "./state.js";
 import type { DiscussionMetadata } from "./discussion-metadata.js";
 import type { StoredRow } from "./thread-state.js";
-import { workspaceAgents, workspaceMembers, type RemoteWorkspace } from "./sync.js";
+import { workspaceAgents, workspaceHeaders, workspaceMembers, type RemoteWorkspace } from "./multica-api.js";
 import { discussionKeys } from "../shared/discussion.js";
 import type { threadAddress } from "../shared/threads.js";
 import type { AskUsers } from "./askuser.js";
+import { providerId, threadPersistence } from "./discussion-identity.js";
 
 type Address = z.infer<typeof threadAddress>;
 const attachmentSchema = z.object({ id: z.string().optional().catch(undefined), filename: z.string().optional().catch(undefined), content_type: z.unknown().optional(), file_name: z.string().optional().catch(undefined), name: z.string().optional().catch(undefined), url: z.string().optional().catch(undefined), download_url: z.string().optional().catch(undefined) }).catch({});
@@ -25,9 +26,6 @@ type Comment = z.infer<typeof commentSchema>;
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const key = (address: Address) => JSON.stringify([address.connectionKey, address.issueId, address.rootId]);
 export const projectionHistory = (issue: IssueMapping, rootId: string) => rootId === "main" ? issue.mainHistory : issue.threads[rootId];
-export function threadPersistence(connectionKey: string, issueId: string, rootId: string) {
-  return { version: 1, data: { connectionKey, issueId, discussion: "thread", rootId } } as const;
-}
 
 /** Resolve arbitrary descendant depth. Broken links and cycles remain unknown. */
 function rootsOf(comments: Map<string, Comment>): Map<string, string | undefined> {
@@ -114,7 +112,7 @@ export class ThreadSynchronizer {
     let cursor: { before: string; before_id: string } | undefined;
     for (;;) {
       const query = new URLSearchParams({ ...mode, ...cursor });
-      const response = await remoteFetch(connection, `/api/issues/${encodeURIComponent(issueId)}/comments?${query}`, { headers: { "X-Workspace-Slug": workspace.slug } });
+      const response = await remoteFetch(connection, `/api/issues/${encodeURIComponent(issueId)}/comments?${query}`, { headers: workspaceHeaders(workspace) });
       if (!response.ok) { await response.body?.cancel(); throw new Error("Comment history unavailable"); }
       if (response.headers.get("X-Comments-Truncated")?.toLowerCase() === "true") {
         await response.body?.cancel();
@@ -183,8 +181,8 @@ export class ThreadSynchronizer {
       let agentId = mapping.agentId;
       if (!agentId) {
         const labels = { [discussionKeys.connection]: connection.connectionKey, [discussionKeys.issue]: issueId, [discussionKeys.discussion]: root.id };
-        agentId = (await findNativeDiscussion(host, { workspaceId: issue.workspaceId, provider: "multica", labels }))?.id;
-        agentId ??= (await host.importAgent({ providerId: "multica", providerHandleId: `plugin:${JSON.stringify(threadPersistence(connection.connectionKey, issueId, root.id))}`,
+        agentId = (await findNativeDiscussion(host, { workspaceId: issue.workspaceId, provider: providerId, labels }))?.id;
+        agentId ??= (await host.importAgent({ providerId, providerHandleId: `plugin:${JSON.stringify(threadPersistence(connection.connectionKey, issueId, root.id))}`,
           cwd: issue.cwd, workspaceId: issue.workspaceId, labels })).id;
         await this.metadata.write(agentId, connection.connectionKey, issueId);
         await this.store.update(state => {

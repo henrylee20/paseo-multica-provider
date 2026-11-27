@@ -4,6 +4,7 @@ import { setTimeout } from "node:timers/promises";
 import { createHostClient } from "@getpaseo/client/node";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { discussionKeys } from "../shared/discussion.js";
+import { providerId } from "./discussion-identity.js";
 import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
 
 /** These are the real low-level SDK methods, including explicit project placement. */
@@ -11,52 +12,46 @@ export type NativeHost = Pick<DaemonClient, "listHosts" | "addProject" | "rename
   "createWorkspace" | "setWorkspaceTitle" | "fetchAgents" | "importAgent" | "updateAgent" | "close" |
   "archiveWorkspace" | "restoreWorkspace" | "fetchAgent" | "archiveAgent" | "deleteAgent" | "refreshAgent" | "fetchAgentTimeline" | "listCommands">;
 
+type DirectoryPage<T> = (cursor?: string) => Promise<{ entries: T[]; pageInfo: { hasMore: boolean; nextCursor?: string | null } }>;
+
+export async function* directoryEntries<T>(page: DirectoryPage<T>, label: string): AsyncGenerator<T> {
+  const seen = new Set<string>();
+  let cursor: string | undefined;
+  for (;;) {
+    const result = await page(cursor);
+    yield* result.entries;
+    if (!result.pageInfo.hasMore) return;
+    const next = result.pageInfo.nextCursor;
+    if (!next || seen.has(next)) throw new Error(`Incomplete native ${label} pagination`);
+    seen.add(next); cursor = next;
+  }
+}
+
+export async function directory<T>(page: DirectoryPage<T>, label: string): Promise<T[]> {
+  const entries: T[] = [];
+  for await (const entry of directoryEntries(page, label)) entries.push(entry);
+  return entries;
+}
+
 /** Directory filters are hints; prove the complete stable identity locally.
  * An incomplete/cyclic directory is never evidence that import is needed. */
 export async function findNativeDiscussion(host: NativeHost, expected: { workspaceId: string; provider: string; labels: Record<string, string> }) {
-  let cursor: string | undefined;
-  const cursors = new Set<string>();
-  for (;;) {
-    const page = await host.fetchAgents({ filter: { labels: expected.labels, includeArchived: true }, page: { limit: 100, cursor } });
-    const match = page.entries.find(({ agent }) => agent.workspaceId === expected.workspaceId && agent.provider === expected.provider &&
-      Object.entries(expected.labels).every(([key, value]) => agent.labels[key] === value));
-    if (match) return match.agent;
-    if (!page.pageInfo.hasMore) return undefined;
-    const next = page.pageInfo.nextCursor;
-    if (!next || cursors.has(next)) throw new Error("Incomplete native discussion pagination");
-    cursors.add(next); cursor = next;
+  for await (const { agent } of directoryEntries(cursor => host.fetchAgents({ filter: { labels: expected.labels, includeArchived: true }, page: { limit: 100, cursor } }), "discussion")) {
+    if (agent.workspaceId === expected.workspaceId && agent.provider === expected.provider &&
+      Object.entries(expected.labels).every(([key, value]) => agent.labels[key] === value)) return agent;
   }
 }
 
 /** The native directory contains active workspaces, without an archivedAt field.
  * idPrefix is accepted but ignored by the host, so check exact IDs across pages. */
 export async function findActiveWorkspace(host: NativeHost, workspaceId: string) {
-  let cursor: string | undefined;
-  const cursors = new Set<string>();
-  for (;;) {
-    const page = await host.fetchWorkspaces({ filter: { idPrefix: workspaceId }, page: { limit: 100, cursor } });
-    const workspace = page.entries.find(entry => entry.id === workspaceId);
-    if (workspace) return workspace;
-    if (!page.pageInfo.hasMore) return undefined;
-    const next = page.pageInfo.nextCursor;
-    if (!next || cursors.has(next)) throw new Error("Incomplete native workspace pagination");
-    cursors.add(next);
-    cursor = next;
+  for await (const workspace of directoryEntries(cursor => host.fetchWorkspaces({ filter: { idPrefix: workspaceId }, page: { limit: 100, cursor } }), "workspace")) {
+    if (workspace.id === workspaceId) return workspace;
   }
 }
 
 export async function fetchActiveWorkspaceIds(host: NativeHost): Promise<Set<string>> {
-  const ids = new Set<string>();
-  let cursor: string | undefined;
-  const cursors = new Set<string>();
-  for (;;) {
-    const page = await host.fetchWorkspaces({ page: { limit: 100, cursor } });
-    for (const workspace of page.entries) ids.add(workspace.id);
-    if (!page.pageInfo.hasMore) return ids;
-    const next = page.pageInfo.nextCursor;
-    if (!next || cursors.has(next)) throw new Error("Incomplete native workspace pagination");
-    cursors.add(next); cursor = next;
-  }
+  return new Set((await directory(cursor => host.fetchWorkspaces({ page: { limit: 100, cursor } }), "workspace")).map(workspace => workspace.id));
 }
 
 export async function ensureWorkspaceActive(host: NativeHost, workspaceId: string) {
@@ -65,16 +60,10 @@ export async function ensureWorkspaceActive(host: NativeHost, workspaceId: strin
 
 /** removeProject also archives active children: prove emptiness across every page. */
 export async function projectHasActiveWorkspaces(host: NativeHost, projectId: string) {
-  let cursor: string | undefined;
-  const cursors = new Set<string>();
-  for (;;) {
-    const page = await host.fetchWorkspaces({ page: { limit: 100, cursor } });
-    if (page.entries.some(workspace => workspace.projectId === projectId)) return true;
-    if (!page.pageInfo.hasMore) return false;
-    const next = page.pageInfo.nextCursor;
-    if (!next || cursors.has(next)) throw new Error("Incomplete native workspace pagination");
-    cursors.add(next); cursor = next;
+  for await (const workspace of directoryEntries(cursor => host.fetchWorkspaces({ page: { limit: 100, cursor } }), "workspace")) {
+    if (workspace.projectId === projectId) return true;
   }
+  return false;
 }
 
 /** Reimport an archived handle to move its original agent, preserving native
@@ -85,7 +74,7 @@ export async function restoreMappedDiscussion(host: NativeHost, lifecycle: Discu
   if (!agent || agent.cwd !== expected.cwd) throw new Error("Mapped native discussion unavailable");
   if (agent.workspaceId !== expected.workspaceId) {
     const rootId = agent.labels[discussionKeys.discussion];
-    if (agent.provider !== "multica" || !agent.workspaceId || !rootId || agent.labels[discussionKeys.connection] !== address.connectionKey ||
+    if (agent.provider !== providerId || !agent.workspaceId || !rootId || agent.labels[discussionKeys.connection] !== address.connectionKey ||
       agent.labels[discussionKeys.issue] !== address.issueId || !agent.persistence?.sessionId.startsWith("plugin:"))
       throw new Error("Mapped native discussion cannot be moved");
     // A native history query may have reopened the retired agent. Close its
@@ -93,7 +82,7 @@ export async function restoreMappedDiscussion(host: NativeHost, lifecycle: Discu
     const release = await lifecycle.hold([{ ...address, rootId }]);
     try { await archiveClosedDiscussion(host, agentId, { cwd: expected.cwd, workspaceId: agent.workspaceId }); }
     finally { release(); }
-    const imported = await host.importAgent({ providerId: "multica", providerHandleId: agent.persistence.sessionId,
+    const imported = await host.importAgent({ providerId, providerHandleId: agent.persistence.sessionId,
       cwd: expected.cwd, workspaceId: expected.workspaceId, labels: agent.labels });
     if (imported.id !== agentId) throw new Error("Native discussion identity changed");
   } else if (agent.archivedAt) await host.refreshAgent(agentId);
@@ -108,7 +97,7 @@ export async function archiveClosedDiscussion(host: NativeHost, agentId: string,
     const snapshot = (await host.fetchAgent(agentId))?.agent;
     if (!snapshot || snapshot.workspaceId !== expected.workspaceId || snapshot.cwd !== expected.cwd) throw new Error("Mapped native discussion unavailable");
     if (snapshot.archivedAt) return;
-    if (snapshot.provider !== "multica") throw new Error("Mapped native discussion unavailable");
+    if (snapshot.provider !== providerId) throw new Error("Mapped native discussion unavailable");
     if (["idle", "closed", "error"].includes(snapshot.status) && !snapshot.activeTurn) {
       await host.archiveAgent(agentId);
       if (!(await host.fetchAgent(agentId))?.agent.archivedAt) throw new Error("Native discussion archive not confirmed");

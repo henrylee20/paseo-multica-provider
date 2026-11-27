@@ -30,7 +30,7 @@ const pause = () => {
   return { release, waiting, handler: async () => { reached(); await blocked; } };
 };
 
-async function fixture(options: { askuser?: boolean; empty?: boolean } = {}) {
+async function fixture(options: { askuser?: boolean; empty?: boolean; respectVisibility?: boolean } = {}) {
   const home = await mkdtemp(join(tmpdir(), "multica-identities-"));
   cleanup.push(() => rm(home, { recursive: true, force: true }));
   // Ephemeral opaque fixture credentials are compared only as booleans, never
@@ -90,9 +90,13 @@ async function fixture(options: { askuser?: boolean; empty?: boolean } = {}) {
   };
   await login(0);
   const events: ProviderEvent[] = [];
-  const projects: Array<{ projectId: string; cwd: string; projectRootPath: string; projectKind: string }> = [];
-  const workspaces: Array<{ id: string; projectId: string; archived?: boolean }> = [];
-  const agents: Array<{ provider: string; id: string; workspaceId: string; cwd: string; labels: Record<string, string>; archivedAt?: string }> = [];
+  const projects: Array<{ projectId: string; cwd: string; projectRootPath: string; projectKind: string; projectDisplayName?: string }> = [];
+  const workspaces: Array<{ id: string; projectId: string; archived?: boolean; background?: boolean; internal?: boolean; workspaceDirectory?: string }> = [];
+  const agents: Array<{ provider: string; id: string; workspaceId: string; cwd: string; labels: Record<string, string>; archivedAt?: string; internal?: boolean }> = [];
+  const visibleInDirectory = (entry: { background?: boolean; internal?: boolean }, input?: unknown) => {
+    const filter = (input as { filter?: { includeBackground?: boolean; includeInternal?: boolean } } | undefined)?.filter;
+    return !options.respectVisibility || ((!entry.background || filter?.includeBackground === true) && (!entry.internal || filter?.includeInternal === true));
+  };
   let provider: ProviderConnection | undefined;
   let server = new FakeServer();
   const connect = async () => {
@@ -121,13 +125,13 @@ async function fixture(options: { askuser?: boolean; empty?: boolean } = {}) {
       for (const workspace of workspaces) if (workspace.projectId === id) workspace.archived = true;
     }),
     archiveWorkspace: vi.fn(async (id: string) => { workspaces.find(workspace => workspace.id === id)!.archived = true; return { error: null as string | null }; }),
-    renameProject: async () => {}, fetchWorkspaces: vi.fn(async (_input?: unknown) => ({ entries: workspaces.filter(workspace => !workspace.archived), pageInfo: { hasMore: false, nextCursor: undefined as string | undefined } })),
+    renameProject: async () => {}, fetchWorkspaces: vi.fn(async (input?: unknown) => ({ entries: workspaces.filter(workspace => !workspace.archived && visibleInDirectory(workspace, input)), pageInfo: { hasMore: false, nextCursor: undefined as string | undefined } })),
     createWorkspace: async (input: { workspaceId: string; source: { projectId: string } }) => {
       const workspace = { id: input.workspaceId, projectId: input.source.projectId };
       workspaces.push(workspace);
       return { workspace };
     }, setWorkspaceTitle: async () => {},
-    fetchAgents: vi.fn(async (_input?: unknown) => ({ entries: agents.map(agent => ({ agent })), pageInfo: { hasMore: false, nextCursor: undefined as string | undefined } })),
+    fetchAgents: vi.fn(async (input?: unknown) => ({ entries: agents.filter(agent => visibleInDirectory(agent, input) && visibleInDirectory(workspaces.find(workspace => workspace.id === agent.workspaceId) ?? {}, input)).map(agent => ({ agent })), pageInfo: { hasMore: false, nextCursor: undefined as string | undefined } })),
     deleteAgent: vi.fn(async (id: string) => { const index = agents.findIndex(agent => agent.id === id); if (index >= 0) agents.splice(index, 1); }),
     fetchAgent: vi.fn(async (id: string) => ({ agent: agents.find(agent => agent.id === id) })),
     fetchAgentTimeline: async (agentId: string) => ({ agentId, epoch: "epoch", entries: [], hasOlder: false, hasNewer: false }),
@@ -283,6 +287,138 @@ it("retains Projects with user-created active workspaces, archives plugin worksp
   });
 });
 
+it.each(["background", "internal"] as const)("profile purge retains Paseo projects with %s user-created active workspaces", async visibility => {
+  const f = await fixture({ respectVisibility: true });
+  const project = f.projects[0], pluginWorkspace = f.workspaces[0];
+  const userWorkspace = { id: "user-workspace", projectId: project.projectId, [visibility]: true };
+  f.workspaces.push(userWorkspace);
+  expect((await f.host.fetchWorkspaces()).entries.map(workspace => workspace.id)).not.toContain(userWorkspace.id);
+  await f.login(1, f.primary.apiUrl, "office");
+  f.server.setSettings(multicaSettings.id, { profile: "office" });
+  expect((await waitForSync(f.server, f.paseo)).status).toBe("ready");
+  expect(f.host.removeProject).not.toHaveBeenCalled();
+  expect(f.projects).toContainEqual(project);
+  expect(f.host.archiveWorkspace).toHaveBeenCalledExactlyOnceWith(pluginWorkspace.id);
+  expect(f.workspaces.find(workspace => workspace.id === userWorkspace.id)?.archived).toBeUndefined();
+});
+
+it("profile purge deletes uncached internal Multica discussions tagged with the connection", async () => {
+  const f = await fixture({ respectVisibility: true });
+  const internalDiscussion = { ...f.agents[0], id: "internal-discussion", internal: true,
+    labels: { ...f.agents[0].labels, "multica.discussion": "internal-thread" } };
+  f.agents.push(internalDiscussion);
+  expect((await f.host.fetchAgents()).entries.map(({ agent }) => agent.id)).not.toContain(internalDiscussion.id);
+  await f.login(1, f.primary.apiUrl, "office");
+  f.server.setSettings(multicaSettings.id, { profile: "office" });
+  expect((await waitForSync(f.server, f.paseo)).status).toBe("ready");
+  expect(f.host.deleteAgent).toHaveBeenCalledWith(internalDiscussion.id);
+  expect(f.agents).toEqual([]);
+});
+
+it.each(["removes", "retains"] as const)("profile purge %s uncached Paseo projects and cleans workspaces under the placeholder root", async action => {
+  const f = await fixture();
+  const project = f.projects[0], workspace = f.workspaces[0];
+  project.projectDisplayName = "Recovered project";
+  workspace.workspaceDirectory = f.agents[0].cwd;
+  f.workspaces.push({ id: "detached-workspace", projectId: "missing-project", workspaceDirectory: join(project.cwd, "detached") });
+  if (action === "retains") f.workspaces.push({ id: "user-workspace", projectId: project.projectId });
+  await writeFile(join(project.cwd, "user-file"), "preserved");
+  const state = JSON.parse(await f.persisted()) as LocalState;
+  for (const conn of Object.values(state.connections)) { conn.projects = {}; conn.issues = {}; }
+  await writeFile(join(f.home, "state/state.json"), JSON.stringify(state));
+  f.agents.length = 0;
+  await f.restart();
+  await f.login(1, f.primary.apiUrl, "office");
+  f.server.setSettings(multicaSettings.id, { profile: "office" });
+  expect(await f.server.syncRpc(syncBootstrap, {}, f.paseo)).toEqual({ status: "ready" });
+  if (action === "removes") {
+    expect(f.host.removeProject).toHaveBeenCalledExactlyOnceWith(project.projectId);
+    expect(f.host.archiveWorkspace).toHaveBeenCalledWith(workspace.id);
+    await expect(readFile(join(project.cwd, "user-file"))).rejects.toMatchObject({ code: "ENOENT" });
+  } else {
+    expect(f.host.removeProject).not.toHaveBeenCalled();
+    expect(f.host.archiveWorkspace).toHaveBeenCalledWith(workspace.id);
+    expect(f.workspaces.find(workspace => workspace.id === "user-workspace")?.archived).toBeUndefined();
+    expect(await f.server.rpc(connectionStatus, {}, f.paseo)).toMatchObject({ sync: { retainedProjects: [{ name: project.projectDisplayName, cwd: project.projectRootPath }] } });
+    expect(await readFile(join(project.cwd, "user-file"), "utf8")).toBe("preserved");
+  }
+  expect(workspace.archived).toBe(true);
+  expect(f.host.archiveWorkspace).toHaveBeenCalledWith("detached-workspace");
+});
+
+it.each(["directory", "cached ID"])("profile purge archives workspaces identified by discussions discovered through %s", async source => {
+  const f = await fixture();
+  const project = f.projects[0], cachedWorkspace = f.workspaces[0], discussion = f.agents[0];
+  project.projectRootPath = join(f.home, "user-project");
+  f.workspaces.push({ id: "discussion-workspace", projectId: project.projectId });
+  discussion.workspaceId = "discussion-workspace";
+  if (source === "cached ID") {
+    const list = f.host.fetchAgents.getMockImplementation()!;
+    f.host.fetchAgents.mockImplementation(async input => {
+      const page = await list(input);
+      return { ...page, entries: page.entries.filter(({ agent }) => agent.id !== discussion.id) };
+    });
+  }
+  await f.login(1, f.primary.apiUrl, "office");
+  f.server.setSettings(multicaSettings.id, { profile: "office" });
+  expect((await waitForSync(f.server, f.paseo)).status).toBe("ready");
+  expect(f.host.removeProject).not.toHaveBeenCalled();
+  expect(f.host.archiveWorkspace.mock.calls.map(([id]) => id).sort()).toEqual([cachedWorkspace.id, "discussion-workspace"].sort());
+});
+
+it("profile purge deletes all discussions and archives all plugin workspaces before removing any Paseo project", async () => {
+  const f = await fixture();
+  await f.login(2);
+  await f.server.syncRpc(workspaceEnable, { workspaceId: "workspace", enabled: true }, f.paseo);
+  const agentIds = f.agents.map(agent => agent.id), workspaceIds = f.workspaces.map(workspace => workspace.id);
+  const removedProject = f.projects[0], retainedProject = f.projects[1];
+  f.workspaces.push({ id: "user-workspace", projectId: retainedProject.projectId });
+  const effects: string[] = [];
+  const removeAgent = f.host.deleteAgent.getMockImplementation()!, archive = f.host.archiveWorkspace.getMockImplementation()!, removeProject = f.host.removeProject.getMockImplementation()!;
+  f.host.deleteAgent.mockImplementation(async id => { effects.push(`deleteAgent:${id}`); await removeAgent(id); });
+  f.host.archiveWorkspace.mockImplementation(async id => { effects.push(`archiveWorkspace:${id}`); return archive(id); });
+  f.host.removeProject.mockImplementation(async id => { effects.push(`removeProject:${id}`); await removeProject(id); });
+  await f.login(1, f.primary.apiUrl, "office");
+  f.server.setSettings(multicaSettings.id, { profile: "office" });
+  expect((await waitForSync(f.server, f.paseo)).status).toBe("ready");
+  expect(effects).toEqual([
+    ...agentIds.map(id => `deleteAgent:${id}`),
+    ...workspaceIds.map(id => `archiveWorkspace:${id}`),
+    `removeProject:${removedProject.projectId}`,
+  ]);
+  expect(f.projects).toEqual([retainedProject]);
+  expect(f.workspaces.find(workspace => workspace.id === "user-workspace")?.archived).toBeUndefined();
+});
+
+it("profile purge rechecks every active workspace page after archive and retains a project with a newly created internal user workspace", async () => {
+  const f = await fixture({ respectVisibility: true });
+  const project = f.projects[0], pluginWorkspace = f.workspaces[0];
+  f.workspaces.push({ id: "unrelated-workspace", projectId: "user-project" });
+  const list = f.host.fetchWorkspaces.getMockImplementation()!;
+  f.host.fetchWorkspaces.mockImplementation(async input => {
+    const page = await list(input);
+    const offset = Number((input as { page?: { cursor?: string } } | undefined)?.page?.cursor ?? 0);
+    const hasMore = offset + 1 < page.entries.length;
+    return { entries: page.entries.slice(offset, offset + 1), pageInfo: { hasMore, nextCursor: hasMore ? String(offset + 1) : undefined } };
+  });
+  const archive = f.host.archiveWorkspace.getMockImplementation()!;
+  f.host.archiveWorkspace.mockImplementation(async id => {
+    const result = await archive(id);
+    if (id === pluginWorkspace.id) f.workspaces.push({ id: "new-user-workspace", projectId: project.projectId, internal: true });
+    return result;
+  });
+  await f.login(1, f.primary.apiUrl, "office");
+  f.server.setSettings(multicaSettings.id, { profile: "office" });
+  expect((await waitForSync(f.server, f.paseo)).status).toBe("ready");
+  expect(f.host.archiveWorkspace).toHaveBeenCalledExactlyOnceWith(pluginWorkspace.id);
+  expect(f.host.removeProject).not.toHaveBeenCalled();
+  const userWorkspace = f.workspaces.find(workspace => workspace.id === "new-user-workspace");
+  expect(userWorkspace).toMatchObject({ internal: true });
+  expect(userWorkspace?.archived).toBeUndefined();
+  expect(f.host.fetchWorkspaces).toHaveBeenLastCalledWith({ filter: { includeBackground: true, includeInternal: true }, page: { limit: 100, cursor: "1" } });
+  expect(await f.server.rpc(connectionStatus, {}, f.paseo)).toMatchObject({ sync: { retainedProjects: [{ name: "Product", cwd: project.cwd }] } });
+});
+
 it("a failed partial purge preserves its owner, blocks synchronization, restores and rule writes, then resumes on bootstrap", async () => {
   const f = await fixture({ askuser: true });
   const original = f.address();
@@ -371,6 +507,28 @@ it.each(["agents", "workspaces"])("cyclic %s pagination keeps ownership and can 
   expect(f.host.removeProject).not.toHaveBeenCalled();
   method.mockImplementation(original as never);
   await f.server.syncRpc(syncBootstrap, {}, f.paseo);
+  expect(JSON.parse(await f.persisted())).toMatchObject({ owner: { profile: "office" }, connections: {} });
+});
+
+it("profile purge leaves all discussions intact when workspace discovery fails and completes cleanup after retry", async () => {
+  const f = await fixture();
+  const agentIds = f.agents.map(agent => agent.id), project = f.projects[0], workspace = f.workspaces[0];
+  const list = f.host.fetchWorkspaces.getMockImplementation()!;
+  f.host.fetchWorkspaces.mockImplementation(async input => ({ ...await list(input), pageInfo: { hasMore: true, nextCursor: "cycle" } }));
+  await f.login(1, f.primary.apiUrl, "office");
+  f.server.setSettings(multicaSettings.id, { profile: "office" });
+  expect(await waitForSync(f.server, f.paseo)).toMatchObject({ status: "unavailable", stage: "purging" });
+  expect(f.host.deleteAgent).not.toHaveBeenCalled();
+  expect(f.host.archiveWorkspace).not.toHaveBeenCalled();
+  expect(f.host.removeProject).not.toHaveBeenCalled();
+  expect(f.agents.map(agent => agent.id)).toEqual(agentIds);
+  expect(JSON.parse(await f.persisted()).owner).toEqual({ profile: "" });
+  f.host.fetchWorkspaces.mockImplementation(list);
+  expect(await f.server.syncRpc(syncBootstrap, {}, f.paseo)).toEqual({ status: "ready" });
+  expect(f.host.deleteAgent.mock.calls.map(([id]) => id)).toEqual(agentIds);
+  expect(f.host.archiveWorkspace).toHaveBeenCalledExactlyOnceWith(workspace.id);
+  expect(f.host.removeProject).toHaveBeenCalledExactlyOnceWith(project.projectId);
+  expect(f.agents).toEqual([]);
   expect(JSON.parse(await f.persisted())).toMatchObject({ owner: { profile: "office" }, connections: {} });
 });
 
