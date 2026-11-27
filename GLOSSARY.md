@@ -15,7 +15,7 @@ _Avoid_: 未指明产品的 workspace、Paseo 工作区
 _Avoid_: Multica 项目、Multica 任务、Paseo 工作区
 
 **Multica 项目（Multica project）**：
-Multica 内归集任务的项目维度，在本集成中仅作为筛选条件，不对应 Paseo 项目。
+Multica 内归集任务的项目维度，在本集成中作为筛选条件与概览信息，不对应 Paseo 项目。
 _Avoid_: Paseo 项目、Multica 工作区
 
 **Multica 任务（Issue）**：
@@ -37,7 +37,7 @@ _Avoid_: 远端代码仓库、Git 工作树
 _Avoid_: Multica 任务、本地主讨论、执行过程
 
 **本地主讨论（Local main discussion）**：
-每个 Issue 在 Paseo 中承载任务描述、任务级系统事件和无评论关联 Run 的本地会话，本身不对应远端 Multica Thread。
+每个 Issue 在 Paseo 中承载任务概览、任务描述、Multica 平台生成的顶层系统评论和无评论关联 Run 的本地会话，本身不对应远端 Multica Thread。
 _Avoid_: Multica Thread、任务的全部讨论
 
 **评论（Comment）**：

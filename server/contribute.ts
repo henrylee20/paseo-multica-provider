@@ -1,6 +1,7 @@
 import { DataRebuild } from "./rebuild.js";
 import { rebuildPreflight, rebuildStart, rebuildStatus } from "../shared/rebuild.js";
-import { RunSynchronizer } from "./runs.js";
+import { RunSynchronizer, sourceTime } from "./runs.js";
+import { isActiveRun } from "../shared/runs.js";
 import { RunDetails } from "./run-details.js";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -18,7 +19,7 @@ import { readText } from "./chunked-text.js";
 import { readTaskDescription } from "../shared/description.js";
 import { TaskDescriptions } from "./task-description.js";
 import { projectionHistory, ThreadSynchronizer } from "./threads.js";
-import { threadOpen, commentEventDetail } from "../shared/threads.js";
+import { threadOpen, commentEventDetail, discussionList } from "../shared/threads.js";
 import { ManualHiding } from "./hiding.js";
 import { hiddenRestore } from "../shared/hiding.js";
 import { StopCoordinator } from "./stops.js";
@@ -149,6 +150,28 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
       return readText(issue.description, input);
     });
     server.handle(threadOpen, async input => threads.open(input));
+    server.handle(discussionList, async ({ workspaceId }) => {
+      // Like description.read, this observes cached mappings independently of the current CLI connection.
+      const issue = Object.values((await store.read()).connections).flatMap(connection => Object.values(connection.issues))
+        .find(issue => issue.workspaceId === workspaceId);
+      if (!issue) return null;
+      const activity = new Map<string, { time: bigint; value: string }>();
+      for (const [commentId, rootId] of Object.entries(issue.commentRoots)) {
+        const value = issue.commentCreatedAt[commentId], time = sourceTime(value);
+        if (time !== undefined && (!activity.has(rootId) || time > activity.get(rootId)!.time)) activity.set(rootId, { time, value });
+      }
+      const hidden = new Set(issue.manualHidden.discussions);
+      const threads = Object.entries(issue.threads).filter(([rootId]) => rootId !== "main" && !hidden.has(rootId)).map(([rootId, thread]) => ({
+        rootId, title: thread.title, agentId: thread.agentId, lastActivityAt: activity.get(rootId)?.value,
+        running: Object.values(issue.runs).some(run => run.ownerRootId === rootId && isActiveRun(run.status)),
+        pendingAskuser: Object.values(issue.askuserCards ?? {}).some(card => card.rootId === rootId && card.status === "pending" && !card.deleted),
+      })).sort((a, b) => {
+        const first = activity.get(a.rootId)?.time, second = activity.get(b.rootId)?.time;
+        if (first !== second) return first === undefined ? 1 : second === undefined ? -1 : first > second ? -1 : 1;
+        return a.title.localeCompare(b.title);
+      });
+      return { identifier: issue.overview?.identifier, threads, hiddenCount: [...hidden].filter(rootId => rootId !== "main").length };
+    });
     server.handle(commentEventDetail, async input => {
       const issue = (await store.read()).connections[input.connectionKey]?.issues[input.issueId];
       const row = issue ? projectionHistory(issue, input.rootId)?.rows.find(row => row.id === input.recordId && row.role === "event") : undefined;

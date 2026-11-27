@@ -11,7 +11,7 @@ import type { ProviderEvent, ProviderRegistration, ProviderTimelineItem } from "
 import { StateStore, type IssueMapping } from "./state.js";
 import { mainPersistence, providerId } from "./sync.js";
 import { taskDescriptionKind, taskDescriptionVersion } from "../shared/description.js";
-import { taskDescriptionData, type TaskDescriptions } from "./task-description.js";
+import { taskDescriptionData, taskDescriptionSummary, type TaskDescriptions } from "./task-description.js";
 import { projectRow, projectionHistory, threadPersistence, type ThreadSynchronizer } from "./threads.js";
 import type { StoredRow } from "./thread-state.js";
 import type { StopCoordinator } from "./stops.js";
@@ -90,6 +90,7 @@ class DiscussionOrder {
 interface SessionContext {
   address: RunAddress;
   emittedRows: Set<string>;
+  emittedDeliveries: Map<string, string>;
   originalIdentities: Set<string>;
   hasComment: boolean;
   inputComments: Set<string>;
@@ -143,10 +144,14 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
           if (saved.rootId !== session.address.rootId || (saved.rootId !== "main" && !saved.attachments?.length)) continue;
           // Keep the original main-discussion ID, including pre-attachment {} rows.
           const id = saved.rootId === "main" ? `multica:thread-created:${clientMessageId}` : `multica:comment-attachments:${clientMessageId}`;
-          if (session.emittedRows.has(id)) continue;
-          session.emittedRows.add(id);
+          const threadTitle = saved.rootId === "main" ? issue.threads[saved.commentId]?.title : undefined;
+          const data = { ...(saved.attachments?.length ? { threadCreated: saved.rootId === "main", attachments: saved.attachments } : {}),
+            ...(threadTitle ? { threadTitle } : {}) };
+          const revision = JSON.stringify(data);
+          if (session.emittedDeliveries.get(id) === revision) continue;
+          session.emittedDeliveries.set(id, revision);
           emit({ type: "timeline.item", sessionId, item: { type: "plugin", id, pluginId: providerId, kind: "comment-delivery", version: 1,
-            data: saved.attachments?.length ? { threadCreated: saved.rootId === "main", attachments: saved.attachments } : {} } });
+            data } });
         }
       };
       const emitRow = (sessionId: string, row: StoredRow, includeOriginal = true) => {
@@ -177,7 +182,7 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
             const entries = Object.entries(state.connections).flatMap(([connectionKey, connection]) =>
               Object.entries(connection.issues).flatMap(([issueId, issue]) => [{
                 persistence: mainPersistence(connectionKey, issueId), cwd: issue.cwd, title: issue.title,
-                description: issue.description, updatedAt: issue.updatedAt,
+                description: taskDescriptionSummary(issue.description), updatedAt: issue.updatedAt,
               }, ...Object.entries(issue.threads).map(([rootId, thread]) => ({ persistence: threadPersistence(connectionKey, issueId, rootId), cwd: issue.cwd, title: thread.title,
                 description: `Thread · ${issue.title}`, updatedAt: issue.updatedAt }))]));
             emit({ type: "sessions", requestId: input.requestId, sessions: entries.filter(issue =>
@@ -207,11 +212,12 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
             }
             const history = openingAddress.rootId === "main" ? issue.mainHistory : issue.threads[openingAddress.rootId];
             const hasComment = input.history !== "replay" && history.rows.some(row => row.role !== "event");
-            const session: SessionContext = { address: openingAddress, emittedRows: new Set(), originalIdentities: new Set(), hasComment, inputComments: new Set(), subscriptions: [], interrupts: new Set(), permissions: new Map() };
+            const session: SessionContext = { address: openingAddress, emittedRows: new Set(), emittedDeliveries: new Map(), originalIdentities: new Set(), hasComment, inputComments: new Set(), subscriptions: [], interrupts: new Set(), permissions: new Map() };
             sessions.set(input.sessionId, session);
             const address = session.address;
             emit({ type: "session.opened", requestId: input.requestId, sessionId: input.sessionId, capabilities,
-              restoration: "core", persistence: parsed.data, cwd: issue.cwd, title: issue.title, description: issue.description });
+              restoration: "core", persistence: parsed.data, cwd: issue.cwd, title: issue.title,
+              description: address.rootId === "main" ? taskDescriptionSummary(issue.description) : `Thread · ${issue.title}` });
             const projection = new RunProjection(input.sessionId, address.rootId, emit, runId => runDetails.get(address, runId));
             const order = new DiscussionOrder(issue, address.rootId, session.emittedRows, () => threads.refreshSequence(address), input.history === "replay", (latest, runIds) => {
               if (!capabilities.includes("session.subsession")) return;
@@ -245,14 +251,16 @@ export function createMulticaProvider(store: StateStore, threads: ThreadSynchron
             } else if (input.history === "replay") emit({ type: "timeline.item", sessionId: input.sessionId, item: {
               type: "plugin", pluginId: providerId, kind: taskDescriptionKind, version: taskDescriptionVersion,
               id: `multica:description:${parsed.data.data.issueId}`,
-              data: taskDescriptionData(parsed.data.data.connectionKey, parsed.data.data.issueId, issue.description),
+              data: taskDescriptionData(parsed.data.data.connectionKey, parsed.data.data.issueId, issue.description, issue.overview),
             } });
             if (parsed.data.data.discussion === "main") {
               let revision = input.history === "replay"
-                ? taskDescriptionData(parsed.data.data.connectionKey, parsed.data.data.issueId, issue.description).revision : undefined;
+                ? JSON.stringify(taskDescriptionData(parsed.data.data.connectionKey, parsed.data.data.issueId, issue.description, issue.overview)) : undefined;
               session.subscriptions.push(descriptions.subscribe(parsed.data.data.connectionKey, parsed.data.data.issueId, data => {
-                if (revision === data.revision) return;
-                revision = data.revision;
+                // The text revision also guards description.read; overview changes still replace this stable row.
+                const nextRevision = JSON.stringify(data);
+                if (revision === nextRevision) return;
+                revision = nextRevision;
                 emit({ type: "timeline.item", sessionId: input.sessionId, item: { type: "plugin", pluginId: providerId, kind: taskDescriptionKind, version: taskDescriptionVersion,
                   id: `multica:description:${parsed.data.data.issueId}`, data } });
               }));

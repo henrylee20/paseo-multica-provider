@@ -45,6 +45,7 @@ async function fixture(syncIntervalMs: number | null = 15_000, homePrefix = "mul
   const comments: Array<{ id: string; issue_id: string; content: string }> = [];
   const runs: Array<{ id: string; issue_id: string; agent_id: string; status: string; completed_at?: string; error?: string | null; failure_reason?: string | null; work_dir?: string | null }> = [];
   const runResponses = new Map<string, { status: number; body?: unknown }>();
+  const catalogResponses = new Map<string, { status: number; body?: unknown }>();
   const effects: string[] = [];
   const creations: Array<{ workspaceId: string; idempotencyKey: string }> = [];
   const issues = [
@@ -62,6 +63,8 @@ async function fixture(syncIntervalMs: number | null = 15_000, homePrefix = "mul
     scopes.push({ path: request.url!, slug: request.headers["x-workspace-slug"] as string | undefined });
     response.setHeader("Content-Type", "application/json");
     const url = new URL(request.url!, "http://localhost");
+    const catalog = catalogResponses.get(url.pathname);
+    if (catalog) { response.statusCode = catalog.status; response.end(JSON.stringify(catalog.body ?? {})); return; }
     if (url.pathname === "/api/issues") {
       if (remote.disconnect) { response.destroy(); return; }
       response.statusCode = remote.nextPageFails && (!remote.failingWorkspace || remote.failingWorkspace === request.headers["x-workspace-slug"]) && Number(url.searchParams.get("offset")) > 0 ? 503 : remote.issueStatus;
@@ -210,7 +213,7 @@ async function fixture(syncIntervalMs: number | null = 15_000, homePrefix = "mul
   }
   const { server, dispose } = start();
   const paseo = { hosts: { list: async () => ({ self: { serverId: "owning-daemon" } }) } } as unknown as PaseoApi;
-  return { server, requests, paseo, native, home, issues, comments, start, dispose, host, connectHost, remote, heldIssueReads, heldRunReads, runResponses, websocket, websocketRequests, signal, scopes, workspaces, workspaceIssues, runs, effects, creations };
+  return { server, requests, paseo, native, home, issues, comments, start, dispose, host, connectHost, remote, heldIssueReads, heldRunReads, runResponses, catalogResponses, websocket, websocketRequests, signal, scopes, workspaces, workspaceIssues, runs, effects, creations };
 }
 
 it("client bootstrap leaves the native sidebar empty until a workspace rule is explicitly enabled", async () => {
@@ -222,6 +225,91 @@ it("client bootstrap leaves the native sidebar empty until a workspace rule is e
   expect(await f.server.rpc(workspaces, {}, f.paseo)).toEqual({ workspaces: [{ id: "remote-workspace", name: "产品开发", enabled: false }] });
   expect(f.requests.some(path => path.startsWith("/api/issues"))).toBe(false);
   expect(f.websocketRequests).toEqual([]);
+});
+
+it("saves task overviews with snapshot-memoized member, agent, squad, project and status names and optional app links", async () => {
+  const f = await fixture();
+  const configPath = join(f.home, ".multica/config.json");
+  await writeFile(configPath, JSON.stringify({ ...JSON.parse(await readFile(configPath, "utf8")), app_url: "https://multica.example/app/" }));
+  Object.assign(f.issues[0], { priority: "high", due_date: "2027-01-02", labels: [{ id: "red", name: "界面", color: "red" }] });
+  f.issues.push({ ...f.issues[0], id: "squad-one", assignee_type: "squad", assignee_id: "squad-owned" },
+    { ...f.issues[0], id: "squad-two", assignee_type: "squad", assignee_id: "squad-owned" });
+  expect(await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo)).toMatchObject({ status: "ready" });
+  const read = async () => Object.values((await new StateStore(join(f.home, "multica-provider")).read()).connections)[0].issues;
+  const issues = await read();
+  expect(issues["issue-one"].overview).toEqual({ identifier: "PRD-1", statusKey: "custom-ready", statusName: "待接手", statusCategory: "unstarted",
+    priority: "high", dueDate: "2027-01-02", assigneeType: "member", assigneeId: "user-42", assigneeName: "Lin",
+    projectId: "project-a", projectName: "客户端", labels: ["界面"], url: "https://multica.example/app/product/issues/PRD-1" });
+  expect(issues["issue-two"].overview).toMatchObject({ assigneeName: "Builder", statusName: "待审核" });
+  expect(issues["squad-one"].overview).toMatchObject({ assigneeName: "Team" });
+  f.requests.length = 0;
+  await resync(f.server, f.paseo, "remote-workspace");
+  const catalogs = ["/api/workspaces/remote-workspace/members", "/api/agents?workspace_id=remote-workspace&include_archived=true", "/api/squads", "/api/projects?include_archived=true", "/api/issue-statuses?include_archived=true"];
+  for (const path of catalogs) expect(f.requests.filter(request => request === path), path).toHaveLength(1);
+  Object.assign(f.issues[0], { identifier: undefined });
+  await resync(f.server, f.paseo, "remote-workspace");
+  expect((await read())["issue-one"].overview?.url).toBe("https://multica.example/app/product/issues/issue-one");
+  await writeFile(configPath, JSON.stringify({ ...JSON.parse(await readFile(configPath, "utf8")), app_url: undefined }));
+  await resync(f.server, f.paseo, "remote-workspace");
+  expect((await read())["issue-one"].overview?.url).toBeUndefined();
+});
+
+it.each([
+  ["identifier", 42, "identifier"], ["status", {}, "statusKey"], ["status_category", false, "statusCategory"],
+  ["priority", "critical", "priority"], ["assignee_type", "unknown", "assigneeType"], ["assignee_id", [], "assigneeId"],
+  ["project_id", 7, "projectId"], ["due_date", "2026-02-30", "dueDate"], ["labels", [{ name: 42 }], "labels"],
+] as const)("treats malformed overview field %s as missing while synchronizing the task's other fields", async (field, invalid, stored) => {
+  const f = await fixture();
+  f.catalogResponses.set("/api/issues", { status: 200, body: { issues: [{ ...f.issues[0], priority: "low", labels: [{ name: "界面" }], [field]: invalid }], total: 1 } });
+  expect(await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo)).toMatchObject({ status: "ready" });
+  const saved = Object.values((await new StateStore(join(f.home, "multica-provider")).read()).connections)[0].issues["issue-one"];
+  expect(saved.description).toBe(f.issues[0].description);
+  expect(saved.overview?.[stored]).toBeUndefined();
+  expect(saved.overview?.statusName).toBe(field === "status" ? "未开始" : "待接手");
+  if (field !== "priority") expect(saved.overview?.priority).toBe("low");
+});
+
+it.each(["http", "malformed"])("retains same-object overview names after %s catalog failures without failing or rewriting an unchanged snapshot", async failure => {
+  const f = await fixture();
+  f.issues.push({ ...f.issues[0], id: "squad", assignee_type: "squad", assignee_id: "squad-owned" });
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const file = join(f.home, "multica-provider/state.json");
+  const before = await stat(file);
+  for (const path of ["/api/workspaces/remote-workspace/members", "/api/agents", "/api/squads", "/api/projects", "/api/issue-statuses"])
+    f.catalogResponses.set(path, { status: failure === "http" ? 503 : 200, body: {} });
+  expect(await resync(f.server, f.paseo, "remote-workspace")).toMatchObject({ status: "ready" });
+  expect((await stat(file)).ino).toBe(before.ino);
+  const read = async () => Object.values((await new StateStore(join(f.home, "multica-provider")).read()).connections)[0].issues;
+  expect((await read())["issue-one"].overview).toMatchObject({ assigneeName: "Lin", projectName: "客户端", statusName: "待接手" });
+  expect((await read())["issue-two"].overview?.assigneeName).toBe("Builder");
+  expect((await read()).squad.overview?.assigneeName).toBe("Team");
+  Object.assign(f.issues[0], { assignee_id: "other-user", project_id: "other-project", status: "other-status" });
+  Object.assign(f.issues[1], { assignee_type: "member" });
+  expect(await resync(f.server, f.paseo, "remote-workspace")).toMatchObject({ status: "ready" });
+  const changed = (await read())["issue-one"].overview!;
+  expect(changed.assigneeName).toBeUndefined(); expect(changed.projectName).toBeUndefined(); expect(changed.statusName).toBe("未开始");
+  expect((await read())["issue-two"].overview?.assigneeName).toBeUndefined();
+});
+
+it.each(["", 42, null])("resolves empty or malformed status_name %s lazily, then falls back to category and key", async status_name => {
+  const f = await fixture();
+  const raw = { ...f.issues[0], status_name, assignee_type: null, assignee_id: null, project_id: null };
+  f.catalogResponses.set("/api/issues", { status: 200, body: { issues: [raw], total: 1 } });
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const read = async () => Object.values((await new StateStore(join(f.home, "multica-provider")).read()).connections)[0].issues["issue-one"].overview!;
+  expect((await read()).statusName).toBe("待接手");
+  expect(f.requests.some(path => /\/api\/(agents|squads|projects)/.test(path))).toBe(false);
+  f.catalogResponses.set("/api/issue-statuses", { status: 200, body: { statuses: [] } });
+  for (const [category, name] of [["unstarted", "未开始"], ["started", "进行中"], ["done", "已完成"], ["closed", "已关闭"], ["future", "custom-ready"]]) {
+    raw.status_category = category;
+    await resync(f.server, f.paseo, "remote-workspace");
+    expect((await read()).statusName).toBe(name);
+  }
+  Object.assign(raw, { status_name: "自定义名称" });
+  f.requests.length = 0;
+  await resync(f.server, f.paseo, "remote-workspace");
+  expect((await read()).statusName).toBe("自定义名称");
+  expect(f.requests.some(path => path.startsWith("/api/issue-statuses"))).toBe(false);
 });
 
 it("workspace preview counts all matched tasks against unarchived mappings without writing state or calling the native host", async () => {
@@ -1137,6 +1225,14 @@ it("updates the opened main discussion's stable description from cached observat
   await provider.send({ type: "session.open", requestId: "open", sessionId: "opened-main", history: "replay", persistence: JSON.parse(agent.handle.slice(7)), config: { cwd: agent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
   const descriptions = () => events.flatMap(event => event.type === "timeline.item" && event.item.type === "plugin" && event.item.kind === "task-description" ? [event.item.data as { revision: string; preview: string }] : []);
   const old = descriptions().at(-1)!;
+  Object.assign(f.issues[0], { status_name: "正在开发", status_category: "started" });
+  await resync(f.server, f.paseo, "remote-workspace");
+  expect(descriptions()).toHaveLength(2);
+  expect(descriptions().at(-1)).toMatchObject({ revision: old.revision, preview: old.preview, overview: { statusName: "正在开发", statusCategory: "started" } });
+  expect(events.filter(event => event.type === "timeline.item" && event.item.type === "plugin" && event.item.kind === "task-description")
+    .every(event => event.type === "timeline.item" && event.item.id === "multica:description:issue-one")).toBe(true);
+  await resync(f.server, f.paseo, "remote-workspace");
+  expect(descriptions()).toHaveLength(2);
   f.issues[0].description = "新的任务目标。";
   await resync(f.server, f.paseo, "remote-workspace");
   expect(events.filter(event => event.type === "timeline.item" && event.item.type === "plugin" && event.item.kind === "task-description").at(-1)).toMatchObject({ item: { id: "multica:description:issue-one", data: { preview: "新的任务目标。" } } });
@@ -1145,6 +1241,30 @@ it("updates the opened main discussion's stable description from cached observat
   expect(current).toMatchObject({ preview: "新的任务目标。" });
   expect(await f.server.rpc(readDescription, { ...address, revision: current.revision, offset: 0 }, f.paseo)).toEqual({ text: "新的任务目标。", nextOffset: null });
   await expect(f.server.rpc(readDescription, { ...address, revision: old.revision, offset: 0 }, f.paseo)).rejects.toThrow("changed");
+});
+
+it.each([
+  ["\n  ## 背景\n\n首行正文\n后续内容", "首行正文"],
+  ["\n# 目标\n\n## 背景\r\n\r\n首行正文", "首行正文"],
+  ["\n  ## 首行目标\n\n### 背景", "首行目标"],
+  [`\n## 背景\n\n${"😀".repeat(121)}\n后续内容`, "😀".repeat(120) + "…"],
+  [`\n# ${"😀".repeat(121)}`, "😀".repeat(120) + "…"],
+  ["\n \n", ""],
+])("prefers a body line and falls back to a heading for main session summaries: %s", async (description, expected) => {
+  const f = await fixture();
+  f.issues[0].description = description;
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const agent = f.native.agents[0];
+  const provider = await f.server.providers.get("multica")!.connect({ versions: [1], capabilities: ["session.list"] });
+  cleanup.push(() => provider.close());
+  const events: ProviderEvent[] = [];
+  provider.onEvent(event => events.push(event));
+  await provider.send({ type: "session.open", requestId: "summary", sessionId: "summary", history: "replay", persistence: JSON.parse(agent.handle.slice(7)), config: { cwd: agent.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
+  await provider.send({ type: "sessions", requestId: "list", cwd: agent.cwd });
+  expect(events).toContainEqual(expect.objectContaining({ type: "session.opened", description: expected }));
+  const list = events.find(event => event.type === "sessions");
+  expect(list).toMatchObject({ sessions: [expect.objectContaining({ description: expected })] });
+  expect(events).toContainEqual(expect.objectContaining({ type: "timeline.item", item: expect.objectContaining({ kind: "task-description", data: expect.objectContaining({ preview: description }) }) }));
 });
 
 
@@ -1481,8 +1601,9 @@ it("reimport continues after a workspace import fails, lists it in the failed re
   await enableSecondWorkspace(f);
   const connectionKey = (await f.server.rpc(connectionStatus, {}, f.paseo)).connectionKey!;
   const add = f.host.addProject.bind(f.host);
+  const failedCwd = f.native.projects[0].cwd;
   let fail = true;
-  f.host.addProject = async (...args) => { if (fail) { fail = false; throw new Error("private-token raw upstream body"); } return add(...args); };
+  f.host.addProject = async (...args) => { if (fail && args[0] === failedCwd) { fail = false; throw new Error("private-token raw upstream body"); } return add(...args); };
   await f.server.rpc(rebuildStart, { connectionKey }, f.paseo);
   const result = await finishRebuild(f.server, f.paseo, connectionKey);
   expect(result).toMatchObject({ status: "failed", stage: "importing", completed: 2, total: 4, message: expect.stringContaining("产品开发") });
@@ -2131,6 +2252,7 @@ it("skips unchanged state writes and native renames across polls and restart, re
   await f.dispose();
   const restarted = f.start();
   await resync(restarted.server, f.paseo, "remote-workspace");
+  expect((await stat(file)).ino).toBe(before.ino);
   expect(title).not.toHaveBeenCalled(); expect(name).not.toHaveBeenCalled();
   expect(projectName).not.toHaveBeenCalled();
   expect(f.native.workspaces[0].title).toBe("My workspace");

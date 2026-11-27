@@ -12,6 +12,7 @@ import { DeliveryStatus } from "./client/delivery-status.js";
 import { deliverySummary } from "./shared/delivery.js";
 import { MentionPicker, composerItemRegistrar } from "./client/mention-picker.js";
 import { AttachmentPreviewPanel } from "./client/attachment-preview.js";
+import { DiscussionListPanel } from "./client/discussion-list.js";
 
 export default function contribute(client: PluginClientContext) {
   let disposed = false;
@@ -30,10 +31,11 @@ export default function contribute(client: PluginClientContext) {
   const removeMention = composerItem ? composerItem({ id: "multica-mention", Component: MentionPicker }) : () => {};
   const removeSettings = client.addSettingsScreen({ id: "multica", title: "Multica", icon: "MessagesSquare", Component: ConnectionScreen });
   const removeAttachmentPanel = client.addWorkspacePanel({ id: "attachment-preview", title: "Multica 附件", icon: "Paperclip", locations: ["explorer", "workspace"], Component: AttachmentPreviewPanel });
+  const removeDiscussionPanel = client.addWorkspacePanel({ id: "discussion-list", title: "讨论列表", icon: "PanelRight", locations: ["explorer", "workspace"], Component: DiscussionListPanel });
   const removeSidebar = client.addSidebarHeaderItem({ id: "multica", title: "Multica",
     Component: () => <SidebarRow icon="SlidersHorizontal" onPress={() => client.openSettings("multica")} /> });
   const removeDescription = client.addTimelineRenderer({ kind: taskDescriptionKind, version: taskDescriptionVersion,
-    schema: taskDescriptionSchema, Component: TaskDescription });
+    schema: taskDescriptionSchema, Component: props => <TaskDescription {...props} client={client} /> });
   const removeThread = client.addTimelineRenderer({ kind: "thread", version: 1, schema: threadSummarySchema, Component: ThreadSummary });
   const removeDivider = client.addTimelineRenderer({ kind: "comment-divider", version: 1, schema: commentDividerSchema, Component: CommentDivider });
   const removeEvent = client.addTimelineRenderer({ kind: "comment-event", version: 1, schema: commentEventSchema, Component: CommentEvent });
@@ -45,6 +47,7 @@ export default function contribute(client: PluginClientContext) {
     removeAskuser();
     removeDelivery();
     removeAttachmentPanel();
+    removeDiscussionPanel();
     removeEvent();
     removeDivider();
     removeThread();

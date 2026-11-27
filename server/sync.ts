@@ -8,20 +8,30 @@ import { issueQuery } from "./filters.js";
 import { WorkspaceEvents, type WorkspaceEvent } from "./workspace-events.js";
 import { remoteFetch, type AuthenticatedConnection } from "./connection.js";
 import { archiveClosedDiscussion, ensureWorkspaceActive, fetchActiveWorkspaceIds, findActiveWorkspace, findNativeDiscussion, projectHasActiveWorkspaces, restoreMappedDiscussion, type NativeHost } from "./native-host.js";
-import { StateStore, connectionState, issueSchema, type ConnectionState } from "./state.js";
+import { StateStore, connectionState, issueSchema, type ConnectionState, type IssueMapping } from "./state.js";
 import { discussionAgent, hiddenAgent, restoreWorkspacePreservingHidden } from "./hiding.js";
 import { discussionKeys } from "../shared/discussion.js";
 import type { DiscussionMetadata } from "./discussion-metadata.js";
 import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
 
 export const workspaceSchema = z.object({ id: z.string().min(1), name: z.string(), slug: z.string().min(1) });
-const remoteIssueSchema = z.object({ id: z.string().min(1), workspace_id: z.string(), identifier: z.string().optional(), title: z.string(),
-  description: z.string().nullish(), status: z.string(), status_category: z.string().optional(), updated_at: z.string().optional() });
+const overviewText = z.string().trim().min(1).optional().catch(undefined);
+const remoteIssueSchema = z.object({ id: z.string().min(1), workspace_id: z.string(), title: z.string(),
+  description: z.string().nullish(), updated_at: z.string().optional(),
+  identifier: overviewText, status: overviewText, status_name: overviewText, status_category: overviewText,
+  priority: z.enum(["urgent", "high", "medium", "low", "none"]).optional().catch(undefined),
+  assignee_type: z.enum(["member", "agent", "squad"]).optional().catch(undefined), assignee_id: overviewText, project_id: overviewText,
+  due_date: z.iso.date().optional().catch(undefined),
+  labels: z.array(z.object({ name: z.string().trim().min(1) })).optional().catch(undefined),
+});
 const pageSchema = z.object({ issues: z.array(remoteIssueSchema), total: z.number().int().nonnegative() });
 // These requests live only for this snapshot (or an explicit Thread open).
 export type RemoteWorkspace = z.infer<typeof workspaceSchema> & {
   agents?: Promise<Array<{ id: string; name: string; archived_at?: string | null }>>;
   members?: Promise<Array<{ user_id: string; name: string }>>;
+  squads?: Promise<Array<{ id: string; name: string }>>;
+  projects?: Promise<{ projects: Array<{ id: string; title: string }> }>;
+  statuses?: Promise<{ statuses: Array<{ key: string; name: string; category: string }> }>;
 };
 export const providerId = "multica";
 export function mainPersistence(connectionKey: string, issueId: string) {
@@ -49,6 +59,47 @@ export function workspaceAgents(connection: AuthenticatedConnection, workspace: 
 export function workspaceMembers(connection: AuthenticatedConnection, workspace: RemoteWorkspace) {
   return workspace.members ??= remoteJson(connection, `/api/workspaces/${encodeURIComponent(workspace.id)}/members`,
     z.array(z.object({ user_id: z.string(), name: z.string() })), workspace) as NonNullable<RemoteWorkspace["members"]>;
+}
+
+async function issueOverview(connection: AuthenticatedConnection, workspace: RemoteWorkspace, issue: z.infer<typeof remoteIssueSchema>, previous?: IssueMapping["overview"]): Promise<NonNullable<IssueMapping["overview"]>> {
+  const overview: NonNullable<IssueMapping["overview"]> = {
+    identifier: issue.identifier, statusKey: issue.status, statusCategory: issue.status_category, priority: issue.priority,
+    assigneeType: issue.assignee_type, assigneeId: issue.assignee_id, projectId: issue.project_id,
+    labels: issue.labels?.map(label => label.name), dueDate: issue.due_date,
+    url: connection.appUrl && workspace.slug ? `${connection.appUrl.replace(/\/$/, "")}/${encodeURIComponent(workspace.slug)}/issues/${encodeURIComponent(issue.identifier ?? issue.id)}` : undefined,
+  };
+  if (issue.assignee_type && issue.assignee_id) {
+    try {
+      if (issue.assignee_type === "member") overview.assigneeName = (await workspaceMembers(connection, workspace)).find(item => item.user_id === issue.assignee_id)?.name;
+      else if (issue.assignee_type === "agent") overview.assigneeName = (await workspaceAgents(connection, workspace)).find(item => item.id === issue.assignee_id)?.name;
+      else {
+        const squads = await (workspace.squads ??= remoteJson(connection, "/api/squads", z.array(z.object({ id: z.string(), name: z.string() })), workspace) as NonNullable<RemoteWorkspace["squads"]>);
+        overview.assigneeName = squads.find(item => item.id === issue.assignee_id)?.name;
+      }
+    } catch {
+      if (previous?.assigneeType === issue.assignee_type && previous.assigneeId === issue.assignee_id) overview.assigneeName = previous.assigneeName;
+    }
+  }
+  if (issue.project_id) {
+    try {
+      const projects = await (workspace.projects ??= remoteJson(connection, "/api/projects?include_archived=true",
+        z.object({ projects: z.array(z.object({ id: z.string(), title: z.string() })) }), workspace) as NonNullable<RemoteWorkspace["projects"]>);
+      overview.projectName = projects.projects.find(item => item.id === issue.project_id)?.title;
+    } catch { if (previous?.projectId === issue.project_id) overview.projectName = previous.projectName; }
+  }
+  overview.statusName = issue.status_name;
+  if (!overview.statusName && issue.status) {
+    try {
+      const statuses = await (workspace.statuses ??= remoteJson(connection, "/api/issue-statuses?include_archived=true",
+        z.object({ statuses: z.array(z.object({ key: z.string(), name: z.string(), category: z.string() })) }), workspace) as NonNullable<RemoteWorkspace["statuses"]>);
+      overview.statusName = statuses.statuses.find(item => item.key === issue.status)?.name;
+    } catch { if (previous?.statusKey === issue.status) overview.statusName = previous.statusName; }
+  }
+  const categories: Record<string, string> = { unstarted: "未开始", started: "进行中", done: "已完成", closed: "已关闭" };
+  overview.statusName ||= (issue.status_category ? categories[issue.status_category] : undefined) ?? issue.status;
+  // Match the JSON representation so a restart does not turn absent fields into a state change.
+  for (const key of Object.keys(overview) as Array<keyof typeof overview>) if (overview[key] === undefined) delete overview[key];
+  return overview;
 }
 
 export class SidebarSynchronizer {
@@ -617,6 +668,9 @@ export class SidebarSynchronizer {
           for (const issue of issues) {
             if (stopped()) return;
             const previous = (await this.options.store.read()).connections[connection.connectionKey]?.issues[issue.id];
+            const overview = await issueOverview(connection, workspace, issue, previous?.overview);
+            await connection.assertCurrent?.();
+            if (stopped()) return;
             const title = [issue.identifier, issue.title].filter(Boolean).join(" ");
             const oldProjectId = previous?.projectId ?? local?.projects[workspaceId]?.projectId;
             const rebuildWorkspace = previous?.workspaceCreated && oldProjectId && oldProjectId !== projectId;
@@ -633,7 +687,7 @@ export class SidebarSynchronizer {
                 workspaceId: rebuildWorkspace ? newWorkspaceId : local.issues[issue.id]?.workspaceId ?? newWorkspaceId,
                 workspaceCreated: rebuildWorkspace ? false : local.issues[issue.id]?.workspaceCreated,
                 appliedTitle: rebuildWorkspace ? undefined : local.issues[issue.id]?.appliedTitle,
-                cwd, title, description: issue.description ?? "", updatedAt: issue.updated_at });
+                cwd, title, description: issue.description ?? "", overview, updatedAt: issue.updated_at });
             });
             let mapping = (await this.options.store.read()).connections[connection.connectionKey].issues[issue.id];
             if (!mapping.workspaceCreated) {

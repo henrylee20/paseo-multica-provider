@@ -169,6 +169,23 @@ it("main input creates an ordinary Thread and shows only its brief success hint"
   expect(f.events.some(event => event.type === "session.turn")).toBe(false);
 });
 
+it("re-emits the same delivery ID once its Thread title is discovered and deduplicates unchanged content", async () => {
+  const f = await fixture();
+  const saved = comment("late-title", null, "稍后发现的标题");
+  f.post(async () => ({ body: saved }));
+  await f.send("main", saved.content, "late-title-input");
+  const rows = () => f.events.flatMap(event => event.type === "timeline.item" && event.item.type === "plugin" && event.item.id === "multica:thread-created:late-title-input" ? [event.item] : []);
+  await expect.poll(() => rows().length).toBe(1);
+  expect(rows()[0]).toMatchObject({ version: 1, data: {} });
+  f.comments.push(saved);
+  await resync(f.server, f.paseo, "workspace");
+  expect(rows()).toHaveLength(2);
+  expect(rows()[1]).toMatchObject({ id: rows()[0].id, version: 1, data: { threadTitle: "稍后发现的标题" } });
+  await resync(f.server, f.paseo, "workspace");
+  expect(rows()).toHaveLength(2);
+  expect(f.canonical.get(f.agents[0].id)!.filter(row => row.item.id === rows()[0].id)).toHaveLength(1);
+});
+
 const image = { type: "image" as const, data: Buffer.from("image bytes").toString("base64"), mimeType: "image/png" };
 const sendErrors = (f: Awaited<ReturnType<typeof fixture>>) => f.events.filter(event => event.type === "timeline.item" && event.item.type === "error");
 
@@ -357,6 +374,7 @@ it("persists durable attachment links rather than expiring download capabilities
 
 it("replays a legacy main-discussion delivery hint under its original ID without duplicating the persisted row", async () => {
   const f = await fixture();
+  f.post(async body => ({ body: comment("undiscovered-legacy", null, body.content) }));
   await f.send("main", "legacy text", "legacy-main");
   await expect.poll(() => f.posts.length).toBe(1);
   await f.dispose();

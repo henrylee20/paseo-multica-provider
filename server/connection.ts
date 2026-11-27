@@ -14,6 +14,7 @@ export interface ConnectionDependencies {
 /** Daemon-only request context. Never return this value from an RPC or persist it. */
 export interface AuthenticatedConnection {
   apiUrl: string;
+  appUrl?: string;
   token: string;
   connectionKey: string;
   userId: string;
@@ -191,7 +192,7 @@ export function createConnectionResolver(dependencies: ConnectionDependencies) {
       }
       const { user } = identity;
       const connectionKey = createHash("sha256").update(JSON.stringify([base.apiUrl, user.id])).digest("hex");
-      authenticated?.({ apiUrl: base.apiUrl!, token, connectionKey, userId: user.id, assertCurrent, signal: controller.signal, identity });
+      authenticated?.({ apiUrl: base.apiUrl!, appUrl: base.appUrl, token, connectionKey, userId: user.id, assertCurrent, signal: controller.signal, identity });
       return { ...base, status: "ready", user: { id: user.id, name: user.name ?? "", email: user.email ?? "" },
         connectionKey,
         message: "已验证 CLI 连接。" };

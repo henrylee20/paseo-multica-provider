@@ -6,6 +6,7 @@ import { z } from "zod";
 import { storedRunSchema } from "./run-state.js";
 import { threadSchema } from "./thread-state.js";
 import { deliveredAttachment } from "../shared/delivery.js";
+import { taskOverviewSchema } from "../shared/description.js";
 import { taskRuleSchema } from "../shared/contracts.js";
 import { askuserAttachmentSchema, storedAskuserCardSchema } from "./askuser-state.js";
 
@@ -14,6 +15,7 @@ export const issueSchema = z.object({
   remoteWorkspaceId: z.string(), workspaceId: z.string(), cwd: z.string(), title: z.string(),
   projectId: z.string().optional(), appliedTitle: z.string().optional(),
   description: z.string(), updatedAt: z.string().optional(), workspaceCreated: z.boolean().default(false), mainAgentId: z.string().optional(),
+  overview: taskOverviewSchema.optional().catch(undefined),
   // "inaccessible" is accepted only so states written before OPT-08 remain readable.
   archiveReason: z.enum(["rule_disabled", "filter_exit", "inaccessible"]).optional(), ruleArchivedAgentIds: z.array(z.string()).default([]),
   manualHidden: z.object({ workspace: z.boolean(), discussions: z.array(z.string()) }).default({ workspace: false, discussions: [] }),

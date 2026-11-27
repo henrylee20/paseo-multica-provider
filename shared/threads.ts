@@ -8,6 +8,12 @@ export const threadOpen = defineRpc({ name: "thread.open", input: threadAddress,
   status: z.enum(["ready", "cached", "unavailable"]), message: z.string().optional(),
 }) });
 
+export const discussionList = defineRpc({ name: "discussion.list", input: z.object({ workspaceId: z.string() }), output: z.object({
+  identifier: z.string().optional(), hiddenCount: z.number().int().nonnegative(),
+  threads: z.array(z.object({ rootId: z.string(), title: z.string(), agentId: z.string().optional(), lastActivityAt: z.string().optional(),
+    running: z.boolean(), pendingAskuser: z.boolean() })),
+}).nullable() });
+
 export const commentEventSchema = threadAddress.extend({
   recordId: z.string(), commentId: z.string(), category: z.enum(["system", "correction", "deletion", "source"]),
   text: z.string(), truncated: z.boolean(), sourceCreatedAt: z.string().optional(), sourceUpdatedAt: z.string().optional(),
