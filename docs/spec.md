@@ -95,6 +95,7 @@ Paseo `0.16.0+` 的讨论输入框注册 `multica-mention` 选择器（「提及
 每个 Run ID 通过父会话协商的 `session.subsession` 呈现为只读子会话 `session.opened{parentSessionId, toolCallId, restoration: "parent"}`（[ADR 0011](./adr/0011-run-as-provider-subagent.md)）：
 
 - 标题为执行 agent 名称，描述为输入触发来源与创建时间（Run 自身生成的评论不当作触发输入，无输入关联时显示「任务级执行」）；重跑的新 Run ID 生成新子代理。
+- 同一段连续文本流投影为同一原生助手消息块，工具等边界照实际顺序分隔。
 - 父讨论时间线按输入来源评论与创建时间排定一次静态 `sub_agent` 位置标记（状态固定 `completed`，子会话 `toolCallId` 指向该标记）：标记等待其输入锚点行（优先本讨论触发评论，否则最早输入关联评论，生成评论不作输入锚点）发出后，排在首条来源时间严格较晚的后续评论及其分隔线之前（同时间按 Run ID 排序）；无输入锚点的 Run 等完整评论快照可用后按纳秒时间参与排序；若存在输入来源却无对应行，须等开始等待后才发起的一次讨论刷新投递完成才认定锚点缺失。`markerProjected` 仅在标记实际发出后持久化，`history:skip` 只补发未发出的新标记，已有标记的 Run 立即恢复子会话。宿主按首次到达顺序固定条目位置，已错位的旧时间线需通过「重建数据」重排。
 - 父讨论内所有处于 `queued`、`dispatched`、`running`、`waiting_local_directory`、`deferred` 的归属 Run 共同维持一个原生活动 turn（每次新活动周期分配全新 UUID）；子会话将这五类状态映射为 `running` 并在细分状态变化时追加简短说明，`completed` / `failed` / `cancelled` 映射为 `completed` / `failed` / `canceled`。
 - 讨论在宿主打开（含导入）时，先按上述顺序发出 Run 标记，再同步打开对应子会话、推送已缓存内容并立即按已知终态结算，离线或明细拉取失败不阻塞终态展示；执行明细按连接分目录、每个 Run 单独原子落盘，仅消息或终态标记变化时写入，不进入 `state.json`；打开讨论时仅加载所属 Run 明细到内存，离线可重放这些文件。旧版 `state.json` 内嵌的 `runDetails` 直接丢弃，打开讨论后从远端重新补读，不迁移。归档与人工隐藏保留明细，切换 profile 清理与数据重建删除对应连接明细目录。仅本进程实际打开过的讨论补读远端执行明细（活跃期每 2 秒刷新，终态成功拉取后标记 `finalized` 停止；`finalized` 前不越过消息序号缺口，完成后按可得源顺序展示运行文本、思考、工具调用及结果、任务 `error` / `failure_reason` 与标明远端的 `work_dir` / `relative_work_dir`）。父会话纯关闭时仅清理本地子会话映射，不发子会话 `session.closed`。
