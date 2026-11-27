@@ -11,6 +11,7 @@ import { commentDividerSchema, commentEventSchema, threadSummarySchema } from ".
 import { DeliveryStatus } from "./client/delivery-status.js";
 import { deliverySummary } from "./shared/delivery.js";
 import { MentionPicker, composerItemRegistrar } from "./client/mention-picker.js";
+import { AttachmentPreviewPanel } from "./client/attachment-preview.js";
 
 export default function contribute(client: PluginClientContext) {
   let disposed = false;
@@ -28,6 +29,7 @@ export default function contribute(client: PluginClientContext) {
   const composerItem = composerItemRegistrar(client);
   const removeMention = composerItem ? composerItem({ id: "multica-mention", Component: MentionPicker }) : () => {};
   const removeSettings = client.addSettingsScreen({ id: "multica", title: "Multica", icon: "MessagesSquare", Component: ConnectionScreen });
+  const removeAttachmentPanel = client.addWorkspacePanel({ id: "attachment-preview", title: "Multica 附件", icon: "Paperclip", locations: ["explorer", "workspace"], Component: AttachmentPreviewPanel });
   const removeSidebar = client.addSidebarHeaderItem({ id: "multica", title: "Multica",
     Component: () => <SidebarRow icon="SlidersHorizontal" onPress={() => client.openSettings("multica")} /> });
   const removeDescription = client.addTimelineRenderer({ kind: taskDescriptionKind, version: taskDescriptionVersion,
@@ -36,12 +38,13 @@ export default function contribute(client: PluginClientContext) {
   const removeDivider = client.addTimelineRenderer({ kind: "comment-divider", version: 1, schema: commentDividerSchema, Component: CommentDivider });
   const removeEvent = client.addTimelineRenderer({ kind: "comment-event", version: 1, schema: commentEventSchema, Component: CommentEvent });
   const removeAskuser = client.addTimelineRenderer({ kind: "askuser", version: 1, schema: askuserCardSchema, Component: AskuserCard });
-  const removeDelivery = client.addTimelineRenderer({ kind: "comment-delivery", version: 1, schema: deliverySummary, Component: DeliveryStatus });
+  const removeDelivery = client.addTimelineRenderer({ kind: "comment-delivery", version: 1, schema: deliverySummary, Component: props => <DeliveryStatus {...props} client={client} /> });
   return () => {
     disposed = true;
     clearInterval(timer);
     removeAskuser();
     removeDelivery();
+    removeAttachmentPanel();
     removeEvent();
     removeDivider();
     removeThread();

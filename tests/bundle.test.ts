@@ -41,7 +41,7 @@ it("the host-compiled client opens the existing Multica settings from the sideba
     entries.push({ kind, ...entry });
     return () => { entries.splice(entries.findIndex(value => value.kind === kind && value.id === entry.id), 1); };
   };
-  const dispose = setup({ rpc: async () => ({ status: "ready" }), openSettings,
+  const dispose = setup({ addWorkspacePanel: () => () => {}, rpc: async () => ({ status: "ready" }), openSettings,
     addSettingsScreen: add("settings"), addScreen: add("screen"), addSidebarHeaderItem: add("sidebar"), addTimelineRenderer: () => () => {} });
   try {
     expect(entries.map(({ kind, id, title }) => ({ kind, id, title }))).toEqual([
@@ -65,7 +65,7 @@ it("client bootstrap keeps running through successful connections and daemon res
   vi.useFakeTimers();
   try {
     const calls: string[] = [];
-    const dispose = setup({ rpc: async (contract: { name: string }) => {
+    const dispose = setup({ addWorkspacePanel: () => () => {}, rpc: async (contract: { name: string }) => {
       calls.push(contract.name);
       if (calls.length === 1 || calls.length === 4)
         throw new Error("daemon restarted");
@@ -100,7 +100,7 @@ async function pickerHarness(answer: (input: unknown) => Promise<{ agents: unkno
     "@getpaseo/plugin/client/ui": { Combobox: () => null }, "react-native": {},
   });
   const items: Array<{ id: string; Component: (props: unknown) => unknown }> = [];
-  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: () => () => {},
+  const dispose = setup({ addWorkspacePanel: () => () => {}, rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: () => () => {},
     addComposerItem: (entry: typeof items[number]) => { items.push(entry); return () => { items.splice(items.indexOf(entry), 1); }; } });
   expect(items.map(item => item.id)).toEqual(["multica-mention"]);
   return {
@@ -192,7 +192,7 @@ it("the client renders the task description as visible Markdown and removes its 
     "@getpaseo/plugin/client/ui": { Markdown: ({ children }: { children: string }) => children },
     "react-native": { View: "View", Text: "Text" },
   });
-  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {},
+  const dispose = setup({ addWorkspacePanel: () => () => {}, rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {},
     addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: PluginTimelineRendererContribution) => {
       renderers.push(renderer); return () => { renderers.splice(renderers.indexOf(renderer), 1); };
     } });
@@ -227,7 +227,7 @@ it("a reader can explicitly load every page of a long description from its visib
       SettingsAction: (props: { onPress(): void; actionLabel: string }) => { actions.push(props); return props.actionLabel; } },
     "react-native": { View: "View", Text: "Text" },
   });
-  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {},
+  const dispose = setup({ addWorkspacePanel: () => () => {}, rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {},
     addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: PluginTimelineRendererContribution) => {
       renderers.push(renderer);
       return () => {};
@@ -302,7 +302,7 @@ it.each(["task-description"])("the compiled %s reader stops stalled cursors and 
     } },
     "react-native": { View: "View", Text: "Text", Pressable: ({ onPress, children }: any) => { actions.push({ onPress }); return children; } },
   });
-  const dispose = setup({ rpc: async () => ({}), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: any) => {
+  const dispose = setup({ addWorkspacePanel: () => () => {}, rpc: async () => ({}), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: any) => {
     renderers.push(renderer);
     return () => {};
   } });
@@ -343,7 +343,7 @@ it.each(["root", "main"])("the invisible %s thread renderer still opens history 
     "@getpaseo/plugin/client/ui": {}, "react-native": { Text: "Text", View: "View", Pressable: "Pressable" },
     react: { useEffect: (effect: () => unknown) => effects.push(effect), useState: (initial: unknown) => [initial, () => {}] },
   });
-  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {},
+  const dispose = setup({ addWorkspacePanel: () => () => {}, rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {},
     addTimelineRenderer: (renderer: any) => { renderers.push(renderer); return () => {}; } });
   expect(renderers.map(renderer => renderer.kind)).toEqual(["task-description", "thread", "comment-divider", "comment-event", "askuser", "comment-delivery"]);
   expect(calls).toEqual([]);
@@ -366,11 +366,11 @@ it.each(["root", "main"])("the invisible %s thread renderer still opens history 
 it("the main-discussion success renderer shows only a brief Thread hint", async () => {
   const renderers: Array<{ kind: string; schema: zod.ZodType; Component: (props: any) => any }> = [];
   const setup = await bundledContribution("../index.client.tsx", {
-    "@getpaseo/plugin/client": { useRpc: () => async () => ({}) }, "@getpaseo/plugin/client/ui": {},
+    "@getpaseo/plugin/client": { useRpc: () => async () => ({}), useAgent: () => null }, "@getpaseo/plugin/client/ui": {},
     "react-native": { Text: "Text", View: "View", Pressable: "Pressable" },
     react: { useState: (initial: unknown) => [initial, () => {}], useEffect: () => {} },
   });
-  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: any) => {
+  const dispose = setup({ addWorkspacePanel: () => () => {}, rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: any) => {
     renderers.push(renderer);
     return () => {};
   } });
@@ -387,11 +387,11 @@ it("attachment delivery rows preserve version 1, use host links and theme colors
   let error = false;
   const ExternalLink = "HostExternalLink";
   const setup = await bundledContribution("../index.client.tsx", {
-    "@getpaseo/plugin/client": {}, "@getpaseo/plugin/client/ui": { ExternalLink },
+    "@getpaseo/plugin/client": { useAgent: () => null }, "@getpaseo/plugin/client/ui": { ExternalLink },
     "react-native": { Text: "Text", View: "View" },
     react: { useState: () => [error, (value: boolean) => { error = value; }], useEffect: () => {} },
   });
-  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: any) => { renderers.push(renderer); return () => {}; } });
+  const dispose = setup({ addWorkspacePanel: () => () => {}, rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: any) => { renderers.push(renderer); return () => {}; } });
   try {
     const renderer = renderers.find(renderer => renderer.kind === "comment-delivery")!;
     expect(renderer.version).toBe(1); expect(renderer.schema.parse({})).toEqual({});
@@ -400,7 +400,8 @@ it("attachment delivery rows preserve version 1, use host links and theme colors
       { id: "file", name: "规格.pdf", mimeType: "application/pdf", size: 2048, url: "https://multica.example/file" },
       { id: "missing", name: "data", mimeType: "application/octet-stream" },
     ] }) };
-    const tree = renderer.Component({ item, theme });
+    const render = () => { const wrapper = renderer.Component({ item, theme }); return wrapper.type(wrapper.props); };
+    const tree = render();
     expect(tree.props.style).toEqual({ gap: 4 });
     const text = renderedText(tree);
     expect(text).toContain("规格.pdf · application/pdf · 2.0 KiB");
@@ -409,7 +410,7 @@ it("attachment delivery rows preserve version 1, use host links and theme colors
     expect(link.type).toBe(ExternalLink); expect(link.props.href).toBe("https://multica.example/file");
     expect(link.props.children.props.style.color).toBe("theme-fg");
     link.props.onError(new Error("cannot open"));
-    const failed = renderer.Component({ item, theme });
+    const failed = render();
     expect(failed.props.children.at(-1).props.style.color).toBe("theme-danger");
     expect(renderedText(failed)).toContain("无法打开附件链接");
     expect(() => renderer.schema.parse({ attachments: [{ id: "bad", name: "bad", mimeType: "text/plain", url: "javascript:alert(1)" }] })).toThrow();
@@ -457,7 +458,7 @@ function componentTree() {
     }
     if (!isValidElement<{ children?: unknown }>(node)) return "";
     if (typeof node.type !== "function") return visit(node.props.children, path);
-    const own = `${path}/${node.type.name || "component"}`;
+    const own = `${path}/${node.type.name || "component"}:${node.key ?? ""}`;
     visited.add(own);
     const saved = [scope, stateIndex, effectIndex] as const;
     [scope, stateIndex, effectIndex] = [own, 0, 0];
@@ -485,6 +486,169 @@ function componentTree() {
 }
 
 type Answer = (name: string, input: unknown) => unknown;
+async function attachmentHarness(answer: (input: any) => unknown = () => ({ kind: "text", name: "notes.txt", mimeType: "text/plain", text: "preview", truncated: false }), savedState?: unknown) {
+  const tree = componentTree();
+  const buttons: Array<{ accessibilityLabel?: string; onPress(): void }> = [];
+  const texts: Array<{ selectable?: boolean; accessibilityRole?: string; style: { color?: string; fontFamily?: string }; children?: unknown }> = [];
+  const images: Array<{ source: { uri: string }; resizeMode: string }> = [];
+  const links: Array<{ href: string }> = [];
+  const markdown: string[] = [];
+  const scrolls: unknown[] = [];
+  let loading = 0;
+  const read = vi.fn(async (input: unknown) => answer(input));
+  let agent: { workspaceId: string; labels: Record<string, string> } | null = { workspaceId: "native-workspace", labels: { "multica.connection": "connection", "multica.issue": "issue" } };
+  const setup = await bundledContribution("../index.client.tsx", {
+    react: tree.react,
+    "@getpaseo/plugin/client": { useAgent: (_id: string, selector: (value: unknown) => unknown) => agent && selector(agent), useRpc: () => read },
+    "@getpaseo/plugin/client/ui": {
+      Icon: () => null,
+      ExternalLink: (props: { href: string; children: unknown }) => { links.push(props); return props.children; },
+      Loading: () => { loading++; return "正在加载"; },
+      Markdown: ({ children }: { children: string }) => { markdown.push(children); return children; },
+      ScrollView: (props: { children: unknown }) => { scrolls.push(props); return props.children; },
+    },
+    "react-native": {
+      View: "View", Text: (props: typeof texts[number]) => { texts.push(props); return props.children; },
+      Pressable: (props: typeof buttons[number] & { children: unknown }) => { buttons.push(props); return props.children; },
+      Image: (props: typeof images[number]) => { images.push(props); return null; },
+    },
+  });
+  const panels: Array<{ id: string; title: string; icon: string; locations: string[]; Component: FunctionComponent<any> }> = [];
+  let renderer: { schema: zod.ZodType; Component: FunctionComponent<any> };
+  const openPanel = vi.fn();
+  const dispose = setup({ rpc: async () => ({}), openPanel,
+    addWorkspacePanel: (entry: typeof panels[number]) => { panels.push(entry); return () => { panels.splice(panels.indexOf(entry), 1); }; },
+    addSettingsScreen: () => () => {}, addSidebarHeaderItem: () => () => {},
+    addTimelineRenderer: (entry: { kind: string } & typeof renderer) => { if (entry.kind === "comment-delivery") renderer = entry; return () => {}; },
+  });
+  const colors = { foreground: "theme-fg", foregroundMuted: "theme-muted", statusDanger: "theme-danger" };
+  const props = { agentId: "agent", host: { id: "host", label: "Host" }, theme: { colors }, layout: { compact: false, platform: "web" } };
+  const attachment = { id: "file", name: "notes.txt", mimeType: "text/plain", size: 2048, url: "https://multica.example/file" };
+  const tab = { state: savedState, setModified: () => {}, setState: vi.fn((value: unknown) => { tab.state = value; }) };
+  function render(Component: FunctionComponent<any>, value: unknown) {
+    buttons.length = 0; texts.length = 0; images.length = 0; links.length = 0; markdown.length = 0; scrolls.length = 0; loading = 0;
+    return tree.render(createElement(Component, value));
+  }
+  return { panels, buttons, texts, images, links, markdown, scrolls, openPanel, read, tab, attachment,
+    setAgent(value: typeof agent) { agent = value; },
+    card(compact = false, files = [attachment]) { return render(renderer.Component, { ...props, layout: { ...props.layout, compact }, item: { data: renderer.schema.parse({ threadCreated: false, attachments: files }) } }); },
+    panel(workspaceId = "native-workspace", panelTab = tab) { return render(panels[0].Component, { ...props, workspaceId, revision: openPanel.mock.calls.length, tab: panelTab }); },
+    loading: () => loading,
+    dispose() { tree.unmount(); dispose(); },
+  };
+}
+
+it("registers both attachment panel locations and removes the panel on disposal", async () => {
+  const h = await attachmentHarness();
+  expect(h.panels).toMatchObject([{ id: "attachment-preview", title: "Multica 附件", icon: "Paperclip", locations: ["explorer", "workspace"] }]);
+  h.dispose();
+  expect(h.panels).toEqual([]);
+});
+
+it.each([false, true])("opens delivery attachments in the correct workspace and location with compact=%s", async compact => {
+  const h = await attachmentHarness();
+  try {
+    h.card(compact);
+    const preview = h.buttons.find(button => button.accessibilityLabel === "预览 notes.txt")!;
+    const openTab = h.buttons.find(button => button.accessibilityLabel === "在 tab 中打开")!;
+    preview.onPress();
+    expect(h.openPanel).toHaveBeenLastCalledWith("attachment-preview", { workspaceId: "native-workspace", location: compact ? "workspace" : "explorer" });
+    openTab.onPress();
+    expect(h.openPanel).toHaveBeenLastCalledWith("attachment-preview", { workspaceId: "native-workspace", location: "workspace" });
+    expect(h.links.map(link => link.href)).toEqual([h.attachment.url]);
+    expect(h.texts.every(text => ["theme-fg", "theme-muted"].includes(text.style.color!))).toBe(true);
+  } finally { h.dispose(); }
+});
+
+it.each([null, {}, { "multica.connection": "connection" }, { "multica.issue": "issue" }] as Array<Record<string, string> | null>)("keeps only external attachment links when agent context is incomplete: %j", async labels => {
+  const h = await attachmentHarness();
+  try {
+    h.setAgent(labels === null ? null : { workspaceId: "native-workspace", labels });
+    expect(h.card()).toContain("notes.txt · text/plain · 2.0 KiB");
+    expect(h.buttons).toEqual([]);
+    expect(h.links.map(link => link.href)).toEqual([h.attachment.url]);
+    expect(h.openPanel).not.toHaveBeenCalled();
+  } finally { h.dispose(); }
+});
+
+it.each([
+  { kind: "image", mimeType: "image/png", data: "aW1hZ2U=" },
+  { kind: "text", mimeType: "text/plain", text: "<script>source only</script>", truncated: true },
+  { kind: "markdown", mimeType: "text/markdown", text: "# Markdown preview", truncated: false },
+  { kind: "unsupported", mimeType: "application/pdf", reason: "此类型暂不支持预览，请在 Multica 查看。" },
+  { kind: "error", message: "附件不存在或无权访问。" },
+])("renders the compiled attachment panel's $kind result and preserves the external link", async result => {
+  const h = await attachmentHarness(() => { if (result.kind === "error") throw new Error(result.message); return { name: "notes.txt", ...result }; });
+  try {
+    h.card(); h.buttons[0].onPress();
+    expect(h.panel()).toContain("notes.txt");
+    expect(h.loading()).toBe(1);
+    await Promise.resolve(); await Promise.resolve();
+    const text = h.panel();
+    expect(h.read).toHaveBeenCalledExactlyOnceWith({ connectionKey: "connection", issueId: "issue", attachmentId: "file" });
+    expect(h.links.map(link => link.href)).toEqual([h.attachment.url]);
+    expect(h.texts.every(item => ["theme-fg", "theme-muted", "theme-danger"].includes(item.style.color!))).toBe(true);
+    if (result.kind === "image") expect(h.images).toMatchObject([{ resizeMode: "contain", source: { uri: "data:image/png;base64,aW1hZ2U=" } }]);
+    if (result.kind === "text") {
+      expect(text).toContain("仅显示前 1 MiB"); expect(text).toContain(result.text);
+      expect(h.texts).toContainEqual(expect.objectContaining({ selectable: true, style: expect.objectContaining({ fontFamily: "monospace" }) }));
+      expect(h.markdown).toEqual([]); expect(h.scrolls).toHaveLength(1);
+    }
+    if (result.kind === "markdown") { expect(h.markdown).toEqual([result.text]); expect(h.scrolls).toHaveLength(1); }
+    if (result.kind === "unsupported") expect(text).toContain(result.reason);
+    if (result.kind === "error") {
+      expect(text).toContain(result.message);
+      expect(h.texts).toContainEqual(expect.objectContaining({ accessibilityRole: "alert", style: { color: "theme-danger" } }));
+    }
+  } finally { h.dispose(); }
+});
+
+it("persists only the selection and avoids a new RPC when the same attachment is reopened", async () => {
+  const h = await attachmentHarness();
+  try {
+    h.card(); const open = h.buttons[0].onPress; open(); h.panel();
+    await Promise.resolve(); await Promise.resolve(); h.panel();
+    expect(h.tab.state).toEqual({ connectionKey: "connection", issueId: "issue", attachment: h.attachment });
+    open(); h.panel();
+    expect(h.read).toHaveBeenCalledTimes(1);
+    expect(h.panel("other-workspace", { state: undefined, setState: vi.fn(), setModified: () => {} })).toBe("请选择投递卡片中的附件。");
+    expect(h.read).toHaveBeenCalledTimes(1);
+  } finally { h.dispose(); }
+});
+
+it("restores a validated saved selection after reload and rejects malformed tab state", async () => {
+  const saved = { connectionKey: "connection", issueId: "issue", attachment: { id: "file", name: "restored.log", mimeType: "text/plain" } };
+  for (const state of [saved, { attachment: saved.attachment }, { ...saved, attachment: { ...saved.attachment, url: "javascript:alert(1)" } }]) {
+    const h = await attachmentHarness(undefined, state);
+    try {
+      const text = h.panel();
+      if (state === saved) { expect(text).toContain("restored.log"); expect(h.read).toHaveBeenCalledTimes(1); }
+      else { expect(text).toBe("请选择投递卡片中的附件。"); expect(h.read).not.toHaveBeenCalled(); }
+    } finally { h.dispose(); }
+  }
+});
+
+it("switches attachments with a new RPC and discards a late response for the previous file", async () => {
+  let release!: (value: unknown) => void;
+  const first = new Promise(resolve => { release = resolve; });
+  const h = await attachmentHarness(input => input.attachmentId === "file" ? first : { kind: "text", name: "next.txt", mimeType: "text/plain", text: "new preview", truncated: false });
+  try {
+    h.card(false, [h.attachment, { ...h.attachment, id: "next", name: "next.txt" }]);
+    const previous = h.buttons.find(button => button.accessibilityLabel === "预览 notes.txt")!.onPress;
+    const next = h.buttons.find(button => button.accessibilityLabel === "预览 next.txt")!.onPress;
+    previous(); h.panel(); next();
+    expect(h.panel()).not.toContain("new preview");
+    await Promise.resolve(); await Promise.resolve();
+    expect(h.panel()).toContain("new preview");
+    release({ kind: "text", name: "notes.txt", mimeType: "text/plain", text: "stale preview", truncated: false });
+    await Promise.resolve(); await Promise.resolve();
+    expect(h.panel()).not.toContain("stale preview");
+    expect(h.read.mock.calls.map(([input]) => input)).toEqual([
+      { connectionKey: "connection", issueId: "issue", attachmentId: "file" }, { connectionKey: "connection", issueId: "issue", attachmentId: "next" },
+    ]);
+  } finally { h.dispose(); }
+});
+
 /** `host.composerItems` is a Paseo 0.16+ host; without it the client context is the 0.15 surface. */
 async function settingsHarness(answer: Answer, host: { composerItems?: boolean } = {}) {
   const tree = componentTree();
@@ -533,7 +697,7 @@ async function settingsHarness(answer: Answer, host: { composerItems?: boolean }
   });
   const screens: Record<string, FunctionComponent<Record<string, unknown>>> = {};
   const composerItems: string[] = [];
-  const dispose = setup({ rpc: async () => ({ status: "ready" }), openScreen: (input: unknown) => opened.push(input),
+  const dispose = setup({ addWorkspacePanel: () => () => {}, rpc: async () => ({ status: "ready" }), openScreen: (input: unknown) => opened.push(input),
     addSettingsScreen: (entry: { Component: FunctionComponent<Record<string, unknown>> }) => { screens.settings = entry.Component; return () => {}; },
     addSidebarHeaderItem: () => () => {}, addTimelineRenderer: () => () => {},
     ...(host.composerItems ? { addComposerItem: (entry: { id: string }) => { composerItems.push(entry.id); return () => {}; } } : {}) });
@@ -1323,7 +1487,7 @@ it("the native discussion shows only thread-open failures", async () => {
     "react-native": { Text: "Text", View: "View", Pressable: "Pressable" },
     "@getpaseo/plugin/client/ui": {},
   });
-  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: any) => {
+  const dispose = setup({ addWorkspacePanel: () => () => {}, rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: any) => {
     renderers.push(renderer);
     return () => {};
   } });
@@ -1366,7 +1530,7 @@ it.each([
       Pressable: (props: { accessibilityLabel?: string; style?: Record<string, unknown>; children?: unknown }) => { pressables.push(props); return props.children; },
     },
   });
-  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {},
+  const dispose = setup({ addWorkspacePanel: () => () => {}, rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {},
     addTimelineRenderer: (renderer: PluginTimelineRendererContribution) => { renderers.push(renderer); return () => { renderers.splice(renderers.indexOf(renderer), 1); }; } });
   try {
     const renderer = renderers.find(value => value.kind === "askuser" && value.version === 1);
@@ -1407,7 +1571,7 @@ it("the compiled askuser card loads complete warning details only on explicit re
     "@getpaseo/plugin/client/ui": { Markdown: ({ children }: { children: string }) => children, SettingsAction: (props: typeof actions[number]) => { actions.push(props); return props.actionLabel; } },
     "react-native": { View: "View", Text: "Text", Pressable: "Pressable" },
   });
-  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: PluginTimelineRendererContribution) => { renderers.push(renderer); return () => {}; } });
+  const dispose = setup({ addWorkspacePanel: () => () => {}, rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: PluginTimelineRendererContribution) => { renderers.push(renderer); return () => {}; } });
   try {
     const renderer = renderers.find(value => value.kind === "askuser")!;
     const render = () => { cursor = 0; actions.length = 0; return renderedText((renderer.Component as (props: unknown) => unknown)({ item: { data: renderer.schema.parse(base) }, theme: { colors: { foreground: "fg", foregroundMuted: "muted", statusDanger: "danger" } } })); };
@@ -1435,7 +1599,7 @@ async function askuserActionHarness(answer: Answer, extra: Record<string, unknow
     "@getpaseo/plugin/client/ui": { Markdown: ({ children }: { children: unknown }) => children },
     "react-native": { View: "View", Text: "Text", Pressable: (props: typeof buttons[number] & { children: unknown }) => { buttons.push(props); return props.children; } },
   });
-  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: PluginTimelineRendererContribution) => { renderers.push(renderer); return () => {}; } });
+  const dispose = setup({ addWorkspacePanel: () => () => {}, rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: PluginTimelineRendererContribution) => { renderers.push(renderer); return () => {}; } });
   const renderer = renderers.find(value => value.kind === "askuser")!;
   const render = () => { buttons.length = 0; return tree.render(createElement(renderer.Component as FunctionComponent<any>, { item: { data: renderer.schema.parse(base) }, theme: { colors: { foreground: "fg", foregroundMuted: "muted", statusDanger: "danger" } } })); };
   return { calls, buttons, render, button: (label: string) => { render(); const button = buttons.find(button => button.accessibilityLabel === label); expect(button, label).toBeDefined(); return button!; }, dispose: () => { tree.unmount(); dispose(); } };
@@ -1498,7 +1662,7 @@ it("the compiled failed-answer card reports its error and explains conditions wi
     "@getpaseo/plugin/client/ui": { Markdown: ({ children }: { children: string }) => children },
     "react-native": { View: "View", Text: "Text", Pressable: (props: typeof pressables[number] & { children: unknown }) => { pressables.push(props); return props.children; } },
   });
-  const dispose = setup({ rpc: async () => ({ status: "ready" }), openScreen: (value: unknown) => { opened.push(value); }, addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: PluginTimelineRendererContribution) => { renderers.push(renderer); return () => {}; } });
+  const dispose = setup({ addWorkspacePanel: () => () => {}, rpc: async () => ({ status: "ready" }), openScreen: (value: unknown) => { opened.push(value); }, addSettingsScreen: () => () => {}, addScreen: () => () => {}, addSidebarHeaderItem: () => () => {}, addTimelineRenderer: (renderer: PluginTimelineRendererContribution) => { renderers.push(renderer); return () => {}; } });
   try {
     const renderer = renderers.find(value => value.kind === "askuser")!;
     const text = tree.render(createElement(renderer.Component as FunctionComponent<any>, { item: { type: "plugin", kind: "askuser", version: 1, data: renderer.schema.parse(data) }, theme: { colors: {} } }));
@@ -1809,7 +1973,7 @@ it("registers and disposes a minimal themed comment-divider renderer", async () 
   const renderers: Array<{ kind: string; version: number; schema: zod.ZodType; Component: (props: any) => any }> = [];
   const removed: string[] = [];
   const setup = await bundledContribution("../index.client.tsx", { "@getpaseo/plugin/client": {}, "@getpaseo/plugin/client/ui": {}, "react-native": { View: "View" } });
-  const dispose = setup({ rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {},
+  const dispose = setup({ addWorkspacePanel: () => () => {}, rpc: async () => ({ status: "ready" }), addSettingsScreen: () => () => {},
     addSidebarHeaderItem: () => () => {},
     addTimelineRenderer: (renderer: typeof renderers[number]) => { renderers.push(renderer); return () => { removed.push(renderer.kind); }; } });
   try {

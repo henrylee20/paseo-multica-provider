@@ -1,19 +1,34 @@
 import { useState } from "react";
-import { Text, View } from "react-native";
-import type { PluginTimelineItemProps } from "@getpaseo/plugin/client";
+import { Pressable, Text, View } from "react-native";
+import { useAgent, type PluginClientContext, type PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import { ExternalLink } from "@getpaseo/plugin/client/ui";
 import type { z } from "zod";
 import type { deliverySummary } from "../shared/delivery.js";
+import { discussionKeys } from "../shared/discussion.js";
+import { openAttachmentPreview } from "./attachment-preview.js";
+import { formatSize } from "./format.js";
+import { HeaderAction } from "./ui-kit.js";
 
-export function DeliveryStatus({ item, theme }: PluginTimelineItemProps<z.infer<typeof deliverySummary>>) {
+export function DeliveryStatus({ agentId, item, theme, layout, client }: PluginTimelineItemProps<z.infer<typeof deliverySummary>> & { client: PluginClientContext }) {
   const [error, setError] = useState(false);
+  const agent = useAgent(agentId, value => ({ workspaceId: value.workspaceId, connectionKey: value.labels[discussionKeys.connection], issueId: value.labels[discussionKeys.issue] }));
   const data = item.data;
   return <View style={{ gap: 4 }}>
     {data.threadCreated !== false ? <Text style={{ color: theme.colors.foregroundMuted }}>新 Thread 已建立，可在侧边栏打开。</Text> : null}
     {data.attachments?.map(attachment => {
-      const size = attachment.size === undefined ? "大小未知" : attachment.size < 1024 ? `${attachment.size} B`
-        : attachment.size < 1024 * 1024 ? `${(attachment.size / 1024).toFixed(1)} KiB` : `${(attachment.size / (1024 * 1024)).toFixed(1)} MiB`;
-      const label = <Text style={{ color: theme.colors.foreground }}>{attachment.name} · {attachment.mimeType} · {size}</Text>;
+      const label = <Text style={{ color: theme.colors.foreground }}>{attachment.name} · {attachment.mimeType} · {formatSize(attachment.size)}</Text>;
+      if (agent?.workspaceId && agent.connectionKey && agent.issueId) {
+        const selection = { connectionKey: agent.connectionKey, issueId: agent.issueId, attachment };
+        return <View key={attachment.id} style={{ gap: 4 }}>
+          <Pressable accessibilityRole="button" accessibilityLabel={`预览 ${attachment.name}`} onPress={() => openAttachmentPreview(client, agent.workspaceId, selection, layout.compact ? "workspace" : "explorer")}>
+            {label}
+          </Pressable>
+          <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 12 }}>
+            <HeaderAction theme={theme} label="在 tab 中打开" icon="PanelTop" onPress={() => openAttachmentPreview(client, agent.workspaceId, selection, "workspace")} />
+            {attachment.url ? <ExternalLink href={attachment.url} onError={() => setError(true)}><Text style={{ color: theme.colors.foregroundMuted, fontSize: 13 }}>在 Multica 查看</Text></ExternalLink> : null}
+          </View>
+        </View>;
+      }
       return attachment.url ? <ExternalLink key={attachment.id} href={attachment.url} onError={() => setError(true)}>{label}</ExternalLink>
         : <View key={attachment.id}>{label}<Text style={{ color: theme.colors.foregroundMuted }}>附件链接不可用</Text></View>;
     })}
