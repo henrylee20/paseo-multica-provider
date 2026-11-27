@@ -12,13 +12,15 @@ function rowKey(item: AgentTimelineItem | ProviderTimelineItem) {
   return item.type === "tool_call" ? `tool:${item.callId}` : item.type === "notification" ? `notification:${item.level}:${item.message}`
     : item.type === "error" ? `error:${item.message}` : JSON.stringify(item);
 }
-type NativeRunBaseline = { texts: Map<string, string>; thoughts: string; counts: Map<string, number> };
+type NativeRunBaseline = { texts: Map<string, string>; thoughts: string; counts: Map<string, number>; hasRunTools: boolean };
 /** Native text rows merge transport fragments, while errors/notifications lose IDs. */
 function nativeRunBaseline(existing: readonly AgentTimelineItem[]): NativeRunBaseline {
   const texts = new Map<string, string>();
   const counts = new Map<string, number>();
   let thoughts = "";
+  let hasRunTools = false;
   for (const item of existing) {
+    if (item.type === "tool_call" && item.callId.startsWith("run-message:")) hasRunTools = true;
     if (item.type === "assistant_message" && item.messageId) texts.set(item.messageId, (texts.get(item.messageId) ?? "") + item.text);
     // Status/metadata notifications can split consecutive source thinking.
     else if (item.type === "reasoning") thoughts += item.text;
@@ -27,7 +29,7 @@ function nativeRunBaseline(existing: readonly AgentTimelineItem[]): NativeRunBas
       counts.set(key, (counts.get(key) ?? 0) + 1);
     }
   }
-  return { texts, thoughts, counts };
+  return { texts, thoughts, counts, hasRunTools };
 }
 function consumeRunItems(items: ProviderTimelineItem[], previous: NativeRunBaseline): ProviderTimelineItem[] {
   const { texts, counts } = previous;
@@ -97,7 +99,12 @@ function messageItems(runId: string, message: RunMessage, messageId?: string): P
 /** One projection per opened parent. Children are read-only and restored by their parent. */
 export class RunProjection {
   private readonly previous = new Map<string, NativeRunBaseline | null>();
-  private readonly children = new Map<string, { sessionId: string; status: StoredRun["status"]; rows: Set<string>; messages: Set<number>; textSegment?: { messageId: string; lastSeq: number }; ended?: StoredRun["status"]; changes: number }>();
+  private readonly children = new Map<string, {
+    sessionId: string; status: StoredRun["status"]; compact: boolean; rows: Set<string>; messages: Set<number>;
+    textSegment?: { messageId: string; lastSeq: number };
+    tools?: { seq: number; timestamp?: string; uses: number; callIds: Set<string>; results: Array<string | undefined> };
+    ended?: StoredRun["status"]; changes: number;
+  }>();
   constructor(private readonly parentSessionId: string, private readonly rootId: string, private readonly emit: (event: ProviderEvent) => void,
     private readonly detail: (runId: string) => RunDetail | undefined = () => undefined) {}
   async restore(host: NativeHost, agentId: string, issue: IssueMapping) {
@@ -146,16 +153,24 @@ export class RunProjection {
             item: { type: "tool_call", id: callId, callId, name: title, status: "completed", error: null,
               detail: { type: "sub_agent", subAgentType: title, description: detail, childSessionId: sessionId, log: "" } } });
         }
-        child = { sessionId, status: run.status, rows: new Set(), messages: new Set(), changes: 0 };
+        // Freeze the mode before reconciliation consumes/deletes the native baseline.
+        child = { sessionId, status: run.status, compact: !isActiveRun(run.status) && !this.previous.get(runId)?.hasRunTools, rows: new Set(), messages: new Set(), changes: 0 };
         this.children.set(runId, child);
         this.emit({ type: "session.opened", sessionId, parentSessionId: this.parentSessionId, toolCallId: callId, restoration: "parent", capabilities: [], cwd: issue.cwd, title, description: detail });
-        this.emit({ type: "session.turn", sessionId, turnId: runId, state: "started" });
+        if (isActiveRun(run.status)) this.emit({ type: "session.turn", sessionId, turnId: runId, state: "started" });
       }
       const batch: Array<{ item: ProviderTimelineItem; timestamp?: string }> = [];
       const send = (item: ProviderTimelineItem, timestamp?: string) => {
         if (child!.rows.has(item.id)) return;
         child!.rows.add(item.id);
         batch.push({ item, timestamp });
+      };
+      const flushTools = () => {
+        const tools = child!.tools;
+        if (!tools) return;
+        const count = tools.uses + tools.results.filter(id => !id || !tools.callIds.has(id)).length;
+        send({ type: "notification", id: `run-tools:${runId}:${tools.seq}`, level: "info", message: `进行了 ${count} 次工具调用` }, tools.timestamp);
+        child!.tools = undefined;
       };
       if ((fresh || child.status !== run.status) && isActiveRun(run.status)) send({ type: "notification", id: `run-status:${runId}:${child.changes++}`, level: "info", message: statusLabels[run.status as keyof typeof statusLabels] });
       const cache = this.detail(runId);
@@ -171,8 +186,20 @@ export class RunProjection {
           messageId: child.textSegment?.lastSeq === message.seq - 1 ? child.textSegment.messageId : `run-text:${runId}:${message.seq}`,
           lastSeq: message.seq,
         } : undefined;
+        if (child.compact) {
+          if (message.type === "tool_use" || message.type === "tool_result") {
+            const tools = child.tools ??= { seq: message.seq, timestamp: message.created_at, uses: 0, callIds: new Set(), results: [] };
+            if (message.type === "tool_use") {
+              tools.uses++;
+              if (message.call_id) tools.callIds.add(message.call_id);
+            } else tools.results.push(message.call_id);
+            continue;
+          }
+          flushTools();
+        }
         for (const item of messageItems(runId, message, child.textSegment?.messageId)) send(item, message.created_at);
       }
+      if (cache?.finalized) flushTools();
       for (const [field, value] of Object.entries(run.metadata ?? {})) {
         if (value == null || value === "") continue;
         const label = ({ error: "任务错误", failure_reason: "失败原因", work_dir: "远端目录", relative_work_dir: "远端相对目录" } as Record<string, string>)[field];
@@ -185,8 +212,8 @@ export class RunProjection {
       const previous = this.previous.get(runId);
       const missing = previous === null ? [] : previous ? consumeRunItems(batch.map(row => row.item), previous) : batch.map(row => row.item);
       // A missing cache may arrive on the first remote read after opening.
-      // Keep the native baseline until there is source output to reconcile.
-      if (cache && (cache.messages.length || cache.finalized) || previous && !previous.texts.size && !previous.thoughts && !previous.counts.size) this.previous.delete(runId);
+      // Keep the native baseline until source output and any pending tool summary reconcile.
+      if (!(previous && child.tools) && (cache && (cache.messages.length || cache.finalized) || previous && !previous.texts.size && !previous.thoughts && !previous.counts.size)) this.previous.delete(runId);
       const timestamps = new Map(batch.map(row => [row.item.id, row.timestamp]));
       for (const item of missing) {
         const timestamp = timestamps.get(item.id);
