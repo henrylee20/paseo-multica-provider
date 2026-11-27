@@ -84,6 +84,10 @@ _Avoid_: Run 实时状态、执行段、可展开的执行内容
 Paseo 与特定 Multica 服务地址及单一 Multica 用户身份绑定的连接上下文，是判定“本人评论”和隔离本地映射的基准。
 _Avoid_: Multica 工作区、Paseo 工作区、CLI profile 名称
 
+**Paseo 映射对象（Mapped Paseo objects）**：
+插件按 Multica 映射在 Paseo 中生成的原生讨论、Paseo 工作区、Paseo 项目及本地占位目录；不含本地映射记录，也不含用户自建的 Paseo 工作区。
+_Avoid_: Multica 映射数据、本地映射、插件原生足迹
+
 **CLI 登录上下文（CLI login context）**：
 daemon 主机上 Multica CLI 当前有效的服务地址、登录凭据与配置来源；命名 profile 用于区分不同的本地 CLI 登录环境。
 _Avoid_: 独立插件账号、客户端机器登录、浏览器 Cookie
@@ -101,5 +105,5 @@ Paseo 中保留本地历史记录但移出活跃侧边栏的生命周期状态�
 _Avoid_: 远端删除、远端停止、物理清除
 
 **数据重建（Data rebuild）**：
-清理当前 Multica 连接在 Paseo 中生成的插件记录与本地缓存，并按已保留的任务筛选规则从 Multica 重新导入的操作。
+清理当前 Multica 连接的 Paseo 映射对象与本地缓存，并按已保留的任务筛选规则从 Multica 重新导入的操作。
 _Avoid_: 普通同步刷新、切换 CLI profile 清理、远端删除

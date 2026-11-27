@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
-import { join, resolve, sep } from "node:path";
+import { join, resolve } from "node:path";
 import type { PaseoApi } from "@getpaseo/client";
 import { z } from "zod";
 import { taskRuleSchema, type TaskRule, type SyncStatus } from "../shared/contracts.js";
@@ -15,7 +15,7 @@ import type { DiscussionMetadata } from "./discussion-metadata.js";
 import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
 import { issuePage, matchingIssues, remoteIssueSchema, supportsIssueIds, workspaceAgents, workspaceMembers, workspaceProjects, workspaceSquads, workspaceStatuses, workspaces as readWorkspaces, type RemoteWorkspace } from "./multica-api.js";
 import { issueLabels, mainPersistence, providerId } from "./discussion-identity.js";
-import { removePlaceholderTree } from "./mapped-objects.js";
+import { discoverMappedObjects, teardownMappedObjects } from "./mapped-objects.js";
 
 function stableId(...parts: string[]) { return createHash("sha256").update(JSON.stringify(parts)).digest("hex"); }
 
@@ -391,96 +391,13 @@ export class SidebarSynchronizer {
       if (!this.host) this.host = await this.options.connectHost();
       await this.assertOwningDaemon();
       const host = this.host;
-      const discussions = new Set<string>();
-      const addresses = new Map<string, { connectionKey: string; issueId: string; rootId: string }>();
-      const knownWorkspaces = new Set(Object.values(state.connections).flatMap(conn => Object.values(conn.issues).map(issue => issue.workspaceId)));
-      for (const [connectionKey, conn] of Object.entries(state.connections)) {
-        let cursor: string | undefined;
-        const cursors = new Set<string>();
-        for (;;) {
-          const page = await host.fetchAgents({ filter: { labels: { [discussionKeys.connection]: connectionKey }, includeArchived: true, includeBackground: true, includeInternal: true }, page: { limit: 100, cursor } });
-          for (const { agent } of page.entries) {
-            if (agent.provider !== providerId || agent.labels[discussionKeys.connection] !== connectionKey) continue;
-            discussions.add(agent.id);
-            if (agent.workspaceId) knownWorkspaces.add(agent.workspaceId);
-            const issueId = agent.labels[discussionKeys.issue], rootId = agent.labels[discussionKeys.discussion];
-            if (issueId && rootId) addresses.set(agent.id, { connectionKey, issueId, rootId });
-          }
-          if (!page.pageInfo.hasMore) break;
-          const next = page.pageInfo.nextCursor;
-          if (!next || cursors.has(next)) throw new Error("Incomplete native discussion pagination");
-          cursors.add(next); cursor = next;
-        }
-        for (const [issueId, issue] of Object.entries(conn.issues)) {
-          const mapped = [{ rootId: "main", agentId: issue.mainAgentId },
-            ...Object.entries(issue.threads).map(([rootId, thread]) => ({ rootId, agentId: thread.agentId }))];
-          for (const { rootId, agentId } of mapped) {
-            if (!agentId) continue;
-            if (discussions.has(agentId)) {
-              if (!addresses.has(agentId)) addresses.set(agentId, { connectionKey, issueId, rootId });
-              continue;
-            }
-            const agent = (await host.fetchAgent(agentId))?.agent;
-            if (agent?.provider === providerId && (agent.labels[discussionKeys.connection] === connectionKey || agent.cwd === issue.cwd)) {
-              discussions.add(agentId);
-              if (agent.workspaceId) knownWorkspaces.add(agent.workspaceId);
-              addresses.set(agentId, { connectionKey, issueId, rootId });
-            }
-          }
-        }
-      }
-      const root = resolve(this.options.store.directory, "placeholders"), prefix = root + sep;
-      const fetchActiveWorkspaces = async () => {
-        const active: Awaited<ReturnType<NativeHost["fetchWorkspaces"]>>["entries"] = [];
-        let cursor: string | undefined;
-        const cursors = new Set<string>();
-        for (;;) {
-          const page = await host.fetchWorkspaces({ filter: { includeBackground: true, includeInternal: true }, page: { limit: 100, cursor } });
-          active.push(...page.entries);
-          if (!page.pageInfo.hasMore) return active;
-          const next = page.pageInfo.nextCursor;
-          if (!next || cursors.has(next)) throw new Error("Incomplete native workspace pagination");
-          cursors.add(next); cursor = next;
-        }
-      };
-      const active = await fetchActiveWorkspaces();
-      for (const workspace of active) if (workspace.workspaceDirectory?.startsWith(prefix)) knownWorkspaces.add(workspace.id);
-      const candidates = new Map<string, { cwd: string; name: string }>();
-      for (const conn of Object.values(state.connections)) {
-        for (const project of Object.values(conn.projects)) if (project.projectId) candidates.set(project.projectId, project);
-        for (const issue of Object.values(conn.issues)) if (issue.projectId && !candidates.has(issue.projectId)) {
-          const project = conn.projects[issue.remoteWorkspaceId];
-          candidates.set(issue.projectId, { cwd: project?.cwd ?? resolve(issue.cwd, ".."), name: project?.name ?? issue.title });
-        }
-      }
-      const projects = (await host.listProjects()).projects;
-      for (const project of projects) if (project.projectKind === "non_git" && project.projectRootPath.startsWith(prefix)) {
-        candidates.set(project.projectId, { cwd: project.projectRootPath,
-          name: candidates.get(project.projectId)?.name ?? project.projectDisplayName ?? project.projectId });
-      }
-      releases.push(await this.options.lifecycle.hold([...addresses.values()]));
-      for (const agentId of discussions) await host.deleteAgent(agentId);
-
-      const retainedProjects: Array<{ name: string; cwd: string }> = [];
-      for (const workspace of active) if (knownWorkspaces.has(workspace.id)) {
-        const result = await host.archiveWorkspace(workspace.id);
-        if (result.error) throw new Error(result.error || "Native workspace archive failed");
-      }
-      for (const [projectId, cached] of candidates) {
-        const project = projects.find(project => project.projectId === projectId);
-        if (!project || project.projectRootPath !== cached.cwd || project.projectKind !== "non_git") continue;
-        const remaining = await fetchActiveWorkspaces();
-        if (remaining.some(workspace => workspace.projectId === projectId)) {
-          retainedProjects.push({ name: cached.name, cwd: cached.cwd });
-        } else {
-          await host.removeProject(projectId);
-        }
-      }
-
-      await removePlaceholderTree(root, retainedProjects.map(project => project.cwd));
-      await this.options.store.update(state => { state.connections = {}; state.owner = { profile: targetProfile }; });
-      for (const connectionKey of Object.keys(state.connections)) await this.options.store.removeRunDetails(connectionKey);
-      this.syncState.retainedProjects = retainedProjects.length ? retainedProjects : undefined;
+      const root = resolve(this.options.store.directory, "placeholders");
+      const found = await discoverMappedObjects(host, state.connections, root);
+      const retained = await teardownMappedObjects(host, this.options.lifecycle, found, { reset: async () => {
+        await this.options.store.update(state => { state.connections = {}; state.owner = { profile: targetProfile }; });
+        for (const connectionKey of Object.keys(state.connections)) await this.options.store.removeRunDetails(connectionKey);
+      } });
+      this.syncState.retainedProjects = retained.length ? retained.map(project => ({ name: project.name, cwd: project.root })) : undefined;
     } catch (error) {
       this.syncState = { ...this.syncState, status: "unavailable", stage: "purging", message: "清理旧 profile 本地数据失败；同步和规则写入已暂停，请重新引导以重试。" };
       throw error;

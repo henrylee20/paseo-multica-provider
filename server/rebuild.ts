@@ -1,10 +1,8 @@
-import { join, resolve, sep } from "node:path";
+import { join } from "node:path";
 import type { PaseoApi } from "@getpaseo/client";
-import { discussionKeys } from "../shared/discussion.js";
 import { isActiveRun } from "../shared/runs.js";
 import type { RebuildBlocker, RebuildProgress } from "../shared/rebuild.js";
 import type { AuthenticatedConnection } from "./connection.js";
-import { providerId } from "./discussion-identity.js";
 import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
 import type { NativeHost } from "./native-host.js";
 import type { RunDetails } from "./run-details.js";
@@ -12,19 +10,8 @@ import type { RunSynchronizer } from "./runs.js";
 import { StateStore, connectionState } from "./state.js";
 import type { SidebarSynchronizer } from "./sync.js";
 import { workspaces as readWorkspaces, type RemoteWorkspace } from "./multica-api.js";
-import { removePlaceholderTree } from "./mapped-objects.js";
+import { discoverMappedObjects, teardownMappedObjects } from "./mapped-objects.js";
 
-async function directory<T>(page: (cursor?: string) => Promise<{ entries: T[]; pageInfo: { hasMore: boolean; nextCursor?: string | null } }>): Promise<T[]> {
-  const entries: T[] = [], seen = new Set<string>();
-  let cursor: string | undefined;
-  for (;;) {
-    const result = await page(cursor); entries.push(...result.entries);
-    if (!result.pageInfo.hasMore) return entries;
-    const next = result.pageInfo.nextCursor;
-    if (!next || seen.has(next)) throw new Error("Incomplete native directory pagination");
-    seen.add(next); cursor = next;
-  }
-}
 const idle = (): RebuildProgress => ({ status: "idle", stage: "deleting", step: "", completed: 0, total: 0 });
 
 /** In-memory daemon job. A failed attempt is retried by rediscovering everything. */
@@ -82,46 +69,15 @@ export class DataRebuild {
   }
   private async discover(host: NativeHost, connectionKey: string) {
     const local = (await this.store.read()).connections[connectionKey];
-    const listed = (await directory(cursor => host.fetchAgents({ filter: { includeArchived: true, includeBackground: true, includeInternal: true, labels: { [discussionKeys.connection]: connectionKey } }, page: { limit: 100, cursor } })))
-      .map(entry => entry.agent).filter(agent => agent.provider === providerId && agent.labels[discussionKeys.connection] === connectionKey);
-    const discussions = new Map(listed.map(agent => [agent.id, { agent,
-      address: agent.labels[discussionKeys.issue] && agent.labels[discussionKeys.discussion]
-        ? { connectionKey, issueId: agent.labels[discussionKeys.issue], rootId: agent.labels[discussionKeys.discussion] } : undefined }]));
-    for (const [issueId, issue] of Object.entries(local?.issues ?? {})) {
-      const mapped = [{ rootId: "main", agentId: issue.mainAgentId },
-        ...Object.entries(issue.threads).map(([rootId, thread]) => ({ rootId, agentId: thread.agentId }))];
-      for (const { rootId, agentId } of mapped) {
-        if (!agentId) continue;
-        const found = discussions.get(agentId);
-        if (found) { found.address ??= { connectionKey, issueId, rootId }; continue; }
-        const agent = (await host.fetchAgent(agentId))?.agent;
-        if (agent?.provider === providerId && (agent.labels[discussionKeys.connection] === connectionKey || agent.cwd === issue.cwd)) {
-          discussions.set(agentId, { agent, address: { connectionKey, issueId, rootId } });
-        }
-      }
-    }
-    const agents = [...discussions.values()].map(({ agent }) => agent);
-    const active = await directory(cursor => host.fetchWorkspaces({ filter: { includeBackground: true, includeInternal: true }, page: { limit: 100, cursor } }));
-    const knownWorkspaceIds = new Set(agents.flatMap(agent => agent.workspaceId ? [agent.workspaceId] : []));
-    for (const issue of Object.values(local?.issues ?? {})) knownWorkspaceIds.add(issue.workspaceId);
-    const prefix = join(this.store.directory, "placeholders", connectionKey.slice(0, 20)) + sep;
-    const workspaceIds = new Set(active.filter(workspace => knownWorkspaceIds.has(workspace.id) || workspace.workspaceDirectory?.startsWith(prefix)).map(workspace => workspace.id));
-    const candidates = new Map<string, string>();
-    for (const project of Object.values(local?.projects ?? {})) if (project.projectId) candidates.set(project.projectId, project.cwd);
-    for (const issue of Object.values(local?.issues ?? {})) if (issue.projectId && !candidates.has(issue.projectId)) {
-      candidates.set(issue.projectId, local?.projects[issue.remoteWorkspaceId]?.cwd ?? resolve(issue.cwd, ".."));
-    }
-    const ownedProjects = (await host.listProjects()).projects.filter(project => project.projectKind === "non_git" &&
-      (project.projectRootPath.startsWith(prefix) || candidates.get(project.projectId) === project.projectRootPath));
-    const projects = ownedProjects.filter(project => !active.some(workspace => workspace.projectId === project.projectId && !workspaceIds.has(workspace.id)));
-    return { agents, addresses: [...discussions.values()].flatMap(({ address }) => address ? [address] : []), workspaceIds, projects, ownedProjects };
+    return discoverMappedObjects(host, { [connectionKey]: local ?? { rules: {}, projects: {}, issues: {} } },
+      join(this.store.directory, "placeholders", connectionKey.slice(0, 20)));
   }
   async preflight(connectionKey: string, paseo: PaseoApi) {
     const connection = await this.current(connectionKey);
     let counts = { projects: 0, workspaces: 0, discussions: 0 };
     await this.sync.withNativeHost(paseo, async host => {
       const found = await this.discover(host, connectionKey);
-      counts = { projects: found.projects.length, workspaces: found.workspaceIds.size, discussions: found.agents.length };
+      counts = { projects: found.removableProjects, workspaces: found.workspaceIds.size, discussions: found.discussions.length };
     });
     return { ...counts, blockers: await this.blockers(connection) };
   }
@@ -136,7 +92,6 @@ export class DataRebuild {
     const progress: RebuildProgress = { ...idle(), status: "running", step: "等待后台同步" };
     this.progress.set(connectionKey, progress);
     this.operation = this.sync.exclusive(paseo, async host => {
-      let release: (() => void) | undefined;
       try {
         const remaining = await this.blockers(await this.current(connectionKey));
         if (blocked(remaining)) {
@@ -147,36 +102,21 @@ export class DataRebuild {
         await this.details.pause();
         progress.step = "发现插件记录";
         const found = await this.discover(host, connectionKey);
-        release = await this.lifecycle.hold(found.addresses);
-        progress.step = "删除插件讨论";
-        for (const agent of found.agents) await host.deleteAgent(agent.id);
-        progress.step = "归档 Paseo 工作区";
-        for (const workspaceId of found.workspaceIds) {
-          const result = await host.archiveWorkspace(workspaceId);
-          if (result.error) throw new Error(result.error || "Native workspace archive failed");
-        }
-        progress.step = "删除 Paseo 项目";
-        const preserved: string[] = [];
-        for (const project of found.ownedProjects) {
-          // Recheck after archive: a user may have created a workspace meanwhile.
-          const active = await directory(cursor => host.fetchWorkspaces({ filter: { includeBackground: true, includeInternal: true }, page: { limit: 100, cursor } }));
-          if (!active.some(workspace => workspace.projectId === project.projectId)) await host.removeProject(project.projectId);
-          else preserved.push(project.projectRootPath);
-        }
-        progress.step = "清理本地占位目录";
-        await removePlaceholderTree(join(this.store.directory, "placeholders", connectionKey.slice(0, 20)), preserved);
-        progress.step = "清空本地状态";
-        await this.store.removeRunDetails(connectionKey);
-        await this.store.update(state => {
-          const local = connectionState(state, connectionKey);
-          state.connections[connectionKey] = { rules: local.rules, rebuildGeneration: (local.rebuildGeneration ?? 0) + 1, projects: {}, issues: {} };
+        await teardownMappedObjects(host, this.lifecycle, found, {
+          onStage: stage => { progress.step = { delete: "删除插件讨论", archive: "归档 Paseo 工作区", remove: "删除 Paseo 项目", clean: "清理本地占位目录", reset: "清空本地状态" }[stage]; },
+          reset: async () => {
+            await this.store.removeRunDetails(connectionKey);
+            await this.store.update(state => {
+              const local = connectionState(state, connectionKey);
+              state.connections[connectionKey] = { rules: local.rules, rebuildGeneration: (local.rebuildGeneration ?? 0) + 1, projects: {}, issues: {} };
+            });
+          },
         });
-        release(); release = undefined;
         this.details.resume(connectionKey);
         progress.stage = "importing"; progress.step = "按筛选规则导入";
         await this.sync.reimport(connectionKey, (completed, total) => { progress.completed = completed; progress.total = total; });
         progress.status = "completed"; progress.message = `重建完成，已导入 ${progress.completed} 个任务。`;
-      } finally { release?.(); this.details.resume(); }
+      } finally { this.details.resume(); }
     }).catch(error => { progress.status = "failed"; progress.message = `${progress.step}失败：${error instanceof Error ? error.message : String(error)}`; })
       .finally(() => { this.operation = undefined; });
     return { started: true, blockers: [], progress: this.status(connectionKey) };
