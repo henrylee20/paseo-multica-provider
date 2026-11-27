@@ -1,4 +1,4 @@
-import { join, sep } from "node:path";
+import { join, resolve, sep } from "node:path";
 import type { PaseoApi } from "@getpaseo/client";
 import { discussionKeys } from "../shared/discussion.js";
 import { isActiveRun } from "../shared/runs.js";
@@ -102,8 +102,13 @@ export class DataRebuild {
     for (const issue of Object.values(local?.issues ?? {})) knownWorkspaceIds.add(issue.workspaceId);
     const prefix = join(this.store.directory, "placeholders", connectionKey.slice(0, 20)) + sep;
     const workspaceIds = new Set(active.filter(workspace => knownWorkspaceIds.has(workspace.id) || workspace.workspaceDirectory?.startsWith(prefix)).map(workspace => workspace.id));
+    const candidates = new Map<string, string>();
+    for (const project of Object.values(local?.projects ?? {})) if (project.projectId) candidates.set(project.projectId, project.cwd);
+    for (const issue of Object.values(local?.issues ?? {})) if (issue.projectId && !candidates.has(issue.projectId)) {
+      candidates.set(issue.projectId, local?.projects[issue.remoteWorkspaceId]?.cwd ?? resolve(issue.cwd, ".."));
+    }
     const projects = (await host.listProjects()).projects.filter(project => project.projectKind === "non_git" &&
-      (project.projectRootPath.startsWith(prefix) || Object.values(local?.projects ?? {}).some(cached => cached.projectId === project.projectId && cached.cwd === project.projectRootPath)))
+      (project.projectRootPath.startsWith(prefix) || candidates.get(project.projectId) === project.projectRootPath))
       .filter(project => !active.some(workspace => workspace.projectId === project.projectId && !workspaceIds.has(workspace.id)));
     return { agents, addresses: [...discussions.values()].map(({ address }) => address), workspaceIds, projects };
   }

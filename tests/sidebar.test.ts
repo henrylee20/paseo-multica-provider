@@ -2137,6 +2137,33 @@ it("rebuild deletes discussions including archived orphans before workspaces and
   expect(f.requests.every(path => !path.endsWith("/cancel"))).toBe(true);
 });
 
+it.each(["missing", "missing its ID"])("rebuild identifies Paseo projects through cached issue.projectId when the project mapping is %s", async mapping => {
+  const f = await fixture(60_000); f.remote.acknowledgeEvents = false;
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const connectionKey = (await f.server.rpc(connectionStatus, {}, f.paseo)).connectionKey!;
+  const project = f.native.projects[0];
+  project.cwd = join(f.home, "legacy-project");
+  await f.dispose();
+  const store = new StateStore(join(f.home, "multica-provider"));
+  await store.update(state => {
+    const local = state.connections[connectionKey];
+    local.rules["remote-workspace"].enabled = false;
+    if (mapping === "missing") {
+      local.projects = {};
+      for (const [issueId, issue] of Object.entries(local.issues)) issue.cwd = join(project.cwd, issueId);
+    } else {
+      delete local.projects["remote-workspace"].projectId;
+      local.projects["remote-workspace"].cwd = project.cwd;
+    }
+  });
+  const { server } = f.start();
+  expect(await server.rpc(rebuildPreflight, { connectionKey }, f.paseo)).toMatchObject({ projects: 1, workspaces: 2, discussions: 2, blockers: [] });
+  expect(await server.rpc(rebuildStart, { connectionKey }, f.paseo)).toMatchObject({ started: true });
+  expect(await finishRebuild(server, f.paseo, connectionKey)).toMatchObject({ status: "completed", total: 0 });
+  expect(f.effects.filter(effect => effect === `removeProject:${project.projectId}`)).toHaveLength(1);
+  expect(f.native.projects).toEqual([]);
+});
+
 it("rebuild preserves a project containing a user workspace and supports cleanup with zero enabled rules", async () => {
   const f = await fixture();
   await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);

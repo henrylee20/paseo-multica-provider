@@ -392,6 +392,7 @@ export class SidebarSynchronizer {
       const host = this.host;
       const discussions = new Set<string>();
       const addresses: Array<{ connectionKey: string; issueId: string; rootId: string }> = [];
+      const knownWorkspaces = new Set(Object.values(state.connections).flatMap(conn => Object.values(conn.issues).map(issue => issue.workspaceId)));
       for (const [connectionKey, conn] of Object.entries(state.connections)) {
         let cursor: string | undefined;
         const cursors = new Set<string>();
@@ -400,6 +401,7 @@ export class SidebarSynchronizer {
           for (const { agent } of page.entries) {
             if (agent.provider !== providerId || agent.labels[discussionKeys.connection] !== connectionKey) continue;
             discussions.add(agent.id);
+            if (agent.workspaceId) knownWorkspaces.add(agent.workspaceId);
             const issueId = agent.labels[discussionKeys.issue], rootId = agent.labels[discussionKeys.discussion];
             if (issueId && rootId) addresses.push({ connectionKey, issueId, rootId });
           }
@@ -414,6 +416,7 @@ export class SidebarSynchronizer {
             const agent = (await host.fetchAgent(agentId))?.agent;
             if (agent?.provider === providerId && (agent.labels[discussionKeys.connection] === connectionKey || agent.cwd === issue.cwd)) {
               discussions.add(agentId);
+              if (agent.workspaceId) knownWorkspaces.add(agent.workspaceId);
               const issueId = agent.labels[discussionKeys.issue], rootId = agent.labels[discussionKeys.discussion];
               if (issueId && rootId) addresses.push({ connectionKey, issueId, rootId });
             }
@@ -424,6 +427,7 @@ export class SidebarSynchronizer {
       for (const agentId of discussions) await host.deleteAgent(agentId);
 
       const projects = (await host.listProjects()).projects;
+      const root = resolve(this.options.store.directory, "placeholders"), prefix = root + sep;
       const active: Awaited<ReturnType<NativeHost["fetchWorkspaces"]>>["entries"] = [];
       let cursor: string | undefined;
       const cursors = new Set<string>();
@@ -435,7 +439,7 @@ export class SidebarSynchronizer {
         if (!next || cursors.has(next)) throw new Error("Incomplete native workspace pagination");
         cursors.add(next); cursor = next;
       }
-      const knownWorkspaces = new Set(Object.values(state.connections).flatMap(conn => Object.values(conn.issues).map(issue => issue.workspaceId)));
+      for (const workspace of active) if (workspace.workspaceDirectory?.startsWith(prefix)) knownWorkspaces.add(workspace.id);
       const candidates = new Map<string, { cwd: string; name: string }>();
       for (const conn of Object.values(state.connections)) {
         for (const project of Object.values(conn.projects)) if (project.projectId) candidates.set(project.projectId, project);
@@ -443,6 +447,10 @@ export class SidebarSynchronizer {
           const project = conn.projects[issue.remoteWorkspaceId];
           candidates.set(issue.projectId, { cwd: project?.cwd ?? resolve(issue.cwd, ".."), name: project?.name ?? issue.title });
         }
+      }
+      for (const project of projects) if (project.projectKind === "non_git" && project.projectRootPath.startsWith(prefix)) {
+        candidates.set(project.projectId, { cwd: project.projectRootPath,
+          name: candidates.get(project.projectId)?.name ?? project.projectDisplayName ?? project.projectId });
       }
       const retainedProjects: Array<{ name: string; cwd: string }> = [];
       const removedProjects = new Set<string>();
@@ -465,7 +473,6 @@ export class SidebarSynchronizer {
       }
       for (const workspace of active) if (knownWorkspaces.has(workspace.id) && !removedProjects.has(workspace.projectId) && !archivedWorkspaces.has(workspace.id)) await archive(workspace.id);
 
-      const root = resolve(this.options.store.directory, "placeholders");
       const inside = (target: string) => { const path = relative(root, resolve(target)); return !!path && !path.startsWith("..") && !isAbsolute(path); };
       const preserved = retainedProjects.map(project => resolve(project.cwd));
       const clean = async (directory: string) => {
