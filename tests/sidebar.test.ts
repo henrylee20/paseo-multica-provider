@@ -2091,6 +2091,31 @@ it.each([
   expect(f.effects).toContain(`archiveWorkspace:${recoveredWorkspace.id}`);
 });
 
+it.each(["multica.issue", "multica.discussion"])("rebuild deletes uncached plugin discussions and holds cached discussions missing the %s label", async missing => {
+  const f = await fixture(60_000); f.remote.acknowledgeEvents = false;
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const connectionKey = (await f.server.rpc(connectionStatus, {}, f.paseo)).connectionKey!;
+  const cached = f.native.agents[0];
+  const orphan = { ...cached, id: "orphan", handle: "orphan", labels: { ...cached.labels } };
+  delete cached.labels[missing]; delete orphan.labels[missing];
+  f.native.agents.push(orphan);
+  const provider = await f.server.providers.get("multica")!.connect({ versions: [1], capabilities: [] });
+  cleanup.push(() => provider.close());
+  const events: ProviderEvent[] = []; provider.onEvent(event => events.push(event));
+  const remove = f.host.deleteAgent.bind(f.host);
+  vi.spyOn(f.host, "deleteAgent").mockImplementation(async id => {
+    if (id === cached.id) await provider.send({ type: "session.open", requestId: "partial-label-open", sessionId: "partial-label-open", history: "replay",
+      persistence: JSON.parse(cached.handle.slice(7)), config: { cwd: cached.cwd, env: {}, mcpServers: {}, settings: {}, persist: true } });
+    return remove(id);
+  });
+  expect(await f.server.rpc(rebuildPreflight, { connectionKey }, f.paseo)).toMatchObject({ projects: 1, workspaces: 2, discussions: 3, blockers: [] });
+  expect(await f.server.rpc(rebuildStart, { connectionKey }, f.paseo)).toMatchObject({ started: true });
+  expect(await finishRebuild(f.server, f.paseo, connectionKey)).toMatchObject({ status: "completed", completed: 2, total: 2 });
+  expect(f.effects.filter(effect => effect === `deleteAgent:${orphan.id}`)).toHaveLength(1);
+  expect(f.native.agents.some(agent => agent.id === orphan.id)).toBe(false);
+  expect(events).toContainEqual(expect.objectContaining({ type: "request.failed", requestId: "partial-label-open", error: expect.objectContaining({ code: "discussion_unavailable" }) }));
+});
+
 it("rebuild deletes discussions including archived orphans before workspaces and projects, preserves rules and only resets its connection", async () => {
   const f = await fixture();
   await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
@@ -2182,6 +2207,31 @@ it("rebuild preserves a project containing a user workspace and supports cleanup
   expect(f.effects.some(effect => effect.startsWith("removeProject:"))).toBe(false);
   expect(f.native.workspaces.find(workspace => workspace.id === "user-workspace")!.archived).toBeUndefined();
   expect((await new StateStore(store.directory).read()).connections[connectionKey]).toMatchObject({ projects: {}, issues: {}, rules: { "remote-workspace": { enabled: false } } });
+});
+
+it("rebuild rechecks initially retained projects and removes them when their user workspace is archived before removal", async () => {
+  const f = await fixture(60_000); f.remote.acknowledgeEvents = false;
+  await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
+  const connectionKey = (await f.server.rpc(connectionStatus, {}, f.paseo)).connectionKey!;
+  const project = f.native.projects[0], pluginWorkspace = f.native.workspaces[0];
+  const userWorkspace = { id: "user-workspace", projectId: project.projectId, cwd: project.cwd, title: "Mine", archived: false };
+  f.native.workspaces.push(userWorkspace);
+  const marker = join(project.cwd, "removed-marker"); await writeFile(marker, "remove");
+  await f.dispose();
+  await new StateStore(join(f.home, "multica-provider")).update(state => { state.connections[connectionKey].rules["remote-workspace"].enabled = false; });
+  const archive = f.host.archiveWorkspace.bind(f.host);
+  vi.spyOn(f.host, "archiveWorkspace").mockImplementation(async id => {
+    const result = await archive(id);
+    if (id === pluginWorkspace.id) userWorkspace.archived = true;
+    return result;
+  });
+  const { server } = f.start();
+  expect(await server.rpc(rebuildPreflight, { connectionKey }, f.paseo)).toMatchObject({ projects: 0, workspaces: 2, discussions: 2, blockers: [] });
+  expect(await server.rpc(rebuildStart, { connectionKey }, f.paseo)).toMatchObject({ started: true });
+  expect(await finishRebuild(server, f.paseo, connectionKey)).toMatchObject({ status: "completed", total: 0 });
+  expect(f.effects).toContain(`removeProject:${project.projectId}`);
+  expect(f.native.projects).toEqual([]);
+  await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
 });
 
 it.each(["discovery", "recheck"])("rebuild removes local placeholder files while preserving projects retained during %s and other connections", async phase => {

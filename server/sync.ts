@@ -458,7 +458,8 @@ export class SidebarSynchronizer {
       }
       const retainedProjects: Array<{ name: string; cwd: string }> = [];
       for (const workspace of active) if (knownWorkspaces.has(workspace.id)) {
-        if ((await host.archiveWorkspace(workspace.id)).error) throw new Error("Native workspace archive failed");
+        const result = await host.archiveWorkspace(workspace.id);
+        if (result.error) throw new Error(result.error || "Native workspace archive failed");
       }
       for (const [projectId, cached] of candidates) {
         const project = projects.find(project => project.projectId === projectId);
