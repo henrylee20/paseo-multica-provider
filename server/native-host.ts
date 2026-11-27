@@ -4,6 +4,7 @@ import { setTimeout } from "node:timers/promises";
 import { createHostClient } from "@getpaseo/client/node";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { discussionKeys } from "../shared/discussion.js";
+import { providerId } from "./discussion-identity.js";
 import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
 
 /** These are the real low-level SDK methods, including explicit project placement. */
@@ -85,7 +86,7 @@ export async function restoreMappedDiscussion(host: NativeHost, lifecycle: Discu
   if (!agent || agent.cwd !== expected.cwd) throw new Error("Mapped native discussion unavailable");
   if (agent.workspaceId !== expected.workspaceId) {
     const rootId = agent.labels[discussionKeys.discussion];
-    if (agent.provider !== "multica" || !agent.workspaceId || !rootId || agent.labels[discussionKeys.connection] !== address.connectionKey ||
+    if (agent.provider !== providerId || !agent.workspaceId || !rootId || agent.labels[discussionKeys.connection] !== address.connectionKey ||
       agent.labels[discussionKeys.issue] !== address.issueId || !agent.persistence?.sessionId.startsWith("plugin:"))
       throw new Error("Mapped native discussion cannot be moved");
     // A native history query may have reopened the retired agent. Close its
@@ -93,7 +94,7 @@ export async function restoreMappedDiscussion(host: NativeHost, lifecycle: Discu
     const release = await lifecycle.hold([{ ...address, rootId }]);
     try { await archiveClosedDiscussion(host, agentId, { cwd: expected.cwd, workspaceId: agent.workspaceId }); }
     finally { release(); }
-    const imported = await host.importAgent({ providerId: "multica", providerHandleId: agent.persistence.sessionId,
+    const imported = await host.importAgent({ providerId, providerHandleId: agent.persistence.sessionId,
       cwd: expected.cwd, workspaceId: expected.workspaceId, labels: agent.labels });
     if (imported.id !== agentId) throw new Error("Native discussion identity changed");
   } else if (agent.archivedAt) await host.refreshAgent(agentId);
@@ -108,7 +109,7 @@ export async function archiveClosedDiscussion(host: NativeHost, agentId: string,
     const snapshot = (await host.fetchAgent(agentId))?.agent;
     if (!snapshot || snapshot.workspaceId !== expected.workspaceId || snapshot.cwd !== expected.cwd) throw new Error("Mapped native discussion unavailable");
     if (snapshot.archivedAt) return;
-    if (snapshot.provider !== "multica") throw new Error("Mapped native discussion unavailable");
+    if (snapshot.provider !== providerId) throw new Error("Mapped native discussion unavailable");
     if (["idle", "closed", "error"].includes(snapshot.status) && !snapshot.activeTurn) {
       await host.archiveAgent(agentId);
       if (!(await host.fetchAgent(agentId))?.agent.archivedAt) throw new Error("Native discussion archive not confirmed");

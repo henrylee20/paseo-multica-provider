@@ -30,6 +30,8 @@ Paseo 源码插件（插件 ID：`multica`），将 Multica 工作区、Issue、
   - `discussion-list.tsx`：按 Paseo 工作区只读轮询本地 Thread 列表，通过面板 `navigation.openAgent` 打开讨论；入口位于概览卡与主讨论投递行。
   - `task-description.tsx`、`thread-events.tsx`、`askuser-card.tsx`、`delivery-status.tsx`、`chunked-text.ts`：注册 6 类时间线 renderer（`task-description`、`thread`、`comment-divider`、`comment-event`、`askuser`、`comment-delivery`）。
 - **服务端（`server/*`）**
+  - `multica-api.ts`：Multica 读取 schema、工作区与任务分页读取、`ids=` 能力探测请求及工作区快照目录缓存；能力探测缓存由 `SidebarSynchronizer` 实例持有。
+  - `discussion-identity.ts`：统一 provider ID、本地主讨论与 Thread 的持久化标识及本地主讨论标签。
   - `attachments.ts`：仅预览本任务已记录的投递附件，核对当前连接、限量流式读取，允许一次无凭据重定向并拒绝 HTTPS 降级。
   - **鉴权与状态**：`connection.ts`（只读复用 CLI 配置与目录枚举、mtime/大小缓存、60 秒 `/api/me` 缓存、环境变量覆盖、任务上下文隔离、请求级撤销信号 `assertCurrent`）；`state.ts`（位于 `PASEO_HOME/multica-provider` 的原子落盘 `StateStore`，返回只读快照，通过 `state.owner.profile` 追踪数据归属）。
   - **原生宿主与同步生命周期**：`native-host.ts`（从 `PASEO_HOME/paseo.pid.listen` 连接并比对 `serverId` 后调用底层 `DaemonClient`，含防唤醒保护 `restoreWorkspacePreservingHidden`）；`sync.ts`（`SidebarSynchronizer`：15 秒轮询 + `workspace-events.ts` WebSocket 失效触发、独立短队列保存规则、规则版本淘汰旧快照、空 Project 移除与重建外壳迁移、切换 profile 可续跑清理）；`rebuild.ts`（`DataRebuild`：串行暂停同步并按 `deleteAgent` → `archiveWorkspace` → `removeProject` 重建当前连接数据，持久化递增 `rebuildGeneration`）；`hiding.ts`（区分 `archiveReason` 自动归档与人工隐藏 hook）；`discussion-lifecycle.ts`（本地资源 `hold` 门禁）；`discussion-metadata.ts`（首次成功前在 bootstrap 扫描补齐标签到 `metadata` 的镜像，导入与恢复单独写入）。

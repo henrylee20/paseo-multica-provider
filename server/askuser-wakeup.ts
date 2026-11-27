@@ -1,6 +1,7 @@
 import { askuserUnavailableReason } from "./askuser-policy.js";
 import type { AskUsers } from "./askuser.js";
 import type { AuthenticatedConnection } from "./connection.js";
+import { providerId } from "./discussion-identity.js";
 import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
 import { discussionKeys } from "../shared/discussion.js";
 import { findActiveWorkspace, type NativeHost } from "./native-host.js";
@@ -58,7 +59,7 @@ export class AskuserWakeups {
     const now = this.now().getTime();
     if (!explicit && now - (this.attemptedAt.get(key) ?? -Infinity) < 60_000) return;
     const native = (await host.fetchAgent(candidate.agentId))?.agent;
-    if (!native || native.archivedAt || native.provider !== "multica" || native.workspaceId !== candidate.issue.workspaceId || native.cwd !== candidate.issue.cwd ||
+    if (!native || native.archivedAt || native.provider !== providerId || native.workspaceId !== candidate.issue.workspaceId || native.cwd !== candidate.issue.cwd ||
       native.labels[discussionKeys.connection] !== address.connectionKey || native.labels[discussionKeys.issue] !== address.issueId || native.labels[discussionKeys.discussion] !== address.rootId) return;
     if (!await findActiveWorkspace(host, candidate.issue.workspaceId)) return;
     await connection.assertCurrent?.();

@@ -6,7 +6,7 @@ import { isActiveRun, runMessageSchema } from "../shared/runs.js";
 import type { RunAddress } from "./runs.js";
 import type { AuthenticatedConnection } from "./connection.js";
 import { StateStore, cachedWorkspace } from "./state.js";
-import { remoteJson } from "./sync.js";
+import { remoteJson } from "./multica-api.js";
 
 const detailSchema = z.object({ messages: z.array(runMessageSchema), finalized: z.boolean().optional() });
 export type RunDetail = z.infer<typeof detailSchema>;

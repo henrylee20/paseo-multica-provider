@@ -6,7 +6,7 @@ import type { ProviderTimelineItem } from "@getpaseo/plugin/server/provider";
 import { askuserDocumentSchema, isAskuserReplyValid, type AskuserCardData } from "../shared/askuser.js";
 import { remoteFetch, type AuthenticatedConnection } from "./connection.js";
 import { StateStore, type IssueMapping } from "./state.js";
-import { remoteJson, workspaceSchema, type RemoteWorkspace } from "./sync.js";
+import { remoteJson, workspaceHeaders, workspaces as readWorkspaces, type RemoteWorkspace } from "./multica-api.js";
 import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
 import { askuserUnavailableReason, assertAskuserWritable } from "./askuser-policy.js";
 
@@ -175,7 +175,7 @@ export class AskUsers {
     const unresolved = Object.entries(issue.askuserCards ?? {}).filter(([, card]) => card.status !== "answered" && card.status !== "skipped" && !card.deleted);
     if (!unresolved.length) return true;
     try {
-      const response = await remoteFetch(connection, `/api/issues/${encodeURIComponent(issueId)}/timeline`, { headers: { "X-Workspace-Slug": workspace.slug } });
+      const response = await remoteFetch(connection, `/api/issues/${encodeURIComponent(issueId)}/timeline`, { headers: workspaceHeaders(workspace) });
       if (!response.ok) { await response.body?.cancel(); throw new Error("Timeline unavailable"); }
       const entries = timelineSchema.parse(await response.json());
       await connection.assertCurrent?.();
@@ -221,7 +221,7 @@ export class AskUsers {
     try {
       await connection.assertCurrent?.();
       await this.assertDownloadAvailable(connection.connectionKey, issueId, rootId);
-      response = await fetch(url, { headers: { Authorization: `Bearer ${connection.token}`, "X-Workspace-Slug": workspace.slug }, redirect: "error",
+      response = await fetch(url, { headers: { Authorization: `Bearer ${connection.token}`, ...workspaceHeaders(workspace) }, redirect: "error",
         signal: AbortSignal.any([AbortSignal.timeout(10_000), ...(connection.signal ? [connection.signal] : [])]) });
     } catch (error) { if (error instanceof DeferredAttachment) throw error; throw new Error("附件下载失败（网络、重定向或登录上下文已变化）。"); }
     try {
@@ -314,7 +314,7 @@ export class AskUsers {
     this.online.add(connection.connectionKey); this.userIds.set(connection.connectionKey, connection.userId);
     const issue = (await this.store.read()).connections[address.connectionKey]?.issues[address.issueId];
     this.actionable(address, issue, lifecycle);
-    const workspaces = await remoteJson(connection, "/api/workspaces", z.array(workspaceSchema)) as RemoteWorkspace[];
+    const workspaces = await readWorkspaces(connection);
     const workspace = workspaces.find(workspace => workspace.id === issue!.remoteWorkspaceId);
     if (!workspace) throw new Error("原 Multica 工作区不可用。");
     const object = await this.issueObject(connection, workspace, address.issueId);

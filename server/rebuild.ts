@@ -4,12 +4,14 @@ import { discussionKeys } from "../shared/discussion.js";
 import { isActiveRun } from "../shared/runs.js";
 import type { RebuildBlocker, RebuildProgress } from "../shared/rebuild.js";
 import type { AuthenticatedConnection } from "./connection.js";
+import { providerId } from "./discussion-identity.js";
 import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
 import type { NativeHost } from "./native-host.js";
 import type { RunDetails } from "./run-details.js";
 import type { RunSynchronizer } from "./runs.js";
 import { StateStore, connectionState } from "./state.js";
-import type { RemoteWorkspace, SidebarSynchronizer } from "./sync.js";
+import type { SidebarSynchronizer } from "./sync.js";
+import { workspaces as readWorkspaces, type RemoteWorkspace } from "./multica-api.js";
 
 async function directory<T>(page: (cursor?: string) => Promise<{ entries: T[]; pageInfo: { hasMore: boolean; nextCursor?: string | null } }>): Promise<T[]> {
   const entries: T[] = [], seen = new Set<string>();
@@ -51,7 +53,7 @@ export class DataRebuild {
       try {
         const project = local.projects[issue.remoteWorkspaceId];
         const workspace = project?.slug ? { id: issue.remoteWorkspaceId, name: project.name, slug: project.slug }
-          : (await (workspaces ??= this.sync.workspaces(connection))).find(workspace => workspace.id === issue.remoteWorkspaceId);
+          : (await (workspaces ??= readWorkspaces(connection))).find(workspace => workspace.id === issue.remoteWorkspaceId);
         if (!workspace) failure = { verification: "unconfirmable", reason: "Multica 工作区不可访问或已不在工作区列表中。" };
         else {
           result = await this.runs.recheck(connection, workspace, issueId, candidates);
@@ -80,7 +82,7 @@ export class DataRebuild {
   private async discover(host: NativeHost, connectionKey: string) {
     const local = (await this.store.read()).connections[connectionKey];
     const agents = (await directory(cursor => host.fetchAgents({ filter: { includeArchived: true, includeBackground: true, includeInternal: true, labels: { [discussionKeys.connection]: connectionKey } }, page: { limit: 100, cursor } })))
-      .map(entry => entry.agent).filter(agent => agent.provider === "multica" && agent.labels[discussionKeys.connection] === connectionKey && agent.labels[discussionKeys.issue] && agent.labels[discussionKeys.discussion]);
+      .map(entry => entry.agent).filter(agent => agent.provider === providerId && agent.labels[discussionKeys.connection] === connectionKey && agent.labels[discussionKeys.issue] && agent.labels[discussionKeys.discussion]);
     const active = await directory(cursor => host.fetchWorkspaces({ filter: { includeBackground: true, includeInternal: true }, page: { limit: 100, cursor } }));
     const knownWorkspaceIds = new Set(agents.flatMap(agent => agent.workspaceId ? [agent.workspaceId] : []));
     for (const issue of Object.values(local?.issues ?? {})) knownWorkspaceIds.add(issue.workspaceId);

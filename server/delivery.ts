@@ -8,7 +8,7 @@ import { z } from "zod";
 import { remoteFetch, type AuthenticatedConnection } from "./connection.js";
 import type { RunAddress } from "./runs.js";
 import { StateStore, cachedWorkspace } from "./state.js";
-import { workspaceAgents } from "./sync.js";
+import { workspaceAgents } from "./multica-api.js";
 import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
 import { assertAskuserWritable } from "./askuser-policy.js";
 import { deliveredAttachment } from "../shared/delivery.js";

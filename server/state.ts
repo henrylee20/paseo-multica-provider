@@ -103,6 +103,10 @@ export function connectionState(state: LocalState, key: string): ConnectionState
   return state.connections[key] ??= { rules: {}, projects: {}, issues: {} };
 }
 
+export function importedIssues(local: ConnectionState | undefined, workspaceId: string) {
+  return Object.entries(local?.issues ?? {}).filter(([, issue]) => issue.remoteWorkspaceId === workspaceId && !issue.archiveReason);
+}
+
 export function cachedWorkspace(state: LocalState, connectionKey: string, issue: IssueMapping) {
   const project = state.connections[connectionKey]?.projects[issue.remoteWorkspaceId];
   if (!project?.slug) throw new Error("Multica 工作区不可用。");

@@ -6,60 +6,17 @@ import { z } from "zod";
 import { taskRuleSchema, type TaskRule, type SyncStatus } from "../shared/contracts.js";
 import { issueQuery } from "./filters.js";
 import { WorkspaceEvents, type WorkspaceEvent } from "./workspace-events.js";
-import { remoteFetch, type AuthenticatedConnection } from "./connection.js";
+import type { AuthenticatedConnection } from "./connection.js";
 import { archiveClosedDiscussion, ensureWorkspaceActive, fetchActiveWorkspaceIds, findActiveWorkspace, findNativeDiscussion, projectHasActiveWorkspaces, restoreMappedDiscussion, type NativeHost } from "./native-host.js";
-import { StateStore, connectionState, issueSchema, type ConnectionState, type IssueMapping } from "./state.js";
+import { StateStore, connectionState, importedIssues, issueSchema, type IssueMapping } from "./state.js";
 import { discussionAgent, hiddenAgent, restoreWorkspacePreservingHidden } from "./hiding.js";
 import { discussionKeys } from "../shared/discussion.js";
 import type { DiscussionMetadata } from "./discussion-metadata.js";
 import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
+import { issuePage, matchingIssues, remoteIssueSchema, supportsIssueIds, workspaceAgents, workspaceMembers, workspaceProjects, workspaceSquads, workspaceStatuses, workspaces as readWorkspaces, type RemoteWorkspace } from "./multica-api.js";
+import { issueLabels, mainPersistence, providerId } from "./discussion-identity.js";
 
-export const workspaceSchema = z.object({ id: z.string().min(1), name: z.string(), slug: z.string().min(1) });
-const overviewText = z.string().trim().min(1).optional().catch(undefined);
-const remoteIssueSchema = z.object({ id: z.string().min(1), workspace_id: z.string(), title: z.string(),
-  description: z.string().nullish(), updated_at: z.string().optional(),
-  identifier: overviewText, status: overviewText, status_name: overviewText, status_category: overviewText,
-  priority: z.enum(["urgent", "high", "medium", "low", "none"]).optional().catch(undefined),
-  assignee_type: z.enum(["member", "agent", "squad"]).optional().catch(undefined), assignee_id: overviewText, project_id: overviewText,
-  due_date: z.iso.date().optional().catch(undefined),
-  labels: z.array(z.object({ name: z.string().trim().min(1) })).optional().catch(undefined),
-});
-const pageSchema = z.object({ issues: z.array(remoteIssueSchema), total: z.number().int().nonnegative() });
-// These requests live only for this snapshot (or an explicit Thread open).
-export type RemoteWorkspace = z.infer<typeof workspaceSchema> & {
-  agents?: Promise<Array<{ id: string; name: string; archived_at?: string | null }>>;
-  members?: Promise<Array<{ user_id: string; name: string }>>;
-  squads?: Promise<Array<{ id: string; name: string }>>;
-  projects?: Promise<{ projects: Array<{ id: string; title: string }> }>;
-  statuses?: Promise<{ statuses: Array<{ key: string; name: string; category: string }> }>;
-};
-export const providerId = "multica";
-export function mainPersistence(connectionKey: string, issueId: string) {
-  return { version: 1, data: { connectionKey, issueId, discussion: "main" } } as const;
-}
-export function issueLabels(connectionKey: string, issueId: string) {
-  return { [discussionKeys.connection]: connectionKey, [discussionKeys.issue]: issueId, [discussionKeys.discussion]: "main" };
-}
 function stableId(...parts: string[]) { return createHash("sha256").update(JSON.stringify(parts)).digest("hex"); }
-
-export function importedIssues(local: ConnectionState | undefined, workspaceId: string) {
-  return Object.entries(local?.issues ?? {}).filter(([, issue]) => issue.remoteWorkspaceId === workspaceId && !issue.archiveReason);
-}
-
-export async function remoteJson(connection: AuthenticatedConnection, path: string, schema: z.ZodType, workspace?: RemoteWorkspace, signal?: AbortSignal) {
-  const response = await remoteFetch(connection, path, { headers: workspace ? { "X-Workspace-Slug": workspace.slug } : {}, signal });
-  if (!response.ok) { await response.body?.cancel(); throw new Error(`Multica read failed (HTTP ${response.status})`); }
-  return schema.parse(await response.json());
-}
-
-export function workspaceAgents(connection: AuthenticatedConnection, workspace: RemoteWorkspace) {
-  return workspace.agents ??= remoteJson(connection, `/api/agents?workspace_id=${encodeURIComponent(workspace.id)}&include_archived=true`,
-    z.array(z.object({ id: z.string(), name: z.string(), archived_at: z.string().nullish() })), workspace) as NonNullable<RemoteWorkspace["agents"]>;
-}
-export function workspaceMembers(connection: AuthenticatedConnection, workspace: RemoteWorkspace) {
-  return workspace.members ??= remoteJson(connection, `/api/workspaces/${encodeURIComponent(workspace.id)}/members`,
-    z.array(z.object({ user_id: z.string(), name: z.string() })), workspace) as NonNullable<RemoteWorkspace["members"]>;
-}
 
 async function issueOverview(connection: AuthenticatedConnection, workspace: RemoteWorkspace, issue: z.infer<typeof remoteIssueSchema>, previous?: IssueMapping["overview"]): Promise<NonNullable<IssueMapping["overview"]>> {
   const overview: NonNullable<IssueMapping["overview"]> = {
@@ -73,7 +30,7 @@ async function issueOverview(connection: AuthenticatedConnection, workspace: Rem
       if (issue.assignee_type === "member") overview.assigneeName = (await workspaceMembers(connection, workspace)).find(item => item.user_id === issue.assignee_id)?.name;
       else if (issue.assignee_type === "agent") overview.assigneeName = (await workspaceAgents(connection, workspace)).find(item => item.id === issue.assignee_id)?.name;
       else {
-        const squads = await (workspace.squads ??= remoteJson(connection, "/api/squads", z.array(z.object({ id: z.string(), name: z.string() })), workspace) as NonNullable<RemoteWorkspace["squads"]>);
+        const squads = await workspaceSquads(connection, workspace);
         overview.assigneeName = squads.find(item => item.id === issue.assignee_id)?.name;
       }
     } catch {
@@ -82,16 +39,14 @@ async function issueOverview(connection: AuthenticatedConnection, workspace: Rem
   }
   if (issue.project_id) {
     try {
-      const projects = await (workspace.projects ??= remoteJson(connection, "/api/projects?include_archived=true",
-        z.object({ projects: z.array(z.object({ id: z.string(), title: z.string() })) }), workspace) as NonNullable<RemoteWorkspace["projects"]>);
+      const projects = await workspaceProjects(connection, workspace);
       overview.projectName = projects.projects.find(item => item.id === issue.project_id)?.title;
     } catch { if (previous?.projectId === issue.project_id) overview.projectName = previous.projectName; }
   }
   overview.statusName = issue.status_name;
   if (!overview.statusName && issue.status) {
     try {
-      const statuses = await (workspace.statuses ??= remoteJson(connection, "/api/issue-statuses?include_archived=true",
-        z.object({ statuses: z.array(z.object({ key: z.string(), name: z.string(), category: z.string() })) }), workspace) as NonNullable<RemoteWorkspace["statuses"]>);
+      const statuses = await workspaceStatuses(connection, workspace);
       overview.statusName = statuses.statuses.find(item => item.key === issue.status)?.name;
     } catch { if (previous?.statusKey === issue.status) overview.statusName = previous.statusName; }
   }
@@ -146,48 +101,16 @@ export class SidebarSynchronizer {
 
   private readonly previews = new Map<string, AbortController>();
   private readonly idsSupport = new Map<string, Promise<boolean>>();
-  async workspaces(connection: AuthenticatedConnection, signal?: AbortSignal): Promise<RemoteWorkspace[]> {
-    return await remoteJson(connection, "/api/workspaces", z.array(workspaceSchema), undefined, signal) as RemoteWorkspace[];
-  }
-  private async issuePage(connection: AuthenticatedConnection, workspace: RemoteWorkspace, query: URLSearchParams, signal?: AbortSignal) {
-    const page = await remoteJson(connection, `/api/issues?${query}`, pageSchema, workspace, signal) as z.infer<typeof pageSchema>;
-    if (page.issues.some(issue => issue.workspace_id !== workspace.id)) throw new Error("Issue belongs to a different workspace");
-    return page;
-  }
   private async supportsIds(connection: AuthenticatedConnection, workspace: RemoteWorkspace, signal: AbortSignal): Promise<boolean> {
     const existing = this.idsSupport.get(connection.connectionKey);
     if (existing) return existing;
-    const probe = (async () => {
-      const response = await remoteFetch(connection, "/api/issues?limit=1&offset=0&ids=", { headers: { "X-Workspace-Slug": workspace.slug }, signal });
-      if (!response.ok) {
-        await response.body?.cancel();
-        if (response.status === 400 || response.status === 422) return false;
-        throw new Error(`Multica read failed (HTTP ${response.status})`);
-      }
-      const page = pageSchema.parse(await response.json());
-      if (page.issues.some(issue => issue.workspace_id !== workspace.id)) throw new Error("Issue belongs to a different workspace");
-      return page.total === 0 && page.issues.length === 0;
-    })();
+    const probe = supportsIssueIds(connection, workspace, signal);
     this.idsSupport.set(connection.connectionKey, probe);
     try { return await probe; }
     catch (error) {
       if (this.idsSupport.get(connection.connectionKey) === probe) this.idsSupport.delete(connection.connectionKey);
       throw error;
     }
-  }
-  private async matchingIssues(connection: AuthenticatedConnection, workspace: RemoteWorkspace, rule: TaskRule, version?: number, signal?: AbortSignal, shouldStop?: () => boolean) {
-    const issues: z.infer<typeof remoteIssueSchema>[] = [];
-    let offset = 0;
-    for (;;) {
-      if (shouldStop?.() || (version !== undefined && version !== this.ruleVersion)) return issues;
-      const query = issueQuery(rule, offset);
-      const page = await this.issuePage(connection, workspace, query, signal);
-      issues.push(...page.issues);
-      offset += page.issues.length;
-      if (offset >= page.total) break;
-      if (!page.issues.length) throw new Error("Incomplete issue pagination");
-    }
-    return issues;
   }
   async preview(workspaceId: string, rule: TaskRule, expectedConnectionKey?: string) {
     // Preview bypasses the sync queue and identity-change projection notifications.
@@ -198,7 +121,7 @@ export class SidebarSynchronizer {
       const connection = await this.options.connection(false);
       signal.throwIfAborted();
       if (expectedConnectionKey && connection.connectionKey !== expectedConnectionKey) throw new Error("Connection identity changed");
-      const workspace = (await this.workspaces(connection, signal)).find(item => item.id === workspaceId);
+      const workspace = (await readWorkspaces(connection, signal)).find(item => item.id === workspaceId);
       if (!workspace) throw new Error("Multica workspace unavailable");
       const imported = importedIssues((await this.options.store.read()).connections[connection.connectionKey], workspaceId);
       let total: number, matchingIds: Set<string>;
@@ -207,10 +130,10 @@ export class SidebarSynchronizer {
         const batches: string[][] = [];
         for (let offset = 0; offset < imported.length; offset += 100) batches.push(imported.slice(offset, offset + 100).map(([id]) => id));
         const [count, ...intersections] = await Promise.all([
-          this.issuePage(connection, workspace, query, signal),
+          issuePage(connection, workspace, query, signal),
           ...batches.map(async ids => {
             const query = issueQuery(rule, 0); query.set("ids", ids.join(","));
-            const page = await this.issuePage(connection, workspace, query, signal);
+            const page = await issuePage(connection, workspace, query, signal);
             if (page.issues.some(issue => !ids.includes(issue.id))) throw new Error("Issue outside requested IDs");
             if (new Set(page.issues.map(issue => issue.id)).size !== page.total) throw new Error("Incomplete issue pagination");
             return page;
@@ -219,7 +142,7 @@ export class SidebarSynchronizer {
         total = count.total;
         matchingIds = new Set(intersections.flatMap(page => page.issues.map(issue => issue.id)));
       } else {
-        const issues = await this.matchingIssues(connection, workspace, rule, undefined, signal);
+        const issues = await matchingIssues(connection, workspace, rule, signal);
         matchingIds = new Set(issues.map(issue => issue.id)); total = matchingIds.size;
       }
       signal.throwIfAborted();
@@ -347,7 +270,7 @@ export class SidebarSynchronizer {
       const local = (await this.options.store.read()).connections[connection.connectionKey];
       const known = local && (local.rules[workspaceId] || local.projects[workspaceId]
         || Object.values(local.issues).some(issue => issue.remoteWorkspaceId === workspaceId));
-      if ((enabled || !known) && !(await this.workspaces(connection)).some(item => item.id === workspaceId)) throw new Error("Multica workspace unavailable");
+      if ((enabled || !known) && !(await readWorkspaces(connection)).some(item => item.id === workspaceId)) throw new Error("Multica workspace unavailable");
       await connection.assertCurrent?.();
       await this.options.store.update(state => {
         const rules = connectionState(state, connection.connectionKey).rules;
@@ -361,7 +284,7 @@ export class SidebarSynchronizer {
       if (await this.purgePending()) await this.serialize(() => this.purge());
       const connection = await this.options.connection();
       if (expectedConnectionKey && connection.connectionKey !== expectedConnectionKey) throw new Error("Connection identity changed");
-      if (!(await this.workspaces(connection)).some(item => item.id === workspaceId)) throw new Error("Multica workspace unavailable");
+      if (!(await readWorkspaces(connection)).some(item => item.id === workspaceId)) throw new Error("Multica workspace unavailable");
       await connection.assertCurrent?.();
       await this.options.store.update(state => {
         const rules = connectionState(state, connection.connectionKey).rules;
@@ -475,7 +398,7 @@ export class SidebarSynchronizer {
         for (;;) {
           const page = await host.fetchAgents({ filter: { labels: { [discussionKeys.connection]: connectionKey }, includeArchived: true }, page: { limit: 100, cursor } });
           for (const { agent } of page.entries) {
-            if (agent.provider !== "multica" || agent.labels[discussionKeys.connection] !== connectionKey) continue;
+            if (agent.provider !== providerId || agent.labels[discussionKeys.connection] !== connectionKey) continue;
             discussions.add(agent.id);
             const issueId = agent.labels[discussionKeys.issue], rootId = agent.labels[discussionKeys.discussion];
             if (issueId && rootId) addresses.push({ connectionKey, issueId, rootId });
@@ -489,7 +412,7 @@ export class SidebarSynchronizer {
           for (const agentId of [issue.mainAgentId, ...Object.values(issue.threads).map(thread => thread.agentId)]) {
             if (!agentId || discussions.has(agentId)) continue;
             const agent = (await host.fetchAgent(agentId))?.agent;
-            if (agent?.provider === "multica" && (agent.labels[discussionKeys.connection] === connectionKey || agent.cwd === issue.cwd)) {
+            if (agent?.provider === providerId && (agent.labels[discussionKeys.connection] === connectionKey || agent.cwd === issue.cwd)) {
               discussions.add(agentId);
               const issueId = agent.labels[discussionKeys.issue], rootId = agent.labels[discussionKeys.discussion];
               if (issueId && rootId) addresses.push({ connectionKey, issueId, rootId });
@@ -599,7 +522,7 @@ export class SidebarSynchronizer {
     this.syncState.enabledWorkspaces = enabled.length;
     this.syncState.pendingArchives = pendingIssues.length;
     if (!allEnabled.length && !disabledIssues.length && !disabledProjects.length) { this.events.reconcile(connection, []); rebuild?.progress(0, 0); return; }
-    const workspaces = allEnabled.length ? await this.workspaces(connection) : [];
+    const workspaces = allEnabled.length ? await readWorkspaces(connection) : [];
     const prepared = new Map<string, z.infer<typeof remoteIssueSchema>[]>();
     let completed = 0, total = 0;
     if (rebuild) {
@@ -607,7 +530,7 @@ export class SidebarSynchronizer {
         if (stopped()) return;
         const workspace = workspaces.find(item => item.id === workspaceId);
         if (!workspace) throw new Error("Enabled workspace snapshot unavailable");
-        const issues = await this.matchingIssues(connection, workspace, rule, version, undefined, stopped);
+        const issues = await matchingIssues(connection, workspace, rule, undefined, stopped);
         prepared.set(workspaceId, issues); total += issues.length;
       }
       rebuild.progress(0, total);
@@ -640,7 +563,7 @@ export class SidebarSynchronizer {
           readingWorkspaces++;
           this.syncState.stage = "issues";
           let issues: z.infer<typeof remoteIssueSchema>[];
-          try { issues = prepared.get(workspaceId) ?? await this.matchingIssues(connection, workspace, rule, version, undefined, stopped); }
+          try { issues = prepared.get(workspaceId) ?? await matchingIssues(connection, workspace, rule, undefined, stopped); }
           finally { readingWorkspaces--; this.syncState.stage = readingWorkspaces ? "issues" : "history"; }
           if (stopped()) return;
           // Only the complete successful snapshot is authoritative for rule exits.

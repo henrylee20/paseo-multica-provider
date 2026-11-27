@@ -8,11 +8,12 @@ import { join } from "node:path";
 import type { PluginServerContribution } from "@getpaseo/plugin/server";
 import { multicaSettings, profileList, connectionStatus, syncBootstrap, workspaceList, workspaceEnable, workspaceRule, workspacePreview, workspaceCatalog, taskRuleSchema } from "../shared/contracts.js";
 import { createConnectionResolver, listProfiles, type AuthenticatedConnection, type ConnectionDependencies, type ProfileListCache } from "./connection.js";
-import { StateStore } from "./state.js";
-import { SidebarSynchronizer, importedIssues } from "./sync.js";
+import { StateStore, importedIssues } from "./state.js";
+import { SidebarSynchronizer } from "./sync.js";
 import { connectNativeHost, type NativeHost } from "./native-host.js";
 import { DiscussionMetadata } from "./discussion-metadata.js";
 import { workspaceCatalogs } from "./catalogs.js";
+import { workspaces as readWorkspaces } from "./multica-api.js";
 import { createMulticaProvider } from "./provider.js";
 import { DiscussionLifecycle } from "./discussion-lifecycle.js";
 import { readText } from "./chunked-text.js";
@@ -238,7 +239,7 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     });
     server.handle(workspaceList, async () => {
       const context = await connection(true, true);
-      const workspaces = await synchronizer.workspaces(context);
+      const workspaces = await readWorkspaces(context);
       const local = await synchronizer.purgePending() ? undefined : (await store.read()).connections[context.connectionKey];
       return { connectionKey: context.connectionKey, workspaces: workspaces.map(workspace => ({
         id: workspace.id, name: workspace.name, enabled: local?.rules[workspace.id]?.enabled ?? false,
@@ -253,7 +254,7 @@ export function createServerContribution(dependencies: Partial<ServerDependencie
     server.handle(workspaceCatalog, async input => {
       const authenticated = await connection();
       if (input.connectionKey && input.connectionKey !== authenticated.connectionKey) throw new Error("Connection identity changed");
-      const workspace = (await synchronizer.workspaces(authenticated)).find(item => item.id === input.workspaceId);
+      const workspace = (await readWorkspaces(authenticated)).find(item => item.id === input.workspaceId);
       if (!workspace) throw new Error("Multica workspace unavailable");
       return workspaceCatalogs(authenticated, workspace);
     });

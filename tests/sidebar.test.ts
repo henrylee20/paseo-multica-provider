@@ -55,9 +55,10 @@ async function fixture(syncIntervalMs: number | null = 15_000, homePrefix = "mul
   const workspaceIssues = new Map([["product", issues]]);
   const scopes: Array<{ path: string; slug?: string }> = [];
   const workspaces = [{ id: "remote-workspace", name: "产品开发", slug: "product" }];
+  const heldWorkspaceReads: Array<() => void> = [];
   const heldIssueReads: Array<(() => void) & { slug?: string }> = [];
   const heldRunReads: Array<() => void> = [];
-  const remote = { acknowledgeEvents: true, workspacesStatus: 200, holdIssueReads: false, holdIssueWorkspace: "", holdRunReads: false, disconnectRuns: false, disconnect: false, authStatus: 200, issueStatus: 200, invalidIssuePage: false, nextPageFails: false, failingWorkspace: "", emptyNextPage: false };
+  const remote = { acknowledgeEvents: true, workspacesStatus: 200, holdWorkspaceReads: false, holdIssueReads: false, holdIssueWorkspace: "", holdRunReads: false, disconnectRuns: false, disconnect: false, authStatus: 200, issueStatus: 200, invalidIssuePage: false, nextPageFails: false, failingWorkspace: "", emptyNextPage: false };
   const http = createServer((request, response) => {
     requests.push(request.url!);
     scopes.push({ path: request.url!, slug: request.headers["x-workspace-slug"] as string | undefined });
@@ -91,7 +92,12 @@ async function fixture(syncIntervalMs: number | null = 15_000, homePrefix = "mul
       if (remote.holdRunReads) heldRunReads.push(reply); else reply();
       return;
     }
-    if (url.pathname === "/api/workspaces") response.statusCode = remote.workspacesStatus;
+    if (url.pathname === "/api/workspaces") {
+      response.statusCode = remote.workspacesStatus;
+      const reply = () => response.end(JSON.stringify(workspaces));
+      if (remote.holdWorkspaceReads) heldWorkspaceReads.push(reply); else reply();
+      return;
+    }
     if (url.pathname === "/api/me") response.statusCode = remote.authStatus;
     response.end(JSON.stringify(url.pathname === "/api/me" ? { id: "user-42", name: "Lin" }
       : url.pathname.endsWith("/comments") ? comments.filter(comment => comment.issue_id === decodeURIComponent(url.pathname.split("/")[3]))
@@ -213,7 +219,7 @@ async function fixture(syncIntervalMs: number | null = 15_000, homePrefix = "mul
   }
   const { server, dispose } = start();
   const paseo = { hosts: { list: async () => ({ self: { serverId: "owning-daemon" } }) } } as unknown as PaseoApi;
-  return { server, requests, paseo, native, home, issues, comments, start, dispose, host, connectHost, remote, heldIssueReads, heldRunReads, runResponses, catalogResponses, websocket, websocketRequests, signal, scopes, workspaces, workspaceIssues, runs, effects, creations };
+  return { server, requests, paseo, native, home, issues, comments, start, dispose, host, connectHost, remote, heldWorkspaceReads, heldIssueReads, heldRunReads, runResponses, catalogResponses, websocket, websocketRequests, signal, scopes, workspaces, workspaceIssues, runs, effects, creations };
 }
 
 it("client bootstrap leaves the native sidebar empty until a workspace rule is explicitly enabled", async () => {
@@ -1805,24 +1811,24 @@ it("does not subscribe a workspace disabled while its old workspace snapshot is 
   await f.server.syncRpc(enable, { workspaceId: "remote-workspace", enabled: true }, f.paseo);
   await f.dispose();
   const restarted = f.start();
-  let release!: () => void;
-  const gate = new Promise<void>(resolve => { release = resolve; });
-  const workspaces = SidebarSynchronizer.prototype.workspaces;
-  const held = vi.spyOn(SidebarSynchronizer.prototype, "workspaces").mockImplementation(async function (this: SidebarSynchronizer, connection) {
-    const result = await workspaces.call(this, connection);
-    await gate;
-    return result;
-  });
+  const reads = () => f.requests.filter(path => path === "/api/workspaces").length;
+  const before = reads();
+  f.remote.holdWorkspaceReads = true;
   const reconcile = vi.spyOn(WorkspaceEvents.prototype, "reconcile");
   try {
     await restarted.server.rpc(bootstrap, {}, f.paseo);
-    await expect.poll(() => held.mock.calls.length).toBe(1);
+    await expect.poll(reads).toBe(before + 1);
     expect(await promptly(restarted.server.rpc(workspaceEnable, { workspaceId: "remote-workspace", enabled: false }, f.paseo))).toMatchObject({ status: "saved" });
-    release();
+    f.remote.holdWorkspaceReads = false;
+    for (const reply of f.heldWorkspaceReads.splice(0)) reply();
     expect(await waitForSync(restarted.server, f.paseo)).toMatchObject({ status: "ready" });
     expect(reconcile.mock.calls.length).toBeGreaterThan(0);
     expect(reconcile.mock.calls.every(([, workspaces]) => workspaces.length === 0)).toBe(true);
-  } finally { release(); held.mockRestore(); reconcile.mockRestore(); }
+  } finally {
+    f.remote.holdWorkspaceReads = false;
+    for (const reply of f.heldWorkspaceReads.splice(0)) reply();
+    reconcile.mockRestore();
+  }
 });
 
 async function finishRebuild(server: FakeServer, paseo: PaseoApi, connectionKey: string) {

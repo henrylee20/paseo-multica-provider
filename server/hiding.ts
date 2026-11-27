@@ -2,6 +2,7 @@ import type { PluginHookAgent } from "@getpaseo/plugin/server";
 import { StateStore, type IssueMapping } from "./state.js";
 import { archiveClosedDiscussion, ensureWorkspaceActive, restoreMappedDiscussion, type NativeHost } from "./native-host.js";
 import type { DiscussionMetadata } from "./discussion-metadata.js";
+import { providerId } from "./discussion-identity.js";
 import type { DiscussionLifecycle } from "./discussion-lifecycle.js";
 
 export function discussionAgent(issue: IssueMapping, rootId: string) {
@@ -41,7 +42,7 @@ export async function restoreWorkspacePreservingHidden(host: NativeHost, lifecyc
 export class ManualHiding {
   constructor(private readonly store: StateStore, private readonly lifecycle: DiscussionLifecycle, private readonly metadata: DiscussionMetadata, private readonly purgePending: () => Promise<boolean> = async () => false) {}
   async archivedAgent(agent: PluginHookAgent) {
-    if (agent.provider !== "multica") return;
+    if (agent.provider !== providerId) return;
     await this.store.update(state => {
       for (const connection of Object.values(state.connections)) for (const issue of Object.values(connection.issues)) {
         if (issue.workspaceId !== agent.workspaceId || issue.archiveReason) continue;

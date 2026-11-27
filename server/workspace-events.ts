@@ -1,5 +1,5 @@
 import type { AuthenticatedConnection } from "./connection.js";
-import type { RemoteWorkspace } from "./sync.js";
+import type { RemoteWorkspace } from "./multica-api.js";
 
 export type WorkspaceEvent = { connectionKey: string; workspaceId: string; type: string; payload?: unknown };
 type Subscription = { fingerprint: string; signal?: AbortSignal; close(): void };

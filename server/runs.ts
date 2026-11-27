@@ -1,8 +1,8 @@
 import { z } from "zod";
-import { remoteFetch, type AuthenticatedConnection } from "./connection.js";
+import type { AuthenticatedConnection } from "./connection.js";
 import { StateStore, type IssueMapping } from "./state.js";
 import type { StoredRun } from "./run-state.js";
-import { remoteJson, workspaceAgents, workspaceMembers, type RemoteWorkspace } from "./sync.js";
+import { remoteJson, workspaceAgents, workspaceMembers, type RemoteWorkspace } from "./multica-api.js";
 import { isActiveRun, runMetadataSchema, runStatusSchema } from "../shared/runs.js";
 
 export type RunAddress = { connectionKey: string; issueId: string; rootId: string };
@@ -50,13 +50,10 @@ export class RunSynchronizer {
   }
   /** Rebuild only settles cached candidates; ownership and active snapshots stay untouched. */
   async recheck(connection: AuthenticatedConnection, workspace: RemoteWorkspace, issueId: string, runIds: string[]) {
-    const response = await remoteFetch(connection, `/api/issues/${encodeURIComponent(issueId)}/task-runs?view=timeline`, { headers: { "X-Workspace-Slug": workspace.slug } });
-    if (!response.ok) {
-      await response.body?.cancel();
-      if (response.status === 403 || response.status === 404) return { unavailable: response.status };
-      throw new Error(`Multica read failed (HTTP ${response.status})`);
-    }
-    const parsed = z.array(remoteRunSchema).safeParse(await response.json());
+    // Keep safeParse so invalid snapshots retain the recheck error below.
+    const snapshotSchema = z.unknown().transform(value => z.array(remoteRunSchema).safeParse(value));
+    const parsed = await remoteJson(connection, `/api/issues/${encodeURIComponent(issueId)}/task-runs?view=timeline`, snapshotSchema, workspace, undefined, [403, 404]) as z.output<typeof snapshotSchema> | { unavailable: number };
+    if ("unavailable" in parsed) return { unavailable: parsed.unavailable };
     if (!parsed.success || parsed.data.some(run => run.issue_id !== issueId) || new Set(parsed.data.map(run => run.id)).size !== parsed.data.length)
       throw new Error("远端 Run 快照格式无效，请重新复核。");
     await connection.assertCurrent?.();
