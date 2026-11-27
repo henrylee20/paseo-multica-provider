@@ -510,6 +510,28 @@ it.each(["agents", "workspaces"])("cyclic %s pagination keeps ownership and can 
   expect(JSON.parse(await f.persisted())).toMatchObject({ owner: { profile: "office" }, connections: {} });
 });
 
+it("profile purge leaves all discussions intact when workspace discovery fails and completes cleanup after retry", async () => {
+  const f = await fixture();
+  const agentIds = f.agents.map(agent => agent.id), project = f.projects[0], workspace = f.workspaces[0];
+  const list = f.host.fetchWorkspaces.getMockImplementation()!;
+  f.host.fetchWorkspaces.mockImplementation(async input => ({ ...await list(input), pageInfo: { hasMore: true, nextCursor: "cycle" } }));
+  await f.login(1, f.primary.apiUrl, "office");
+  f.server.setSettings(multicaSettings.id, { profile: "office" });
+  expect(await waitForSync(f.server, f.paseo)).toMatchObject({ status: "unavailable", stage: "purging" });
+  expect(f.host.deleteAgent).not.toHaveBeenCalled();
+  expect(f.host.archiveWorkspace).not.toHaveBeenCalled();
+  expect(f.host.removeProject).not.toHaveBeenCalled();
+  expect(f.agents.map(agent => agent.id)).toEqual(agentIds);
+  expect(JSON.parse(await f.persisted()).owner).toEqual({ profile: "" });
+  f.host.fetchWorkspaces.mockImplementation(list);
+  expect(await f.server.syncRpc(syncBootstrap, {}, f.paseo)).toEqual({ status: "ready" });
+  expect(f.host.deleteAgent.mock.calls.map(([id]) => id)).toEqual(agentIds);
+  expect(f.host.archiveWorkspace).toHaveBeenCalledExactlyOnceWith(workspace.id);
+  expect(f.host.removeProject).toHaveBeenCalledExactlyOnceWith(project.projectId);
+  expect(f.agents).toEqual([]);
+  expect(JSON.parse(await f.persisted())).toMatchObject({ owner: { profile: "office" }, connections: {} });
+});
+
 it("scans every native page, deletes only matching Multica discussions and holds them throughout deletion", async () => {
   const f = await fixture();
   const original = f.address();

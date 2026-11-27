@@ -392,7 +392,7 @@ export class SidebarSynchronizer {
       await this.assertOwningDaemon();
       const host = this.host;
       const discussions = new Set<string>();
-      const addresses: Array<{ connectionKey: string; issueId: string; rootId: string }> = [];
+      const addresses = new Map<string, { connectionKey: string; issueId: string; rootId: string }>();
       const knownWorkspaces = new Set(Object.values(state.connections).flatMap(conn => Object.values(conn.issues).map(issue => issue.workspaceId)));
       for (const [connectionKey, conn] of Object.entries(state.connections)) {
         let cursor: string | undefined;
@@ -404,30 +404,31 @@ export class SidebarSynchronizer {
             discussions.add(agent.id);
             if (agent.workspaceId) knownWorkspaces.add(agent.workspaceId);
             const issueId = agent.labels[discussionKeys.issue], rootId = agent.labels[discussionKeys.discussion];
-            if (issueId && rootId) addresses.push({ connectionKey, issueId, rootId });
+            if (issueId && rootId) addresses.set(agent.id, { connectionKey, issueId, rootId });
           }
           if (!page.pageInfo.hasMore) break;
           const next = page.pageInfo.nextCursor;
           if (!next || cursors.has(next)) throw new Error("Incomplete native discussion pagination");
           cursors.add(next); cursor = next;
         }
-        for (const issue of Object.values(conn.issues)) {
-          for (const agentId of [issue.mainAgentId, ...Object.values(issue.threads).map(thread => thread.agentId)]) {
-            if (!agentId || discussions.has(agentId)) continue;
+        for (const [issueId, issue] of Object.entries(conn.issues)) {
+          const mapped = [{ rootId: "main", agentId: issue.mainAgentId },
+            ...Object.entries(issue.threads).map(([rootId, thread]) => ({ rootId, agentId: thread.agentId }))];
+          for (const { rootId, agentId } of mapped) {
+            if (!agentId) continue;
+            if (discussions.has(agentId)) {
+              if (!addresses.has(agentId)) addresses.set(agentId, { connectionKey, issueId, rootId });
+              continue;
+            }
             const agent = (await host.fetchAgent(agentId))?.agent;
             if (agent?.provider === providerId && (agent.labels[discussionKeys.connection] === connectionKey || agent.cwd === issue.cwd)) {
               discussions.add(agentId);
               if (agent.workspaceId) knownWorkspaces.add(agent.workspaceId);
-              const issueId = agent.labels[discussionKeys.issue], rootId = agent.labels[discussionKeys.discussion];
-              if (issueId && rootId) addresses.push({ connectionKey, issueId, rootId });
+              addresses.set(agentId, { connectionKey, issueId, rootId });
             }
           }
         }
       }
-      releases.push(await this.options.lifecycle.hold(addresses));
-      for (const agentId of discussions) await host.deleteAgent(agentId);
-
-      const projects = (await host.listProjects()).projects;
       const root = resolve(this.options.store.directory, "placeholders"), prefix = root + sep;
       const fetchActiveWorkspaces = async () => {
         const active: Awaited<ReturnType<NativeHost["fetchWorkspaces"]>>["entries"] = [];
@@ -452,10 +453,14 @@ export class SidebarSynchronizer {
           candidates.set(issue.projectId, { cwd: project?.cwd ?? resolve(issue.cwd, ".."), name: project?.name ?? issue.title });
         }
       }
+      const projects = (await host.listProjects()).projects;
       for (const project of projects) if (project.projectKind === "non_git" && project.projectRootPath.startsWith(prefix)) {
         candidates.set(project.projectId, { cwd: project.projectRootPath,
           name: candidates.get(project.projectId)?.name ?? project.projectDisplayName ?? project.projectId });
       }
+      releases.push(await this.options.lifecycle.hold([...addresses.values()]));
+      for (const agentId of discussions) await host.deleteAgent(agentId);
+
       const retainedProjects: Array<{ name: string; cwd: string }> = [];
       for (const workspace of active) if (knownWorkspaces.has(workspace.id)) {
         const result = await host.archiveWorkspace(workspace.id);
